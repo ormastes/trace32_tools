@@ -266,4 +266,4 @@ fn get_function_group(db: CmmFuncDB, group: text) -> [CmmFuncInfo]:
 fn starts_with(haystack: text, prefix: text) -> bool:
     if prefix.len() > haystack.len():
         return false
-    haystack.slice(0, prefix.len()) == prefix
+    haystack.starts_with(prefix)

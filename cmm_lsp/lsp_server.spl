@@ -14,20 +14,22 @@
 export start_lsp_server
 
 use lsp_json.{JsonPair, json_object, json_string, json_number, json_null}
-use lsp_json.{json_get_string, json_get_int, json_get_object}
+use lsp_json.{json_get_string, json_get_object, json_get_raw}
 use lsp_document.{DocumentStore}
 use lsp_handlers.{handle_initialize, handle_completion, handle_hover}
 use lsp_handlers.{handle_definition, handle_document_symbol}
 use lsp_handlers.{handle_did_open, handle_did_change, handle_did_close}
-use lsp_handlers.{build_diagnostics_notification}
+use lsp_handlers.{build_diagnostics_notification, build_empty_diagnostics_notification}
 use cmm_commands.{build_command_db, CmmCommandDB}
 use cmm_functions.{build_function_db, CmmFuncDB}
 
 extern fn input() -> text
 extern fn stdin_read_char() -> text
-extern fn stdout_write(data: text)
-extern fn stdout_flush()
 extern fn to_int(s: text) -> i64
+
+var _store = DocumentStore(documents: [])
+var _cmd_db = build_command_db()
+var _func_db = build_function_db()
 
 # ---------------------------------------------------------------------------
 # Stdio helpers
@@ -117,9 +119,8 @@ fn read_message() -> text?:
 fn write_message(json_body: text):
     val length = json_body.len()
     val header = "Content-Length: {length}\r\n\r\n"
-    stdout_write(header)
-    stdout_write(json_body)
-    stdout_flush()
+    print_raw(header)
+    print_raw(json_body)
 
 # ---------------------------------------------------------------------------
 # Message dispatch
@@ -127,67 +128,76 @@ fn write_message(json_body: text):
 
 # Process a JSON-RPC message and return optional response JSON.
 # Notifications (no id) do not require a response.
-fn process_message(json_text: text, store: DocumentStore, cmd_db: CmmCommandDB, func_db: CmmFuncDB) -> text?:
+fn process_message(json_text: text) -> text?:
     val method = json_get_string(json_text, "method")
     if not method.?:
         return nil
     val method_name = method ?? ""
-    val msg_id = json_get_int(json_text, "id")
+    val msg_id = json_get_raw(json_text, "id")
     val params = json_get_object(json_text, "params") ?? "{}"
 
     # --- Requests (have an id, expect a response) ---
     if method_name == "initialize":
         val result = handle_initialize(params)
-        val id_val = msg_id ?? 0
-        return make_response(id_val, result)
+        if msg_id.?:
+            return make_response(msg_id ?? "null", result)
+        return nil
 
     if method_name == "shutdown":
-        val id_val = msg_id ?? 0
-        return make_response(id_val, json_null())
+        if msg_id.?:
+            return make_response(msg_id ?? "null", json_null())
+        return nil
 
     if method_name == "textDocument/completion":
-        val result = handle_completion(params, store, cmd_db, func_db)
-        val id_val = msg_id ?? 0
-        return make_response(id_val, result)
+        val result = handle_completion(params, _store, _cmd_db, _func_db)
+        if msg_id.?:
+            return make_response(msg_id ?? "null", result)
+        return nil
 
     if method_name == "textDocument/hover":
-        val result = handle_hover(params, store, cmd_db, func_db)
-        val id_val = msg_id ?? 0
-        return make_response(id_val, result)
+        val result = handle_hover(params, _store, _cmd_db, _func_db)
+        if msg_id.?:
+            return make_response(msg_id ?? "null", result)
+        return nil
 
     if method_name == "textDocument/definition":
-        val result = handle_definition(params, store)
-        val id_val = msg_id ?? 0
-        return make_response(id_val, result)
+        val result = handle_definition(params, _store)
+        if msg_id.?:
+            return make_response(msg_id ?? "null", result)
+        return nil
 
     if method_name == "textDocument/documentSymbol":
-        val result = handle_document_symbol(params, store)
-        val id_val = msg_id ?? 0
-        return make_response(id_val, result)
+        val result = handle_document_symbol(params, _store)
+        if msg_id.?:
+            return make_response(msg_id ?? "null", result)
+        return nil
 
     # --- Notifications (no id, no response expected) ---
     if method_name == "textDocument/didOpen":
-        handle_did_open(params, store)
+        _store = handle_did_open(params, _store)
         # Publish diagnostics after open
         val uri = get_text_document_uri(params)
         if uri != "":
-            val diag_notif = build_diagnostics_notification(uri, store)
+            val diag_notif = build_diagnostics_notification(uri, _store)
             if diag_notif.?:
                 return diag_notif
         return nil
 
     if method_name == "textDocument/didChange":
-        handle_did_change(params, store)
+        _store = handle_did_change(params, _store)
         # Publish diagnostics after change
         val uri = get_text_document_uri(params)
         if uri != "":
-            val diag_notif = build_diagnostics_notification(uri, store)
+            val diag_notif = build_diagnostics_notification(uri, _store)
             if diag_notif.?:
                 return diag_notif
         return nil
 
     if method_name == "textDocument/didClose":
-        handle_did_close(params, store)
+        val uri = get_text_document_uri(params)
+        _store = handle_did_close(params, _store)
+        if uri != "":
+            return build_empty_diagnostics_notification(uri)
         return nil
 
     if method_name == "initialized":
@@ -199,8 +209,7 @@ fn process_message(json_text: text, store: DocumentStore, cmd_db: CmmCommandDB, 
 
     # Unknown method — if it has an id, return method-not-found error
     if msg_id.?:
-        val id_val = msg_id ?? 0
-        return make_error_response(id_val, -32601, "Method not found: " + method_name)
+        return make_error_response(msg_id ?? "null", -32601, "Method not found: " + method_name)
 
     nil
 
@@ -214,15 +223,15 @@ fn get_text_document_uri(params: text) -> text:
     ""
 
 # Build a JSON-RPC success response.
-fn make_response(id: i64, result: text) -> text:
+fn make_response(id_json: text, result: text) -> text:
     var pairs: [JsonPair] = []
     pairs.push(JsonPair(key: "jsonrpc", value: json_string("2.0")))
-    pairs.push(JsonPair(key: "id", value: json_number(id)))
+    pairs.push(JsonPair(key: "id", value: id_json))
     pairs.push(JsonPair(key: "result", value: result))
     json_object(pairs)
 
 # Build a JSON-RPC error response.
-fn make_error_response(id: i64, code: i64, message: text) -> text:
+fn make_error_response(id_json: text, code: i64, message: text) -> text:
     var err_pairs: [JsonPair] = []
     err_pairs.push(JsonPair(key: "code", value: json_number(code)))
     err_pairs.push(JsonPair(key: "message", value: json_string(message)))
@@ -230,7 +239,7 @@ fn make_error_response(id: i64, code: i64, message: text) -> text:
 
     var pairs: [JsonPair] = []
     pairs.push(JsonPair(key: "jsonrpc", value: json_string("2.0")))
-    pairs.push(JsonPair(key: "id", value: json_number(id)))
+    pairs.push(JsonPair(key: "id", value: id_json))
     pairs.push(JsonPair(key: "error", value: err_obj))
     json_object(pairs)
 
@@ -239,9 +248,9 @@ fn make_error_response(id: i64, code: i64, message: text) -> text:
 # ---------------------------------------------------------------------------
 
 fn start_lsp_server():
-    var store = DocumentStore(documents: [])
-    val cmd_db = build_command_db()
-    val func_db = build_function_db()
+    _store = DocumentStore(documents: [])
+    _cmd_db = build_command_db()
+    _func_db = build_function_db()
     var running = true
 
     while running:
@@ -251,7 +260,7 @@ fn start_lsp_server():
             val method = json_get_string(json_text, "method")
             val method_name = method ?? ""
 
-            val response = process_message(json_text, store, cmd_db, func_db)
+            val response = process_message(json_text)
             if response.?:
                 val resp_text = response ?? ""
                 write_message(resp_text)
@@ -262,3 +271,6 @@ fn start_lsp_server():
         else:
             # EOF on stdin — shut down
             running = false
+
+fn main():
+    start_lsp_server()

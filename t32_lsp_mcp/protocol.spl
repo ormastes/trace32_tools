@@ -1,27 +1,58 @@
+#![allow(unnamed_duplicate_typed_args)]
 # T32 LSP MCP Protocol — I/O, initialize, tools list, schemas
 # Protocol: MCP 2025-06-18 (Content-Length framing + JSON-Lines auto-detect)
+
+extern fn stdin_read_char() -> text
+
+fn lsp_read_line() -> text:
+    var result = ""
+    while true:
+        val ch = stdin_read_char()
+        if ch == "":
+            if result == "":
+                return ""
+            return result
+        result = result + ch
+        if ch == "\n":
+            return result
+
+fn lsp_read_chars(count: i64) -> text:
+    var result = ""
+    var i = 0
+    while i < count:
+        val ch = stdin_read_char()
+        if ch == "":
+            break
+        result = result + ch
+        i = i + 1
+    return result
 
 # --- Protocol I/O ---
 
 fn lsp_read_stdin_message() -> text:
-    var line = input()
-    if line == "":
-        return ""
-    if line.ends_with("\r"):
-        line = line.substring(0, line.len() - 1)
-    if line.starts_with(lsp_LB()):
-        LSP_USE_JSON_LINES = true
-        return line
-    if line.starts_with("Content-Length:"):
-        var len_str = line.replace("Content-Length:", "")
-        len_str = len_str.trim()
-        val content_length = int(len_str)
-        if content_length == 0:
+    var content_length = 0
+    while true:
+        var line = lsp_read_line()
+        if line == "":
+            if content_length > 0:
+                break
             return ""
-        input()
-        var body = input()
-        return body
-    ""
+        if line == "\r\n" or line == "\r" or line == "\n":
+            if content_length > 0:
+                break
+            continue
+        if line.ends_with("\r"):
+            line = lsp_substr(line, 0, line.len() - 1)
+        if line.starts_with(lsp_LB()):
+            LSP_USE_JSON_LINES = true
+            return line
+        if line.starts_with("Content-Length:"):
+            var len_str = line.replace("Content-Length:", "")
+            len_str = len_str.trim()
+            content_length = int(len_str)
+    if content_length <= 0:
+        return ""
+    return lsp_read_chars(content_length)
 
 fn lsp_write_stdout_message(body: text):
     if LSP_USE_JSON_LINES:
@@ -126,5 +157,5 @@ fn lsp_make_tool_schema(name: text, description: text) -> text:
         lsp_jp("description", lsp_js(description)),
         lsp_jp("inputSchema", schema)
     )
-    tool_obj = tool_obj.substring(0, tool_obj.len() - 1) + "," + lsp_jp("annotations", annotations) + lsp_RB()
+    tool_obj = lsp_substr(tool_obj, 0, tool_obj.len() - 1) + "," + lsp_jp("annotations", annotations) + lsp_RB()
     tool_obj

@@ -1,0 +1,494 @@
+#![allow(unnamed_duplicate_typed_args)]
+# T32 MCP — Lifecycle tool handlers
+# Handles: t32_launch, t32_shutdown, t32_status
+#
+# Manage PowerView process lifecycle:
+#   - Launch: spawn PowerView (headless via xvfb-run or visible)
+#   - Shutdown: graceful QUIT via t32rem, fallback to kill
+#   - Status: installation discovery, process listing, probe status
+
+# --- Module state for launched processes ---
+
+class McpT32Launched:
+    pid: i64
+    port: i64
+    architecture: text
+    config_path: text
+    headless: bool
+
+var MCP_T32_LAUNCHED: [McpT32Launched] = []
+
+# --- T32 binary discovery ---
+
+fn t32_arch_to_binary(arch: text) -> text:
+    val a = arch.to_lower()
+    if a == "arm" or a == "arm32" or a == "cortex-m" or a == "cortex-a" or a == "":
+        return "t32marm"
+    elif a == "arm64" or a == "aarch64":
+        return "t32marm64"
+    elif a == "tricore" or a == "tc3xx" or a == "tc":
+        return "t32mtc"
+    elif a == "ppc" or a == "powerpc":
+        return "t32mppc"
+    elif a == "riscv" or a == "risc-v":
+        return "t32mriscv"
+    elif a == "x86" or a == "x86_64":
+        return "t32mx86"
+    "t32marm"
+
+fn t32_find_powerview_binary(arch: text) -> text:
+    val bin_name = t32_arch_to_binary(arch)
+    # Check T32MEM env
+    val t32mem = rt_env_get("T32MEM") ?? ""
+    if t32mem != "":
+        val p = t32mem + "/bin/pc_linux64/" + bin_name
+        if rt_file_exists(p):
+            return p
+    # Standard path
+    val std_path = "/opt/t32/bin/pc_linux64/" + bin_name
+    if rt_file_exists(std_path):
+        return std_path
+    # PATH search
+    var stdout = ""
+    var stderr = ""
+    var rc: i64 = 0
+    (stdout, stderr, rc) = rt_process_run("/bin/sh", ["-c", "which " + bin_name + " 2>/dev/null"])
+    if rc == 0 and stdout.trim() != "":
+        return stdout.trim()
+    ""
+
+fn t32_find_install_dir() -> text:
+    val t32mem = rt_env_get("T32MEM") ?? ""
+    if t32mem != "":
+        return t32mem
+    if rt_file_exists("/opt/t32"):
+        return "/opt/t32"
+    ""
+
+fn t32_ping_port(backend: text, port: i64) -> bool:
+    var stdout = ""
+    var stderr = ""
+    var rc: i64 = 0
+    (stdout, stderr, rc) = rt_process_run("/bin/sh", ["-c", backend + " localhost port=" + str(port) + " PING < /dev/null 2>/dev/null"])
+    rc == 0
+
+fn t32_check_xvfb() -> bool:
+    var stdout = ""
+    var stderr = ""
+    var rc: i64 = 0
+    (stdout, stderr, rc) = rt_process_run("/bin/sh", ["-c", "which xvfb-run 2>/dev/null"])
+    rc == 0
+
+# --- t32_launch ---
+
+fn handle_t32_launch(id: text, body: text) -> text:
+    val arch_param = t32_extract_field(body, "architecture")
+    val config_param = t32_extract_field(body, "config")
+    val headless_param = t32_extract_field(body, "headless")
+    val port_param = t32_extract_field(body, "port")
+    val startup_param = t32_extract_field(body, "startup_script")
+
+    # Defaults
+    var architecture = "arm"
+    if arch_param != "":
+        architecture = arch_param
+    var headless = true
+    if headless_param == "false":
+        headless = false
+    var port: i64 = 20000
+    if port_param != "":
+        port = int(port_param)
+        if port < 1024 or port > 65535:
+            port = 20000
+    var config_path = "config/t32/t32_stm_headless.t32"
+    if config_param != "":
+        config_path = config_param
+
+    # Check if T32 already running on this port
+    val backend = t32_find_backend()
+    if backend != "":
+        if t32_ping_port(backend, port):
+            var r = t32_LB()
+            r = r + t32_jp("status", t32_js("already_running"))
+            r = r + "," + t32_jp("port", str(port))
+            r = r + "," + t32_jp("message", t32_js("PowerView already running on port " + str(port) + ". Use t32_session_open to connect."))
+            r = r + t32_RB()
+            return t32_make_tool_result(id, r)
+
+    # Find PowerView binary
+    val pv_binary = t32_find_powerview_binary(architecture)
+    if pv_binary == "":
+        return t32_make_tool_error(id, -32000, "PowerView binary not found for architecture '" + architecture + "'. Check T32 installation or set T32MEM env var.")
+
+    # Check config exists
+    if not rt_file_exists(config_path):
+        return t32_make_tool_error(id, -32000, "Config file not found: " + config_path)
+
+    # Check xvfb if headless
+    if headless and not t32_check_xvfb():
+        return t32_make_tool_error(id, -32000, "xvfb-run not found. Install xvfb for headless mode: sudo apt install xvfb")
+
+    # Build and execute launch command
+    val safe_binary = t32_shell_escape(pv_binary)
+    val safe_config = t32_shell_escape(config_path)
+    var launch_cmd = ""
+    if headless:
+        launch_cmd = "nohup xvfb-run -a " + safe_binary + " -c " + safe_config + " >/dev/null 2>&1 & echo $!"
+    else:
+        launch_cmd = "nohup " + safe_binary + " -c " + safe_config + " >/dev/null 2>&1 & echo $!"
+
+    var spawn_out = ""
+    var spawn_err = ""
+    var spawn_rc: i64 = 0
+    (spawn_out, spawn_err, spawn_rc) = rt_process_run("/bin/sh", ["-c", launch_cmd])
+    if spawn_rc != 0:
+        return t32_make_tool_error(id, -32000, "Failed to launch PowerView: " + spawn_err.trim())
+
+    val pid_str = spawn_out.trim()
+    var pid: i64 = 0
+    if pid_str != "":
+        pid = int(pid_str)
+
+    # Track launched process
+    val launched = McpT32Launched(
+        pid: pid,
+        port: port,
+        architecture: architecture,
+        config_path: config_path,
+        headless: headless
+    )
+    MCP_T32_LAUNCHED = MCP_T32_LAUNCHED + [launched]
+
+    # Poll for readiness (up to 15 seconds, 500ms intervals)
+    var ready = false
+    if backend != "":
+        var polls: i64 = 0
+        while polls < 30:
+            if t32_ping_port(backend, port):
+                ready = true
+                break
+            # Sleep 500ms
+            var sl_out = ""
+            var sl_err = ""
+            var sl_rc: i64 = 0
+            (sl_out, sl_err, sl_rc) = rt_process_run("/bin/sh", ["-c", "sleep 0.5"])
+            polls = polls + 1
+
+    # Auto-register as MCP session
+    var session_id = ""
+    if ready:
+        session_id = "t32_" + str(MCP_T32_NEXT_SESSION_ID)
+        MCP_T32_NEXT_SESSION_ID = MCP_T32_NEXT_SESSION_ID + 1
+        val session = McpT32Session(
+            id: session_id,
+            host: "localhost",
+            port: port,
+            intercom_name: session_id,
+            architecture: architecture,
+            connected: true,
+            cores: []
+        )
+        MCP_T32_SESSIONS = MCP_T32_SESSIONS + [session]
+        MCP_T32_CURRENT_SESSION = session_id
+        t32_add_history("launch " + architecture + " port=" + str(port), "ok", session_id, "")
+
+    # Run startup script if provided and ready
+    if ready and startup_param != "":
+        if rt_file_exists(startup_param):
+            val s_opt = t32_find_current_session()
+            match s_opt:
+                Some(s):
+                    t32_run_remote(s, "DO " + startup_param)
+                nil:
+                    pass_dn
+
+    # Build response
+    var status_str = "launched"
+    if not ready:
+        status_str = "launched_not_ready"
+    var r = t32_LB()
+    r = r + t32_jp("status", t32_js(status_str))
+    r = r + "," + t32_jp("pid", str(pid))
+    r = r + "," + t32_jp("port", str(port))
+    if session_id != "":
+        r = r + "," + t32_jp("session_id", t32_js(session_id))
+    var hl_str = "true"
+    if not headless:
+        hl_str = "false"
+    r = r + "," + t32_jp("headless", hl_str)
+    r = r + "," + t32_jp("binary", t32_js(pv_binary))
+    r = r + "," + t32_jp("config", t32_js(config_path))
+    var msg = "PowerView launched"
+    if headless:
+        msg = msg + " (headless, port " + str(port) + ")"
+    else:
+        msg = msg + " (visible, port " + str(port) + ")"
+    if ready and session_id != "":
+        msg = msg + ". Session auto-registered: " + session_id
+    elif not ready:
+        msg = msg + ". WARNING: not responding to PING after 15s. May still be starting."
+    r = r + "," + t32_jp("message", t32_js(msg))
+    r = r + t32_RB()
+    t32_make_tool_result(id, r)
+
+# --- t32_shutdown ---
+
+fn handle_t32_shutdown(id: text, body: text) -> text:
+    val port_param = t32_extract_field(body, "port")
+    val force_param = t32_extract_field(body, "force")
+
+    if port_param == "":
+        return t32_make_tool_error(id, -32602, "Missing required parameter: port. Usage: t32_shutdown(port: \"20000\")")
+
+    val port: i64 = int(port_param)
+    var force = false
+    if force_param == "true":
+        force = true
+
+    # Find tracked PID for this port
+    var found_pid: i64 = 0
+    var found_tracked = false
+    for lp in MCP_T32_LAUNCHED:
+        if lp.port == port:
+            found_pid = lp.pid
+            found_tracked = true
+
+    # Try graceful shutdown via t32rem QUIT
+    val backend = t32_find_backend()
+    var quit_ok = false
+    if backend != "":
+        var quit_out = ""
+        var quit_err = ""
+        var quit_rc: i64 = 0
+        (quit_out, quit_err, quit_rc) = rt_process_run("/bin/sh", ["-c", backend + " localhost port=" + str(port) + " QUIT < /dev/null 2>/dev/null"])
+        if quit_rc == 0:
+            quit_ok = true
+
+    # If graceful failed and force=true, kill the process
+    var method = "graceful"
+    if not quit_ok and force and found_tracked and found_pid > 0:
+        var kill_out = ""
+        var kill_err = ""
+        var kill_rc: i64 = 0
+        (kill_out, kill_err, kill_rc) = rt_process_run("/bin/sh", ["-c", "kill " + str(found_pid) + " 2>/dev/null"])
+        if kill_rc == 0:
+            method = "forced"
+            quit_ok = true
+        else:
+            # Try SIGKILL
+            (kill_out, kill_err, kill_rc) = rt_process_run("/bin/sh", ["-c", "kill -9 " + str(found_pid) + " 2>/dev/null"])
+            if kill_rc == 0:
+                method = "killed"
+                quit_ok = true
+
+    if not quit_ok:
+        var err_msg = "Failed to shutdown PowerView on port " + str(port) + ". Process may not be running or QUIT command failed."
+        if not force:
+            err_msg = err_msg + " Try with force: \"true\"."
+        return t32_make_tool_error(id, -32000, err_msg)
+
+    # Wait briefly for process to exit
+    var wait_out = ""
+    var wait_err = ""
+    var wait_rc: i64 = 0
+    (wait_out, wait_err, wait_rc) = rt_process_run("/bin/sh", ["-c", "sleep 1"])
+
+    # Clean up launched process tracking
+    var kept_launched: [McpT32Launched] = []
+    for lp in MCP_T32_LAUNCHED:
+        if lp.port != port:
+            kept_launched = kept_launched + [lp]
+    MCP_T32_LAUNCHED = kept_launched
+
+    # Clean up any MCP sessions on this port
+    var kept_sessions: [McpT32Session] = []
+    var removed_session = ""
+    for s in MCP_T32_SESSIONS:
+        if s.port == port:
+            removed_session = s.id
+        else:
+            kept_sessions = kept_sessions + [s]
+    MCP_T32_SESSIONS = kept_sessions
+    if MCP_T32_CURRENT_SESSION == removed_session:
+        MCP_T32_CURRENT_SESSION = ""
+
+    t32_add_history("shutdown port=" + str(port), method, removed_session, "")
+
+    var r = t32_LB()
+    r = r + t32_jp("status", t32_js("shutdown"))
+    r = r + "," + t32_jp("port", str(port))
+    r = r + "," + t32_jp("method", t32_js(method))
+    if removed_session != "":
+        r = r + "," + t32_jp("session_removed", t32_js(removed_session))
+    r = r + "," + t32_jp("message", t32_js("PowerView on port " + str(port) + " terminated via " + method + "."))
+    r = r + t32_RB()
+    t32_make_tool_result(id, r)
+
+# --- t32_status ---
+
+fn handle_t32_status(id: text, body: text) -> text:
+    var r = t32_LB()
+
+    # --- Installation info ---
+    val install_dir = t32_find_install_dir()
+    var install = t32_LB()
+    install = install + t32_jp("t32_dir", t32_js(install_dir))
+
+    # t32rem backend
+    val t32rem_path = t32_find_backend()
+    install = install + "," + t32_jp("t32rem", t32_js(t32rem_path))
+    install = install + "," + t32_jp("backend_type", t32_js(t32_get_backend_type()))
+
+    # Available PowerView binaries
+    var bin_arr = t32_SB_L()
+    if install_dir != "":
+        var bin_out = ""
+        var bin_err = ""
+        var bin_rc: i64 = 0
+        (bin_out, bin_err, bin_rc) = rt_process_run("/bin/sh", ["-c", "ls " + t32_shell_escape(install_dir) + "/bin/pc_linux64/t32m* 2>/dev/null | head -20"])
+        if bin_rc == 0 and bin_out.trim() != "":
+            var first_bin = true
+            var bin_lines = bin_out.trim()
+            # Parse line by line
+            var bi: i64 = 0
+            var current_line = ""
+            while bi < bin_lines.len():
+                val ch = t32_char_at(bin_lines, bi)
+                if ch == "\n":
+                    val trimmed = current_line.trim()
+                    if trimmed != "":
+                        if not first_bin:
+                            bin_arr = bin_arr + ","
+                        first_bin = false
+                        bin_arr = bin_arr + t32_js(trimmed)
+                    current_line = ""
+                else:
+                    current_line = current_line + ch
+                bi = bi + 1
+            # Last line (no trailing newline)
+            val last_trimmed = current_line.trim()
+            if last_trimmed != "":
+                if not first_bin:
+                    bin_arr = bin_arr + ","
+                bin_arr = bin_arr + t32_js(last_trimmed)
+    bin_arr = bin_arr + t32_SB_R()
+    install = install + "," + t32_jp("binaries", bin_arr)
+
+    # xvfb availability
+    var xvfb_str = "false"
+    if t32_check_xvfb():
+        xvfb_str = "true"
+    install = install + "," + t32_jp("xvfb_available", xvfb_str)
+    install = install + t32_RB()
+    r = r + t32_jp("installation", install)
+
+    # --- Running T32 processes ---
+    var proc_out = ""
+    var proc_err = ""
+    var proc_rc: i64 = 0
+    (proc_out, proc_err, proc_rc) = rt_process_run("/bin/sh", ["-c", "pgrep -a 't32m' 2>/dev/null || true"])
+    var proc_arr = t32_SB_L()
+    if proc_out.trim() != "":
+        var first_proc = true
+        var pi: i64 = 0
+        var pcurrent = ""
+        val ptxt = proc_out.trim()
+        while pi < ptxt.len():
+            val pch = t32_char_at(ptxt, pi)
+            if pch == "\n":
+                val ptrimmed = pcurrent.trim()
+                if ptrimmed != "":
+                    if not first_proc:
+                        proc_arr = proc_arr + ","
+                    first_proc = false
+                    proc_arr = proc_arr + t32_js(ptrimmed)
+                pcurrent = ""
+            else:
+                pcurrent = pcurrent + pch
+            pi = pi + 1
+        val plast = pcurrent.trim()
+        if plast != "":
+            if not first_proc:
+                proc_arr = proc_arr + ","
+            proc_arr = proc_arr + t32_js(plast)
+    proc_arr = proc_arr + t32_SB_R()
+    r = r + "," + t32_jp("processes", proc_arr)
+
+    # --- MCP-launched processes ---
+    var launched_arr = t32_SB_L()
+    var first_launched = true
+    for lp in MCP_T32_LAUNCHED:
+        if not first_launched:
+            launched_arr = launched_arr + ","
+        first_launched = false
+        var lobj = t32_LB()
+        lobj = lobj + t32_jp("pid", str(lp.pid))
+        lobj = lobj + "," + t32_jp("port", str(lp.port))
+        lobj = lobj + "," + t32_jp("architecture", t32_js(lp.architecture))
+        lobj = lobj + "," + t32_jp("config", t32_js(lp.config_path))
+        var lh_str = "true"
+        if not lp.headless:
+            lh_str = "false"
+        lobj = lobj + "," + t32_jp("headless", lh_str)
+        lobj = lobj + t32_RB()
+        launched_arr = launched_arr + lobj
+    launched_arr = launched_arr + t32_SB_R()
+    r = r + "," + t32_jp("launched", launched_arr)
+
+    # --- USB probe status ---
+    var probe_out = ""
+    var probe_err = ""
+    var probe_rc: i64 = 0
+    (probe_out, probe_err, probe_rc) = rt_process_run("/bin/sh", ["-c", "ls /dev/lauterbach/trace32/ 2>/dev/null || true"])
+    var probe = t32_LB()
+    var usb_connected = "false"
+    if probe_out.trim() != "":
+        usb_connected = "true"
+    probe = probe + t32_jp("usb_connected", usb_connected)
+    if probe_out.trim() != "":
+        val probe_trimmed = probe_out.trim()
+        val probe_devices = probe_trimmed.replace("\n", ", ")
+        probe = probe + "," + t32_jp("devices", t32_js(probe_devices))
+    probe = probe + t32_RB()
+    r = r + "," + t32_jp("probe", probe)
+
+    # --- Config files ---
+    var cfg_out = ""
+    var cfg_err = ""
+    var cfg_rc: i64 = 0
+    (cfg_out, cfg_err, cfg_rc) = rt_process_run("/bin/sh", ["-c", "ls config/t32/*.t32 2>/dev/null || true"])
+    var cfg_arr = t32_SB_L()
+    if cfg_out.trim() != "":
+        var first_cfg = true
+        var ci: i64 = 0
+        var ccurrent = ""
+        val ctxt = cfg_out.trim()
+        while ci < ctxt.len():
+            val cch = t32_char_at(ctxt, ci)
+            if cch == "\n":
+                val ctrimmed = ccurrent.trim()
+                if ctrimmed != "":
+                    if not first_cfg:
+                        cfg_arr = cfg_arr + ","
+                    first_cfg = false
+                    cfg_arr = cfg_arr + t32_js(ctrimmed)
+                ccurrent = ""
+            else:
+                ccurrent = ccurrent + cch
+            ci = ci + 1
+        val clast = ccurrent.trim()
+        if clast != "":
+            if not first_cfg:
+                cfg_arr = cfg_arr + ","
+            cfg_arr = cfg_arr + t32_js(clast)
+    cfg_arr = cfg_arr + t32_SB_R()
+    r = r + "," + t32_jp("configs", cfg_arr)
+
+    # --- Active sessions ---
+    var sess_count: i64 = 0
+    for _s in MCP_T32_SESSIONS:
+        sess_count = sess_count + 1
+    r = r + "," + t32_jp("active_sessions", str(sess_count))
+
+    r = r + t32_RB()
+    t32_make_tool_result(id, r)

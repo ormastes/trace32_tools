@@ -1,0 +1,324 @@
+#![allow(unnamed_duplicate_typed_args)]
+# T32 MCP — Headless setup and AREA buffer tool handlers
+# Handles: t32_setup_headless, t32_area_read, t32_cmm_commands
+
+use app.t32_cli.error_codes.{t32_err_no_session_mcp}
+
+# ---------------------------------------------------------------------------
+# Headless setup
+# ---------------------------------------------------------------------------
+
+fn handle_t32_setup_headless(id: text, body: text) -> text:
+    val area_name_arg = t32_extract_field(body, "area_name")
+    var area_name = area_name_arg
+    if area_name == "":
+        area_name = "MCP_OUT"
+    # Validate area name — alphanumeric + underscore only
+    if not t32_validate_identifier(area_name):
+        return t32_make_tool_error(id, -32602, "Invalid area_name: must be alphanumeric/underscore only. Got: " + area_name)
+    val semihost_str = t32_extract_field(body, "semihost")
+    var semihost = true
+    if semihost_str == "false":
+        semihost = false
+    val error_handler_str = t32_extract_field(body, "error_handler")
+    var error_handler = true
+    if error_handler_str == "false":
+        error_handler = false
+    val session_opt = t32_find_current_session()
+    match session_opt:
+        nil: return t32_make_tool_error(id, -32602, t32_err_no_session_mcp())
+        Some(session):
+            # Send SCREEN.OFF
+            var stdout1 = ""
+            var rc1: i64 = 0
+            (stdout1, rc1) = t32_run_remote(session, "SCREEN.OFF")
+            # Create AREA
+            var stdout2 = ""
+            var rc2: i64 = 0
+            (stdout2, rc2) = t32_run_remote(session, "AREA.Create " + area_name)
+            # Select AREA
+            var stdout3 = ""
+            var rc3: i64 = 0
+            (stdout3, rc3) = t32_run_remote(session, "AREA.Select " + area_name)
+            # Enable semihosting (default on)
+            if semihost:
+                var stdout_sh = ""
+                var rc_sh: i64 = 0
+                (stdout_sh, rc_sh) = t32_run_remote(session, "SYStem.Option SemiHost ON")
+            # Optional error handler
+            if error_handler:
+                var stdout4 = ""
+                var rc4: i64 = 0
+                (stdout4, rc4) = t32_run_remote(session, "ON ERROR GOSUB mcp_error_handler")
+            MCP_T32_AREA_READY = true
+            MCP_T32_AREA_NAME = area_name
+            t32_add_history("setup_headless area=" + area_name + " semihost=" + str(semihost), "ok", session.id, MCP_T32_CURRENT_CORE)
+            var r = t32_LB()
+            r = r + t32_jp("area_name", t32_js(area_name))
+            r = r + "," + t32_jp("screen", t32_js("off"))
+            r = r + "," + t32_jp("semihost", t32_js(str(semihost)))
+            r = r + "," + t32_jp("error_handler", t32_js(str(error_handler)))
+            r = r + "," + t32_jp("status", t32_js("ok"))
+            r = r + t32_RB()
+            return t32_make_tool_result(id, r)
+
+# ---------------------------------------------------------------------------
+# AREA buffer read
+# ---------------------------------------------------------------------------
+
+fn handle_t32_area_read(id: text, body: text) -> text:
+    val area_name_arg = t32_extract_field(body, "area_name")
+    var area_name = area_name_arg
+    if area_name == "":
+        area_name = MCP_T32_AREA_NAME
+    if area_name == "":
+        area_name = "MCP_OUT"
+    # Validate area name
+    if not t32_validate_identifier(area_name):
+        return t32_make_tool_error(id, -32602, "Invalid area_name: must be alphanumeric/underscore only. Got: " + area_name)
+    val clear_str = t32_extract_field(body, "clear")
+    var do_clear = false
+    if clear_str == "true":
+        do_clear = true
+    val session_opt = t32_find_current_session()
+    match session_opt:
+        nil: return t32_make_tool_error(id, -32602, t32_err_no_session_mcp())
+        Some(session):
+            # Read AREA via WinPrint
+            var stdout = ""
+            var rc: i64 = 0
+            (stdout, rc) = t32_run_remote(session, "WinPrint.AREA " + area_name)
+            # Optionally clear
+            if do_clear:
+                var clear_out = ""
+                var clear_rc: i64 = 0
+                (clear_out, clear_rc) = t32_run_remote(session, "AREA.CLEAR " + area_name)
+            t32_add_history("area_read " + area_name, stdout.trim(), session.id, MCP_T32_CURRENT_CORE)
+            var r = t32_LB()
+            r = r + t32_jp("area_name", t32_js(area_name))
+            r = r + "," + t32_jp("content", t32_js(stdout.trim()))
+            r = r + "," + t32_jp("cleared", t32_js(str(do_clear)))
+            r = r + t32_RB()
+            return t32_make_tool_result(id, r)
+
+# ---------------------------------------------------------------------------
+# CMM command database query
+# ---------------------------------------------------------------------------
+
+fn handle_t32_cmm_commands(id: text, body: text) -> text:
+    val group = t32_extract_field(body, "group")
+    val search = t32_extract_field(body, "search")
+    val db = t32_build_cmm_command_db()
+    var filtered: [text] = []
+    for cmd in db:
+        # cmd format: "full_name|short_name|group|description"
+        var parts: [text] = []
+        var current: [text] = []
+        for ch in cmd:
+            if ch == "|":
+                parts.push(current.join(""))
+                current = []
+            else:
+                current.push(ch)
+        parts.push(current.join(""))
+        var cmd_name = ""
+        var cmd_short = ""
+        var cmd_group = ""
+        var cmd_desc = ""
+        var pidx = 0
+        for p in parts:
+            if pidx == 0:
+                cmd_name = p
+            elif pidx == 1:
+                cmd_short = p
+            elif pidx == 2:
+                cmd_group = p
+            elif pidx == 3:
+                cmd_desc = p
+            pidx = pidx + 1
+        # Filter by group
+        if group != "":
+            if t32_to_lower(cmd_group) != t32_to_lower(group):
+                continue
+        # Filter by search
+        if search != "":
+            val lower_search = t32_to_lower(search)
+            val lower_name = t32_to_lower(cmd_name)
+            val lower_desc = t32_to_lower(cmd_desc)
+            if not t32_text_contains(lower_name, lower_search) and not t32_text_contains(lower_desc, lower_search):
+                continue
+        # Build JSON entry
+        var obj = t32_LB()
+        obj = obj + t32_jp("name", t32_js(cmd_name))
+        obj = obj + "," + t32_jp("short_name", t32_js(cmd_short))
+        obj = obj + "," + t32_jp("group", t32_js(cmd_group))
+        obj = obj + "," + t32_jp("description", t32_js(cmd_desc))
+        obj = obj + t32_RB()
+        filtered.push(obj)
+    val arr = t32_SB_L() + filtered.join(",") + t32_SB_R()
+    var r = t32_LB()
+    var count: i64 = 0
+    for _f in filtered:
+        count = count + 1
+    r = r + t32_jp("count", str(count))
+    r = r + "," + t32_jp("commands", arr)
+    r = r + t32_RB()
+    t32_make_tool_result(id, r)
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+fn t32_to_lower(s: text) -> text:
+    var result = ""
+    var i = 0
+    while i < s.len():
+        val ch = s[i:i + 1]
+        if ch >= "A" and ch <= "Z":
+            result = result + ch.to_lower()
+        else:
+            result = result + ch
+        i = i + 1
+    result
+
+fn t32_text_contains(hay: text, needle: text) -> bool:
+    if needle.len() > hay.len():
+        return false
+    var i = 0
+    while i <= hay.len() - needle.len():
+        if hay[i:i + needle.len()] == needle:
+            return true
+        i = i + 1
+    false
+
+# Build a flat command database as pipe-delimited strings
+# "full_name|short_name|group|description"
+fn t32_build_cmm_command_db() -> [text]:
+    var cmds: [text] = []
+    # Data commands
+    cmds.push("Data.dump|D.D|Data|Display hex dump of memory")
+    cmds.push("Data.List|D.L|Data|Display disassembly listing")
+    cmds.push("Data.LOAD|D.LOAD|Data|Load program file")
+    cmds.push("Data.LOAD.auto|D.LOAD.auto|Data|Auto-detect format and load")
+    cmds.push("Data.SAVE.Binary|D.SAVE.B|Data|Save memory as binary file")
+    cmds.push("Data.Set|D.S|Data|Set memory values")
+    cmds.push("Data.Test|D.Test|Data|Test memory range")
+    cmds.push("Data.Print|D.Print|Data|Print memory to file")
+    cmds.push("Data.Compare|D.Compare|Data|Compare memory ranges")
+    cmds.push("Data.Assemble|D.A|Data|Assemble instruction at address")
+    cmds.push("Data.LOAD.Elf|D.LOAD.Elf|Data|Load ELF format file")
+    cmds.push("Data.LOAD.Binary|D.LOAD.B|Data|Load binary file")
+    # SYStem commands
+    cmds.push("SYStem.CPU|SYS.CPU|SYStem|Set CPU type")
+    cmds.push("SYStem.Mode|SYS.Mode|SYStem|Set system mode")
+    cmds.push("SYStem.Up|SYS.Up|SYStem|Start debug session")
+    cmds.push("SYStem.Down|SYS.Down|SYStem|Stop debug session")
+    cmds.push("SYStem.RESet|SYS.RESet|SYStem|Reset system")
+    cmds.push("SYStem.Option|SYS.Option|SYStem|Set system option")
+    cmds.push("SYStem.MemAccess|SYS.MA|SYStem|Set memory access mode")
+    # FLASH commands
+    cmds.push("FLASH.RESet|FLASH.RESet|FLASH|Reset flash configuration")
+    cmds.push("FLASH.Create|FLASH.Create|FLASH|Declare flash area")
+    cmds.push("FLASH.AUTO|FLASH.AUTO|FLASH|Auto program flash")
+    cmds.push("FLASH.Erase|FLASH.Erase|FLASH|Erase flash area")
+    cmds.push("FLASH.Program|FLASH.Program|FLASH|Program flash")
+    cmds.push("FLASH.ReProgram|FLASH.ReProgram|FLASH|Reprogram flash")
+    cmds.push("FLASH.CLocK|FLASH.CLocK|FLASH|Set flash clock")
+    cmds.push("FLASH.TARGET|FLASH.TARGET|FLASH|Set flash target program")
+    # Break commands
+    cmds.push("Break.Set|B.S|Break|Set breakpoint")
+    cmds.push("Break.Delete|B.D|Break|Delete breakpoint")
+    cmds.push("Break.List|B.L|Break|List breakpoints")
+    cmds.push("Break.RESet|B.RESet|Break|Reset all breakpoints")
+    # Register commands
+    cmds.push("Register.Set|R.S|Register|Set register value")
+    cmds.push("Register.view|R|Register|View registers")
+    # Var commands
+    cmds.push("Var.View|V.V|Var|View variable")
+    cmds.push("Var.AddWatch|V.AddWatch|Var|Add watch expression")
+    cmds.push("Var.WRITE|V.WRITE|Var|Write variable to file")
+    cmds.push("Var.Frame|V.Frame|Var|Show variable frame")
+    # Trace commands
+    cmds.push("Trace.LOAD|T.LOAD|Trace|Load trace data")
+    cmds.push("Trace.List|T.L|Trace|List trace records")
+    cmds.push("Trace.METHOD|Trace.METHOD|Trace|Set trace method")
+    cmds.push("Trace.SIZE|Trace.SIZE|Trace|Set trace buffer size")
+    cmds.push("Trace.Init|Trace.Init|Trace|Initialize trace")
+    # Execution commands
+    cmds.push("Go|Go|Execution|Start target execution")
+    cmds.push("Step|Step|Execution|Single step")
+    cmds.push("Step.Over|Step.Over|Execution|Step over function call")
+    # AREA commands
+    cmds.push("AREA.Create|AREA.Create|AREA|Create AREA window")
+    cmds.push("AREA.Select|AREA.Select|AREA|Select AREA for I/O")
+    cmds.push("AREA.view|AREA.view|AREA|Open AREA window")
+    cmds.push("AREA.RESet|AREA.RESet|AREA|Reset AREA system")
+    cmds.push("AREA.CLEAR|AREA.CLEAR|AREA|Clear AREA window contents")
+    # Screen commands
+    cmds.push("SCREEN.OFF|SCREEN.OFF|Screen|Disable screen updates")
+    cmds.push("SCREEN.ON|SCREEN.ON|Screen|Enable screen updates")
+    cmds.push("SCREEN.DUMP|SCREEN.DUMP|Screen|Dump screen to file")
+    # Window commands
+    cmds.push("WINPOS|WINPOS|Window|Set window position and size")
+    cmds.push("WinCLEAR|WinCLEAR|Window|Clear window")
+    # Control flow
+    cmds.push("IF|IF|Control|Conditional branch")
+    cmds.push("ELSE|ELSE|Control|Else branch")
+    cmds.push("WHILE|WHILE|Control|While loop")
+    cmds.push("GOTO|GOTO|Control|Jump to label")
+    cmds.push("GOSUB|GOSUB|Control|Call subroutine")
+    cmds.push("RETURN|RETURN|Control|Return from subroutine")
+    cmds.push("DO|DO|Control|Call CMM script")
+    cmds.push("ENDDO|ENDDO|Control|End script / return value")
+    cmds.push("WAIT|WAIT|Control|Wait for condition or time")
+    cmds.push("CONTinue|CONT|Control|Resume target")
+    cmds.push("STOP|STOP|Control|Halt execution")
+    # Declaration
+    cmds.push("LOCAL|LOCAL|Declaration|Declare local macro")
+    cmds.push("GLOBAL|GLOBAL|Declaration|Declare global macro")
+    cmds.push("PRIVATE|PRIVATE|Declaration|Declare private macro")
+    cmds.push("ENTRY|ENTRY|Declaration|Bind subroutine parameters")
+    # I/O
+    cmds.push("OPEN|OPEN|IO|Open file channel")
+    cmds.push("CLOSE|CLOSE|IO|Close file channel")
+    cmds.push("READ|READ|IO|Read from file channel")
+    cmds.push("WRITE|WRITE|IO|Write to file channel")
+    cmds.push("PRINT|PRINT|IO|Print to output area")
+    cmds.push("ECHO|ECHO|IO|Echo text to output")
+    # Event
+    cmds.push("ON|ON|Event|Set event handler")
+    cmds.push("GLOBALON|GLOBALON|Event|Set global event handler")
+    # Misc
+    cmds.push("EVAL|EVAL|Misc|Evaluate expression")
+    cmds.push("ChDir|CD|Misc|Change directory")
+    cmds.push("TYPE|TYPE|Misc|Display file content")
+    cmds.push("STOre|STOre|Misc|Store settings")
+    # CORE
+    cmds.push("CORE.ASSIGN|CORE.ASSIGN|Core|Assign cores for multi-core debug")
+    # TASK
+    cmds.push("TASK.CONFIG|TASK.CONFIG|TASK|Configure RTOS awareness")
+    cmds.push("TASK.List|TASK.List|TASK|List RTOS tasks/threads")
+    # MMU
+    cmds.push("MMU.FORMAT|MMU.FORMAT|MMU|Set MMU page table format")
+    cmds.push("MMU.SCAN|MMU.SCAN|MMU|Scan MMU page table")
+    # JTAG
+    cmds.push("JTAG.PROGRAM.JAM|JTAG.PROGRAM.JAM|JTAG|Program via JTAG JAM file")
+    # TPIU
+    cmds.push("TPIU.PortSize|TPIU.PortSize|TPIU|Set TPIU port size")
+    cmds.push("TPIU.PortMode|TPIU.PortMode|TPIU|Set TPIU port mode")
+    # Terminal
+    cmds.push("TERM.METHOD|TERM.METHOD|Terminal|Set terminal method")
+    cmds.push("TERM.Out|TERM.Out|Terminal|Write to terminal output")
+    # Dialog
+    cmds.push("DIALOG.OK|DIALOG.OK|DIALOG|Show OK dialog box")
+    cmds.push("DIALOG.YESNO|DIALOG.YESNO|DIALOG|Show Yes/No dialog")
+    # PRinTer (for file output)
+    cmds.push("PRinTer.FILE|PRinTer.FILE|Printer|Redirect output to file")
+    cmds.push("PRinTer.OPEN|PRinTer.OPEN|Printer|Open printer channel")
+    cmds.push("PRinTer.CLOSE|PRinTer.CLOSE|Printer|Close printer channel")
+    # WinPrint (for text capture)
+    cmds.push("WinPrint.AREA|WinPrint.AREA|WinPrint|Print AREA buffer content")
+    cmds.push("WinPrint.Register.view|WinPrint.Register.view|WinPrint|Print register view")
+    cmds.push("WinPrint.Data.dump|WinPrint.Data.dump|WinPrint|Print memory dump")
+    cmds.push("WinPrint.Break.List|WinPrint.Break.List|WinPrint|Print breakpoint list")
+    cmds

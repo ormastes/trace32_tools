@@ -1,27 +1,88 @@
+#![allow(unnamed_duplicate_typed_args)]
 # T32 MCP Protocol — I/O, initialize, tools list, schemas
 # Protocol: MCP 2025-06-18 (Content-Length framing + JSON-Lines auto-detect)
+
+extern fn stdin_read_char() -> text
+extern fn stderr_write(data: text) -> i64
+extern fn stderr_flush() -> i64
+
+fn t32_stderr(message: text):
+    stderr_write("[t32-mcp] " + message + "\n")
+    stderr_flush()
+
+fn t32_read_line() -> text:
+    var result = ""
+    while true:
+        val ch = stdin_read_char()
+        if ch == "":
+            if result == "":
+                return ""
+            return result
+        result = result + ch
+        if ch == "\n":
+            return result
+
+fn t32_read_chars(count: i64) -> text:
+    var result = ""
+    var i = 0
+    while i < count:
+        val ch = stdin_read_char()
+        if ch == "":
+            break
+        result = result + ch
+        i = i + 1
+    return result
 
 # --- Protocol I/O ---
 
 fn t32_read_stdin_message() -> text:
-    var line = input()
-    if line == "":
-        return ""
-    if line.ends_with("\r"):
-        line = line.substring(0, line.len() - 1)
-    if line.starts_with(t32_LB()):
-        T32_USE_JSON_LINES = true
-        return line
-    if line.starts_with("Content-Length:"):
-        var len_str = line.replace("Content-Length:", "")
-        len_str = len_str.trim()
-        val content_length = int(len_str)
-        if content_length == 0:
+    var content_length = 0
+    var saw_header = false
+    while true:
+        var line = t32_read_line()
+        if line == "":
+            if content_length > 0:
+                t32_stderr("startup/protocol error: EOF while reading message body, expected " + str(content_length) + " bytes")
+                break
+            if saw_header:
+                t32_stderr("startup/protocol error: EOF before Content-Length header completed")
             return ""
-        input()
-        var body = input()
-        return body
-    ""
+        if line == "\r\n" or line == "\r" or line == "\n":
+            if content_length > 0:
+                break
+            continue
+        if line.ends_with("\r"):
+            line = t32_substr(line, 0, line.len() - 1)
+        if line.starts_with(t32_LB()):
+            T32_USE_JSON_LINES = true
+            return line
+        saw_header = true
+        if line.starts_with("Content-Length:"):
+            var len_str = line.replace("Content-Length:", "")
+            len_str = len_str.trim()
+            if not t32_is_ascii_digits(len_str):
+                t32_stderr("startup/protocol error: invalid Content-Length header '" + len_str + "'")
+                return ""
+            content_length = int(len_str)
+        elif line.starts_with("Content-Type:"):
+            continue
+        else:
+            t32_stderr("startup/protocol warning: ignoring unexpected header line '" + line + "'")
+    if content_length <= 0:
+        t32_stderr("startup/protocol error: no valid Content-Length found")
+        return ""
+    return t32_read_chars(content_length)
+
+fn t32_is_ascii_digits(s: text) -> bool:
+    if s == "":
+        return false
+    var i = 0
+    while i < s.len():
+        val ch = t32_char_at(s, i)
+        if ch < "0" or ch > "9":
+            return false
+        i = i + 1
+    true
 
 fn t32_write_stdout_message(body: text):
     if T32_USE_JSON_LINES:
@@ -46,7 +107,7 @@ fn t32_make_init_response(id: text) -> text:
     val server_info = t32_jo3(
         t32_jp("name", t32_js(T32_SERVER_NAME)),
         t32_jp("version", t32_js(T32_SERVER_VERSION)),
-        t32_jp("instructions", t32_js("TRACE32 debug session control via MCP protocol. 20 tools for session management, window capture, action invocation, and field manipulation."))
+        t32_jp("instructions", t32_js("TRACE32 debug session control via MCP protocol. 26 tools for lifecycle management, session management, window capture, action invocation, field manipulation, headless setup, and command database."))
     )
     val result = t32_jo3(
         t32_jp("protocolVersion", t32_js("2025-06-18")),
@@ -56,7 +117,7 @@ fn t32_make_init_response(id: text) -> text:
     T32_INIT_CACHE = result
     t32_make_json_result(id, result)
 
-# --- Tools list (20 T32 tools) ---
+# --- Tools list (26 T32 tools) ---
 
 fn t32_make_tools_list(id: text) -> text:
     if T32_TOOLS_CACHE != "":
@@ -84,11 +145,21 @@ fn t32_make_tools_list(id: text) -> text:
 
     # Action/Field tools (6)
     tool_parts.push(t32_make_tool_schema("t32_action_invoke", "Invoke a window action"))
-    tool_parts.push(t32_make_tool_schema("t32_field_get", "Get field value from session state"))
-    tool_parts.push(t32_make_tool_schema("t32_field_set", "Set field value in session state"))
+    tool_parts.push(t32_make_tool_schema("t32_field_get", "Get field value via T32 EVAL (pc, sp, register.NAME, var.NAME, memory.ADDR)"))
+    tool_parts.push(t32_make_tool_schema("t32_field_set", "Set field value via T32 command (pc, sp, register.NAME, var.NAME, memory.ADDR)"))
     tool_parts.push(t32_make_tool_schema("t32_history_tail", "Get recent command history"))
     tool_parts.push(t32_make_tool_schema("t32_resources_list", "List available TRACE32 MCP resources"))
     tool_parts.push(t32_make_tool_schema("t32_resource_read", "Read a specific TRACE32 resource by URI"))
+
+    # Headless/AREA/Command tools (3)
+    tool_parts.push(t32_make_tool_schema("t32_setup_headless", "One-shot headless setup: SCREEN.OFF + AREA.Create + AREA.Select + SYStem.Option SemiHost ON + error handler"))
+    tool_parts.push(t32_make_tool_schema("t32_area_read", "Read AREA buffer content via WinPrint.AREA, optionally clear"))
+    tool_parts.push(t32_make_tool_schema("t32_cmm_commands", "Query PRACTICE command database (120+ commands) by group or search"))
+
+    # Lifecycle tools (3)
+    tool_parts.push(t32_make_tool_schema("t32_launch", "Launch PowerView process (headless via xvfb-run or visible), auto-register as session"))
+    tool_parts.push(t32_make_tool_schema("t32_shutdown", "Graceful PowerView shutdown via QUIT, optional force kill"))
+    tool_parts.push(t32_make_tool_schema("t32_status", "T32 installation discovery, running processes, USB probe status, available configs"))
 
     val tools = t32_SB_L() + tool_parts.join(",") + t32_SB_R()
     val result = t32_jo1(t32_jp("tools", tools))
@@ -137,6 +208,7 @@ fn t32_make_tool_schema(name: text, description: text) -> text:
         p = p + t32_jp("script", t32_jo2(t32_jp("type", t32_js("string")), t32_jp("description", t32_js("CMM script path or inline script"))))
         p = p + "," + t32_jp("wait", t32_jo2(t32_jp("type", t32_js("string")), t32_jp("description", t32_js("If 'true', poll PRACTICE.STATE() until script completes"))))
         p = p + "," + t32_jp("timeout", t32_jo2(t32_jp("type", t32_js("string")), t32_jp("description", t32_js("Poll timeout in ms (default 30000)"))))
+        p = p + "," + t32_jp("capture_area", t32_jo2(t32_jp("type", t32_js("string")), t32_jp("description", t32_js("If 'true', capture AREA buffer output after script completes"))))
         p = p + "," + t32_jp("session_id", t32_jo2(t32_jp("type", t32_js("string")), t32_jp("description", t32_js("Session ID (optional, uses current)"))))
         p = p + t32_RB()
         props = p
@@ -191,6 +263,43 @@ fn t32_make_tool_schema(name: text, description: text) -> text:
         props = t32_jo1(t32_jp("uri", t32_jo2(t32_jp("type", t32_js("string")), t32_jp("description", t32_js("Resource URI to read")))))
         req = "[" + t32_js("uri") + "]"
 
+    # Headless/AREA/Command tools
+    elif name == "t32_setup_headless":
+        props = t32_jo3(
+            t32_jp("area_name", t32_jo2(t32_jp("type", t32_js("string")), t32_jp("description", t32_js("AREA buffer name (default MCP_OUT)")))),
+            t32_jp("semihost", t32_jo2(t32_jp("type", t32_js("string")), t32_jp("description", t32_js("If 'false', skip SYStem.Option SemiHost ON (default true)")))),
+            t32_jp("error_handler", t32_jo2(t32_jp("type", t32_js("string")), t32_jp("description", t32_js("If 'false', skip ON ERROR handler setup (default true)"))))
+        )
+    elif name == "t32_area_read":
+        props = t32_jo2(
+            t32_jp("area_name", t32_jo2(t32_jp("type", t32_js("string")), t32_jp("description", t32_js("AREA buffer name (default MCP_OUT)")))),
+            t32_jp("clear", t32_jo2(t32_jp("type", t32_js("string")), t32_jp("description", t32_js("If 'true', clear AREA after reading"))))
+        )
+    elif name == "t32_cmm_commands":
+        props = t32_jo2(
+            t32_jp("group", t32_jo2(t32_jp("type", t32_js("string")), t32_jp("description", t32_js("Filter by command group (e.g. Data, Break, FLASH)")))),
+            t32_jp("search", t32_jo2(t32_jp("type", t32_js("string")), t32_jp("description", t32_js("Search substring in command name or description"))))
+        )
+
+    # Lifecycle tools
+    elif name == "t32_launch":
+        var p = t32_LB()
+        p = p + t32_jp("architecture", t32_jo2(t32_jp("type", t32_js("string")), t32_jp("description", t32_js("Target architecture: arm, arm64, tricore, ppc, riscv, x86 (default: arm)"))))
+        p = p + "," + t32_jp("config", t32_jo2(t32_jp("type", t32_js("string")), t32_jp("description", t32_js("T32 config file path (default: config/t32/t32_stm_headless.t32)"))))
+        p = p + "," + t32_jp("headless", t32_jo2(t32_jp("type", t32_js("string")), t32_jp("description", t32_js("Launch headless via xvfb-run: true/false (default: true)"))))
+        p = p + "," + t32_jp("port", t32_jo2(t32_jp("type", t32_js("string")), t32_jp("description", t32_js("RCL NETASSIST port (default: 20000)"))))
+        p = p + "," + t32_jp("startup_script", t32_jo2(t32_jp("type", t32_js("string")), t32_jp("description", t32_js("CMM script to run after launch (optional)"))))
+        p = p + t32_RB()
+        props = p
+    elif name == "t32_shutdown":
+        props = t32_jo2(
+            t32_jp("port", t32_jo2(t32_jp("type", t32_js("string")), t32_jp("description", t32_js("Port of PowerView instance to shutdown")))),
+            t32_jp("force", t32_jo2(t32_jp("type", t32_js("string")), t32_jp("description", t32_js("If 'true', force-kill if QUIT fails (default: false)"))))
+        )
+        req = "[" + t32_js("port") + "]"
+    elif name == "t32_status":
+        props = t32_LB() + t32_RB()
+
     var schema = t32_LB()
     schema = schema + t32_jp("type", t32_js("object"))
     schema = schema + "," + t32_jp("properties", props)
@@ -205,12 +314,15 @@ fn t32_make_tool_schema(name: text, description: text) -> text:
         name == "t32_window_list" or name == "t32_window_capture" or
         name == "t32_window_describe" or name == "t32_field_get" or
         name == "t32_history_tail" or name == "t32_eval" or
-        name == "t32_resources_list" or name == "t32_resource_read"):
+        name == "t32_resources_list" or name == "t32_resource_read" or
+        name == "t32_area_read" or name == "t32_cmm_commands" or
+        name == "t32_status"):
         read_only = "true"
-    if name == "t32_session_close":
+    if name == "t32_session_close" or name == "t32_shutdown":
         destructive = "true"
     if (name == "t32_cmd_run" or name == "t32_cmm_run" or
-        name == "t32_action_invoke"):
+        name == "t32_action_invoke" or name == "t32_launch" or
+        name == "t32_shutdown"):
         idempotent = "false"
 
     var annotations = t32_LB()
@@ -225,5 +337,5 @@ fn t32_make_tool_schema(name: text, description: text) -> text:
         t32_jp("description", t32_js(description)),
         t32_jp("inputSchema", schema)
     )
-    tool_obj = tool_obj.substring(0, tool_obj.len() - 1) + "," + t32_jp("annotations", annotations) + t32_RB()
+    tool_obj = t32_substr(tool_obj, 0, tool_obj.len() - 1) + "," + t32_jp("annotations", annotations) + t32_RB()
     tool_obj

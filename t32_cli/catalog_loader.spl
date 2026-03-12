@@ -1,3 +1,4 @@
+#![allow(unnamed_duplicate_typed_args)]
 # T32 CLI — SDN catalog loading
 # Parses SDN catalog files for windows, actions, and fields
 
@@ -71,6 +72,16 @@ fn load_field_catalog(path: text) -> [T32Field]:
 
     fields
 
+# Helper: extract substring from start to end using for-ch-in pattern
+fn cl_substr(s: text, start: i64, end_pos: i64) -> text:
+    var result = ""
+    var idx = 0
+    for ch in s:
+        if idx >= start and idx < end_pos:
+            result = result + ch
+        idx = idx + 1
+    result
+
 # Generic SDN block parser
 # Reads a file and parses entries of the form:
 #   <keyword> <key>
@@ -103,7 +114,7 @@ fn parse_sdn_entries(path: text, entry_keyword: text) -> [Dict<text, text>]:
             if in_entry:
                 entries.push(current)
             current = {}
-            val key = trimmed.slice(prefix.len(), trimmed.len())
+            val key = cl_substr(trimmed, prefix.len(), trimmed.len())
             current["__key"] = trim(key)
             in_entry = true
             continue
@@ -112,10 +123,10 @@ fn parse_sdn_entries(path: text, entry_keyword: text) -> [Dict<text, text>]:
         if (in_entry and line.starts_with(" ")):
             val colon_pos = find_char(trimmed, ':')
             if colon_pos > 0:
-                val prop_key = trim(trimmed.slice(0, colon_pos))
+                val prop_key = trim(cl_substr(trimmed, 0, colon_pos))
                 var prop_val = ""
                 if colon_pos + 1 < trimmed.len():
-                    prop_val = trim(trimmed.slice(colon_pos + 1, trimmed.len()))
+                    prop_val = trim(cl_substr(trimmed, colon_pos + 1, trimmed.len()))
                 current[prop_key] = prop_val
 
     # Save last entry
@@ -133,46 +144,17 @@ fn entry_get(dict: Dict<text, text>, key: text) -> text:
 
 # Helper: split text into lines
 fn split_lines(content: text) -> [text]:
-    var lines: [text] = []
-    var start = 0
-    var i = 0
-    while i < content.len():
-        if content[i] == '\n':
-            val line = content.slice(start, i)
-            lines.push(line)
-            start = i + 1
-        i = i + 1
-    # Last line (no trailing newline)
-    if start < content.len():
-        val line = content.slice(start, content.len())
-        lines.push(line)
-    lines
+    content.split("\n")
 
 # Helper: find first occurrence of a character
 fn find_char(s: text, ch: text) -> i64:
     var i = 0
-    while i < s.len():
-        if s[i] == ch:
+    for c in s:
+        if c == ch:
             return i
         i = i + 1
     -1
 
 # Helper: trim leading and trailing whitespace
 fn trim(s: text) -> text:
-    var start = 0
-    while start < s.len():
-        val ch = s[start]
-        if (ch != ' ' and ch != '\t' and ch != '\r'):
-            break
-        start = start + 1
-
-    var end_idx = s.len()
-    while end_idx > start:
-        val ch = s[end_idx - 1]
-        if (ch != ' ' and ch != '\t' and ch != '\r'):
-            break
-        end_idx = end_idx - 1
-
-    if start >= end_idx:
-        return ""
-    s.slice(start, end_idx)
+    s.trim()

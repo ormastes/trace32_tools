@@ -3,7 +3,7 @@
 
 extern fn rt_stdin_read_line() -> text
 
-use app.t32_cli.session.{CLI_CURRENT_SESSION, CLI_CURRENT_CORE, cli_sessions_list, cli_session_use, cli_session_info}
+use app.t32_cli.session.{CLI_CURRENT_SESSION, CLI_CURRENT_CORE, cli_sessions_list, cli_session_use, cli_session_info, cli_current_session_info, cli_run_t32rem}
 use app.t32_cli.core_context.{cli_cores_list, cli_core_select}
 use app.t32_cli.window_model.{cli_windows_list, cli_window_open, cli_window_show, cli_window_describe}
 use app.t32_cli.catalog_loader.{load_catalogs}
@@ -161,21 +161,52 @@ fn shell_set(args: [text]) -> text:
     val found = catalogs.find_field(field_key)
     match found:
         Some(f):
-            "Set {field_key} = {value} (type: {f.value_type}, scope: {f.scope})"
+            val session_opt = cli_current_session_info()
+            match session_opt:
+                nil: return "Error: no active session. Use 'use <id>' first."
+                Some(session):
+                    # Build set command based on field type
+                    var set_cmd = ""
+                    if field_key.starts_with("register."):
+                        val reg_name = field_key[9..]
+                        set_cmd = "Register.Set {reg_name} {value}"
+                    elif field_key.starts_with("var."):
+                        val var_name = field_key[4..]
+                        set_cmd = "Var.Set {var_name} = {value}"
+                    elif field_key.starts_with("memory."):
+                        val addr = field_key[7..]
+                        set_cmd = "Data.Set {addr} %Long {value}"
+                    else:
+                        return "Set {field_key} = {value} (type: {f.value_type}, no T32 mapping)"
+                    val result = cli_run_t32rem(session, set_cmd)
+                    match result:
+                        Ok(output): "Set {field_key} = {value}\n{output}"
+                        Err(e): "Error: {e}"
         nil:
             t32_err_field_not_found(field_key, catalogs.field_keys())
 
 fn shell_do(args: [text]) -> text:
     if args.len() == 0:
-        return "Usage: do <action_key>"
+        return "Usage: do <action_key> [args...]"
     val action_key = args[0]
     val catalogs = load_catalogs(SHELL_CATALOG_PATH)
     val found = catalogs.find_action(action_key)
     match found:
         Some(a):
-            var out = "Execute: {a.command_template}\n"
-            out = out + "Action '{a.label}' dispatched."
-            out
+            val session_opt = cli_current_session_info()
+            match session_opt:
+                nil: return "Error: no active session. Use 'use <id>' first."
+                Some(session):
+                    var cmd = a.command_template
+                    # Substitute %0 with first arg if provided
+                    if args.len() > 1:
+                        cmd = cmd.replace("%0", args[1])
+                    if args.len() > 2:
+                        cmd = cmd.replace("%1", args[2])
+                    val result = cli_run_t32rem(session, cmd)
+                    match result:
+                        Ok(output): "Action '{a.label}': {cmd}\n{output}"
+                        Err(e): "Error: {e}"
         nil:
             t32_err_action_not_found(action_key, catalogs.action_keys())
 
@@ -183,7 +214,14 @@ fn shell_cmm(args: [text]) -> text:
     if args.len() == 0:
         return "Usage: cmm <script_path>"
     val script_path = args[0]
-    "Running CMM script: {script_path}\nCommand: DO {script_path}"
+    val session_opt = cli_current_session_info()
+    match session_opt:
+        nil: return "Error: no active session. Use 'use <id>' first."
+        Some(session):
+            val result = cli_run_t32rem(session, "DO " + script_path)
+            match result:
+                Ok(output): "CMM script: {script_path}\n{output}"
+                Err(e): "Error: {e}"
 
 fn shell_screenshot(args: [text]) -> text:
     if args.len() == 0:
@@ -216,43 +254,21 @@ fn shell_history() -> text:
 # Helper: split command line on spaces (simple tokenizer)
 fn split_shell(line: text) -> [text]:
     var parts: [text] = []
-    var start = -1
-    var i = 0
-    while i < line.len():
-        val ch = line[i]
-        if (ch == ' ' or ch == '\t'):
-            if start >= 0:
-                val part = line.slice(start, i)
-                parts.push(part)
-                start = -1
+    var buf = ""
+    for ch in line:
+        if (ch == " " or ch == "\t"):
+            if buf != "":
+                parts.push(buf)
+                buf = ""
         else:
-            if start < 0:
-                start = i
-        i = i + 1
-    if start >= 0:
-        val part = line.slice(start, line.len())
-        parts.push(part)
+            buf = buf + ch
+    if buf != "":
+        parts.push(buf)
     parts
 
 # Helper: trim newlines and whitespace from input
 fn trim_line(s: text) -> text:
-    var start = 0
-    while start < s.len():
-        val ch = s[start]
-        if (ch != ' ' and ch != '\t' and ch != '\r' and ch != '\n'):
-            break
-        start = start + 1
-
-    var end_idx = s.len()
-    while end_idx > start:
-        val ch = s[end_idx - 1]
-        if (ch != ' ' and ch != '\t' and ch != '\r' and ch != '\n'):
-            break
-        end_idx = end_idx - 1
-
-    if start >= end_idx:
-        return ""
-    s.slice(start, end_idx)
+    s.trim()
 
 # Helper: print without trailing newline
 fn print_no_newline(s: text):

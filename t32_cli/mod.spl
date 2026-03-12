@@ -12,6 +12,8 @@ use app.t32_cli.error_codes.{T4030, T4040, T4050, t32_err_unknown_cmd, t32_err_u
 # Default catalog path relative to project root
 var CATALOG_BASE_PATH = "config/t32/catalogs"
 
+extern fn sys_get_args() -> [text]
+
 fn t32_cli_main(args: [text]):
     if args.len() == 0:
         print_usage()
@@ -35,7 +37,17 @@ fn t32_cli_main(args: [text]):
         "cmm": cmd_cmm(rest)
         "shell": cmd_shell(rest)
         "help": print_usage()
+        "--help": print_usage()
         _: print t32_err_unknown_cmd(cmd)
+
+fn main():
+    val raw_args = sys_get_args()
+    var args = raw_args
+    if args.len() >= 2 and not args[0].ends_with(".spl") and args[1].ends_with(".spl"):
+        args = args[2:args.len()]
+    elif args.len() >= 1 and (args[0].ends_with(".spl") or args[0].ends_with("t32-cli") or args[0].ends_with("t32_cli")):
+        args = args[1:args.len()]
+    t32_cli_main(args)
 
 fn print_usage():
     print "Usage: simple t32 <command> [args...]"

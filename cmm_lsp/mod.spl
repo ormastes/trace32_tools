@@ -59,13 +59,22 @@ fn cmm_main(args: [text]):
             dir = args[1]
         cmd_bulk_parse(dir)
     else if cmd == "--version":
-        print "CMM Language Server v0.1.0"
+        print "CMM Language Server v0.1.2"
         print "Written in Simple language"
     else if cmd == "--help":
         print_usage()
     else:
         # Treat as file path for check
         cmd_check(cmd)
+
+fn main():
+    val raw_args = sys_get_args()
+    var args = raw_args
+    if args.len() >= 2 and not args[0].ends_with(".spl") and args[1].ends_with(".spl"):
+        args = args[2:args.len()]
+    elif args.len() >= 1 and args[0].ends_with(".spl"):
+        args = args[1:args.len()]
+    cmm_main(args)
 
 # ---------------------------------------------------------------------------
 # Usage
@@ -452,17 +461,3 @@ fn starts_with(s: text, prefix: text) -> bool:
     if prefix.len() > s.len():
         return false
     s[0:prefix.len()] == prefix
-
-# ---------------------------------------------------------------------------
-# Entry point — dispatch from runtime args
-# ---------------------------------------------------------------------------
-
-val args = sys_get_args()
-# Skip the script path (first arg is typically the .spl file itself)
-var cli_args: [text] = []
-var arg_i = 1
-while arg_i < args.len():
-    cli_args.push(args[arg_i])
-    arg_i = arg_i + 1
-
-cmm_main(cli_args)

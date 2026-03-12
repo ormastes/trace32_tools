@@ -1,0 +1,10 @@
+{
+  "languages": [
+    {
+      "fileExtensions": [".cmm"],
+      "languageId": "cmm",
+      "command": ["bin/release/simple", "examples/10_tooling/trace32_tools/cmm_lsp/mod.spl", "--lsp"],
+      "initializationOptions": {}
+    }
+  ]
+}

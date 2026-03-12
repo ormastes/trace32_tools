@@ -12,7 +12,7 @@
 
 export handle_initialize, handle_did_open, handle_did_change, handle_did_close
 export handle_completion, handle_hover, handle_definition, handle_document_symbol
-export build_diagnostics_notification
+export build_diagnostics_notification, build_empty_diagnostics_notification
 
 use lsp_document.{DocumentStore, CmmDocument}
 use cmm_ast.{CmmProgram}
@@ -53,7 +53,7 @@ fn handle_initialize(params: text) -> text:
     # Server info
     var info_pairs: [JsonPair] = []
     info_pairs.push(JsonPair(key: "name", value: json_string("cmm-lsp")))
-    info_pairs.push(JsonPair(key: "version", value: json_string("0.1.0")))
+    info_pairs.push(JsonPair(key: "version", value: json_string("0.1.2")))
     val server_info = json_object(info_pairs)
 
     # Result object
@@ -66,18 +66,19 @@ fn handle_initialize(params: text) -> text:
 # textDocument/didOpen
 # ---------------------------------------------------------------------------
 
-fn handle_did_open(params: text, store: DocumentStore):
+fn handle_did_open(params: text, store: DocumentStore) -> DocumentStore:
     val td = json_get_object(params, "textDocument") ?? "{}"
     val uri = json_get_string(td, "uri") ?? ""
     val content = json_get_string(td, "text") ?? ""
     val version = json_get_int(td, "version") ?? 0
     store.open_document(uri, content, version)
+    store
 
 # ---------------------------------------------------------------------------
 # textDocument/didChange
 # ---------------------------------------------------------------------------
 
-fn handle_did_change(params: text, store: DocumentStore):
+fn handle_did_change(params: text, store: DocumentStore) -> DocumentStore:
     val td = json_get_object(params, "textDocument") ?? "{}"
     val uri = json_get_string(td, "uri") ?? ""
     val version = json_get_int(td, "version") ?? 0
@@ -86,6 +87,7 @@ fn handle_did_change(params: text, store: DocumentStore):
     # contentChanges[0].text. We extract it from the JSON.
     val changes_text = extract_first_change_text(params)
     store.update_document(uri, changes_text, version)
+    store
 
 # Extract the text from the first contentChanges entry.
 # contentChanges is an array: [{"text": "..."}]
@@ -157,10 +159,11 @@ fn extract_first_change_text(params: text) -> text:
 # textDocument/didClose
 # ---------------------------------------------------------------------------
 
-fn handle_did_close(params: text, store: DocumentStore):
+fn handle_did_close(params: text, store: DocumentStore) -> DocumentStore:
     val td = json_get_object(params, "textDocument") ?? "{}"
     val uri = json_get_string(td, "uri") ?? ""
     store.close_document(uri)
+    store
 
 # ---------------------------------------------------------------------------
 # textDocument/completion
@@ -377,7 +380,7 @@ fn handle_definition(params: text, store: DocumentStore) -> text:
     var i = 0
     while i < labels.len():
         if labels[i].name == word or labels[i].name == word_no_amp:
-            return make_location(uri, labels[i].def_line - 1, labels[i].def_column)
+            return make_location(uri, labels[i].def_line - 1, zero_based_col(labels[i].def_column))
         i = i + 1
 
     # Search for macro declaration
@@ -385,7 +388,7 @@ fn handle_definition(params: text, store: DocumentStore) -> text:
     i = 0
     while i < macros.len():
         if macros[i].name == word_no_amp:
-            return make_location(uri, macros[i].def_line - 1, macros[i].def_column)
+            return make_location(uri, macros[i].def_line - 1, zero_based_col(macros[i].def_column))
         i = i + 1
 
     json_null()
@@ -437,7 +440,7 @@ fn handle_document_symbol(params: text, store: DocumentStore) -> text:
         val sym = labels[i]
         # LSP line numbers are 0-based, CMM spans are 1-based
         val sym_line = sym.def_line - 1
-        val sym_col = sym.def_column
+        val sym_col = zero_based_col(sym.def_column)
         # Use SymbolKind = 12 (Function) for labels
         symbols.push(make_document_symbol(sym.name + ":", 12, sym_line, sym_col))
         i = i + 1
@@ -448,7 +451,7 @@ fn handle_document_symbol(params: text, store: DocumentStore) -> text:
     while i < macros.len():
         val sym = macros[i]
         val sym_line = sym.def_line - 1
-        val sym_col = sym.def_column
+        val sym_col = zero_based_col(sym.def_column)
         val label = "&" + sym.name + " (" + sym.scope + ")"
         symbols.push(make_document_symbol(label, 13, sym_line, sym_col))
         i = i + 1
@@ -529,12 +532,24 @@ fn build_diagnostics_notification(uri: text, store: DocumentStore) -> text?:
     notif_pairs.push(JsonPair(key: "params", value: notif_params))
     json_object(notif_pairs)
 
+fn build_empty_diagnostics_notification(uri: text) -> text:
+    var params_pairs: [JsonPair] = []
+    params_pairs.push(JsonPair(key: "uri", value: json_string(uri)))
+    params_pairs.push(JsonPair(key: "diagnostics", value: json_array([])))
+    val notif_params = json_object(params_pairs)
+
+    var notif_pairs: [JsonPair] = []
+    notif_pairs.push(JsonPair(key: "jsonrpc", value: json_string("2.0")))
+    notif_pairs.push(JsonPair(key: "method", value: json_string("textDocument/publishDiagnostics")))
+    notif_pairs.push(JsonPair(key: "params", value: notif_params))
+    json_object(notif_pairs)
+
 # Convert a CmmDiagnostic to an LSP Diagnostic JSON object.
 fn make_lsp_diagnostic(d: CmmDiagnostic) -> text:
-    # LSP lines are 0-based; CMM diagnostics are 1-based
+    # LSP lines/columns are 0-based; CMM diagnostics are 1-based
     val start_line = d.line - 1
     val end_line = d.end_line - 1
-    val diag_range = make_range(start_line, d.column, end_line, d.end_column)
+    val diag_range = make_range(start_line, zero_based_col(d.column), end_line, zero_based_col(d.end_column))
 
     # Severity: 1=Error, 2=Warning, 3=Information, 4=Hint
     val severity = diagnostic_kind_to_severity(d.kind)
@@ -706,6 +721,11 @@ fn strip_leading_ampersand(word: text) -> text:
         if word[0:1] == "&":
             return word[1:word.len()]
     word
+
+fn zero_based_col(col: i64) -> i64:
+    if col <= 0:
+        return 0
+    col - 1
 
 # ---------------------------------------------------------------------------
 # Placeholder constructors for default values

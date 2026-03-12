@@ -1,0 +1,361 @@
+#![allow(unnamed_duplicate_typed_args)]
+# T32 MCP — Window output JSON parsers
+# Converts raw WinPrint text → structured JSON using inlined parser logic
+# and existing JSON helpers (t32_js, t32_jp, t32_LB, etc.)
+#
+# Each window type has a dedicated parser that returns a JSON string.
+# The dispatcher t32_parse_window_to_json() routes window_key → parser.
+
+# --- Inlined parser helpers (same logic as text_parser.spl, avoid import) ---
+
+fn wp_split_ws(input: text) -> [text]:
+    var parts: [text] = []
+    var buf: [text] = []
+    var in_word = false
+    for ch in input:
+        if ch == " " or ch == "\t":
+            if in_word:
+                parts.push(buf.join(""))
+                buf = []
+                in_word = false
+        else:
+            buf.push(ch)
+            in_word = true
+    if in_word:
+        parts.push(buf.join(""))
+    parts
+
+fn wp_split_lines(content: text) -> [text]:
+    var lines: [text] = []
+    var buf: [text] = []
+    for ch in content:
+        if ch == "\n":
+            lines.push(buf.join(""))
+            buf = []
+        else:
+            buf.push(ch)
+    if buf.len() > 0:
+        lines.push(buf.join(""))
+    lines
+
+fn wp_trim(s: text) -> text:
+    s.trim()
+
+fn wp_find_char(s: text, target: text) -> i64:
+    var i = 0
+    for ch in s:
+        if ch == target:
+            return i
+        i = i + 1
+    -1
+
+# --- JSON array builder from rows of key-value pairs ---
+
+fn wp_rows_to_json(rows: [[text]], keys: [text]) -> text:
+    # rows is a list of flat arrays: [val1, val2, ...] matching keys order
+    var arr = t32_SB_L()
+    var first = true
+    for row in rows:
+        if not first:
+            arr = arr + ","
+        first = false
+        var obj = t32_LB()
+        var ki = 0
+        var first_field = true
+        while ki < keys.len():
+            if not first_field:
+                obj = obj + ","
+            first_field = false
+            var val_str = ""
+            if ki < row.len():
+                val_str = row[ki]
+            obj = obj + t32_jp(keys[ki], t32_js(val_str))
+            ki = ki + 1
+        obj = obj + t32_RB()
+        arr = arr + obj
+    arr = arr + t32_SB_R()
+    arr
+
+# --- Window-specific JSON parsers ---
+
+fn wp_parse_register(raw: text) -> text:
+    val lines = wp_split_lines(raw)
+    var rows: [[text]] = []
+    for line in lines:
+        val trimmed = wp_trim(line)
+        if trimmed == "" or trimmed.starts_with("#"):
+            continue
+        val tokens = wp_split_ws(trimmed)
+        for token in tokens:
+            val eq_pos = wp_find_char(token, "=")
+            if eq_pos > 0:
+                val name = t32_substr(token, 0, eq_pos)
+                var value = ""
+                if eq_pos + 1 < token.len():
+                    value = t32_substr(token, eq_pos + 1, token.len())
+                rows.push([name, value])
+    wp_rows_to_json(rows, ["name", "value"])
+
+fn wp_parse_break_list(raw: text) -> text:
+    val lines = wp_split_lines(raw)
+    var rows: [[text]] = []
+    for line in lines:
+        val trimmed = wp_trim(line)
+        if trimmed == "" or trimmed.starts_with("#") or trimmed.starts_with("-") or trimmed.starts_with("enabled"):
+            continue
+        val tokens = wp_split_ws(trimmed)
+        if tokens.len() >= 4:
+            var cond = ""
+            if tokens.len() > 4:
+                cond = tokens[4]
+            rows.push([tokens[0], tokens[1], tokens[2], tokens[3], cond])
+    wp_rows_to_json(rows, ["enabled", "address", "symbol", "type", "condition"])
+
+fn wp_parse_var_watch(raw: text) -> text:
+    val lines = wp_split_lines(raw)
+    var rows: [[text]] = []
+    for line in lines:
+        val trimmed = wp_trim(line)
+        if trimmed == "" or trimmed.starts_with("#") or trimmed.starts_with("-") or trimmed.starts_with("name"):
+            continue
+        val tokens = wp_split_ws(trimmed)
+        if tokens.len() >= 3:
+            var value = tokens[2]
+            var vi = 3
+            while vi < tokens.len():
+                value = value + " " + tokens[vi]
+                vi = vi + 1
+            rows.push([tokens[0], tokens[1], value])
+    wp_rows_to_json(rows, ["name", "type", "value"])
+
+fn wp_parse_trace_list(raw: text) -> text:
+    val lines = wp_split_lines(raw)
+    var rows: [[text]] = []
+    for line in lines:
+        val trimmed = wp_trim(line)
+        if trimmed == "" or trimmed.starts_with("#") or trimmed.starts_with("-") or trimmed.starts_with("cycle"):
+            continue
+        val tokens = wp_split_ws(trimmed)
+        if tokens.len() >= 4:
+            rows.push([tokens[0], tokens[1], tokens[2], tokens[3]])
+    wp_rows_to_json(rows, ["cycle", "address", "data", "type"])
+
+fn wp_parse_task_list(raw: text) -> text:
+    val lines = wp_split_lines(raw)
+    var rows: [[text]] = []
+    for line in lines:
+        val trimmed = wp_trim(line)
+        if trimmed == "" or trimmed.starts_with("#") or trimmed.starts_with("-") or trimmed.starts_with("id"):
+            continue
+        val tokens = wp_split_ws(trimmed)
+        if tokens.len() >= 4:
+            rows.push([tokens[0], tokens[1], tokens[2], tokens[3]])
+    wp_rows_to_json(rows, ["id", "name", "state", "priority"])
+
+fn wp_parse_stack_frame(raw: text) -> text:
+    val lines = wp_split_lines(raw)
+    var rows: [[text]] = []
+    for line in lines:
+        val trimmed = wp_trim(line)
+        if trimmed == "" or trimmed.starts_with("frame"):
+            continue
+        val tokens = wp_split_ws(trimmed)
+        if tokens.len() >= 3:
+            var file_line = ""
+            if tokens.len() >= 4:
+                file_line = tokens[3]
+            rows.push([tokens[0], tokens[1], tokens[2], file_line])
+    wp_rows_to_json(rows, ["frame_id", "address", "function", "file_line"])
+
+fn wp_parse_memory_dump(raw: text) -> text:
+    val lines = wp_split_lines(raw)
+    var rows: [[text]] = []
+    for line in lines:
+        val trimmed = wp_trim(line)
+        if trimmed == "" or trimmed.starts_with("#"):
+            continue
+        val colon1 = wp_find_char(trimmed, ":")
+        if colon1 < 0:
+            continue
+        var colon2 = -1
+        var ci = colon1 + 1
+        while ci < trimmed.len():
+            if trimmed[ci] == ':':
+                colon2 = ci
+                break
+            ci = ci + 1
+        var address = ""
+        var rest = ""
+        if colon2 > 0:
+            address = wp_trim(t32_substr(trimmed, 0, colon2 + 1))
+            if colon2 + 1 < trimmed.len():
+                rest = wp_trim(t32_substr(trimmed, colon2 + 1, trimmed.len()))
+        else:
+            address = wp_trim(t32_substr(trimmed, 0, colon1 + 1))
+            if colon1 + 1 < trimmed.len():
+                rest = wp_trim(t32_substr(trimmed, colon1 + 1, trimmed.len()))
+        if address == "":
+            continue
+        var hex_part = rest
+        var ascii_part = ""
+        # Find double-space separator using for-ch-in iteration
+        var ri = 0
+        var prev_ch = ""
+        for ch in rest:
+            if ch == " " and prev_ch == " ":
+                hex_part = wp_trim(t32_substr(rest, 0, ri - 1))
+                ascii_part = wp_trim(t32_substr(rest, ri - 1, rest.len()))
+                break
+            prev_ch = ch
+            ri = ri + 1
+        rows.push([address, hex_part, ascii_part])
+    wp_rows_to_json(rows, ["address", "hex_bytes", "ascii"])
+
+fn wp_parse_source_list(raw: text) -> text:
+    val lines = wp_split_lines(raw)
+    var rows: [[text]] = []
+    for line in lines:
+        val trimmed = wp_trim(line)
+        if trimmed == "" or trimmed.starts_with("#") or trimmed.starts_with("line"):
+            continue
+        val tokens = wp_split_ws(trimmed)
+        if tokens.len() >= 2:
+            var source = ""
+            if tokens.len() >= 3:
+                source = tokens[2]
+                var si = 3
+                while si < tokens.len():
+                    source = source + " " + tokens[si]
+                    si = si + 1
+            rows.push([tokens[0], tokens[1], source])
+    wp_rows_to_json(rows, ["line_number", "address", "source"])
+
+fn wp_parse_coverage(raw: text) -> text:
+    val lines = wp_split_lines(raw)
+    var rows: [[text]] = []
+    for line in lines:
+        val trimmed = wp_trim(line)
+        if trimmed == "" or trimmed.starts_with("#") or trimmed.starts_with("-") or trimmed.starts_with("function"):
+            continue
+        val tokens = wp_split_ws(trimmed)
+        if tokens.len() >= 3:
+            rows.push([tokens[0], tokens[1], tokens[2]])
+    wp_rows_to_json(rows, ["function", "percent", "hits"])
+
+fn wp_parse_symbol_browse(raw: text) -> text:
+    val lines = wp_split_lines(raw)
+    var rows: [[text]] = []
+    for line in lines:
+        val trimmed = wp_trim(line)
+        if trimmed == "" or trimmed.starts_with("#") or trimmed.starts_with("-") or trimmed.starts_with("name"):
+            continue
+        val tokens = wp_split_ws(trimmed)
+        if tokens.len() >= 4:
+            rows.push([tokens[0], tokens[1], tokens[2], tokens[3]])
+    wp_rows_to_json(rows, ["name", "address", "size", "type"])
+
+fn wp_parse_perf(raw: text) -> text:
+    val lines = wp_split_lines(raw)
+    var rows: [[text]] = []
+    for line in lines:
+        val trimmed = wp_trim(line)
+        if trimmed == "" or trimmed.starts_with("#") or trimmed.starts_with("-") or trimmed.starts_with("module"):
+            continue
+        val tokens = wp_split_ws(trimmed)
+        if tokens.len() >= 4:
+            rows.push([tokens[0], tokens[1], tokens[2], tokens[3]])
+    wp_rows_to_json(rows, ["module", "time", "calls", "percent"])
+
+fn wp_parse_mmu(raw: text) -> text:
+    val lines = wp_split_lines(raw)
+    var rows: [[text]] = []
+    for line in lines:
+        val trimmed = wp_trim(line)
+        if trimmed == "" or trimmed.starts_with("#") or trimmed.starts_with("-") or trimmed.starts_with("virt"):
+            continue
+        val tokens = wp_split_ws(trimmed)
+        if tokens.len() >= 4:
+            rows.push([tokens[0], tokens[1], tokens[2], tokens[3]])
+    wp_rows_to_json(rows, ["virt_addr", "phys_addr", "size", "perms"])
+
+fn wp_parse_peripheral(raw: text) -> text:
+    val lines = wp_split_lines(raw)
+    var rows: [[text]] = []
+    for line in lines:
+        val trimmed = wp_trim(line)
+        if trimmed == "" or trimmed.starts_with("#") or trimmed.starts_with("-") or trimmed.starts_with("name"):
+            continue
+        val tokens = wp_split_ws(trimmed)
+        if tokens.len() >= 4:
+            rows.push([tokens[0], tokens[1], tokens[2], tokens[3]])
+    wp_rows_to_json(rows, ["name", "address", "value", "bits"])
+
+fn wp_parse_data_list(raw: text) -> text:
+    val lines = wp_split_lines(raw)
+    var rows: [[text]] = []
+    for line in lines:
+        val trimmed = wp_trim(line)
+        if trimmed == "" or trimmed.starts_with("#") or trimmed.starts_with("-") or trimmed.starts_with("address"):
+            continue
+        val tokens = wp_split_ws(trimmed)
+        if tokens.len() >= 2:
+            var instruction = tokens[1]
+            var symbol = ""
+            if tokens.len() >= 3:
+                symbol = tokens[tokens.len() - 1]
+                var ii = 2
+                while ii < tokens.len() - 1:
+                    instruction = instruction + " " + tokens[ii]
+                    ii = ii + 1
+            rows.push([tokens[0], instruction, symbol])
+    wp_rows_to_json(rows, ["address", "instruction", "symbol"])
+
+fn wp_parse_area(raw: text) -> text:
+    val lines = wp_split_lines(raw)
+    var arr = t32_SB_L()
+    var first = true
+    for line in lines:
+        if not first:
+            arr = arr + ","
+        first = false
+        arr = arr + t32_js(line)
+    arr = arr + t32_SB_R()
+    t32_jo1(t32_jp("lines", arr))
+
+# --- Dispatcher: window_key → JSON parser ---
+
+fn t32_parse_window_to_json(window_key: text, raw_text: text) -> text:
+    if window_key == "register_view":
+        return wp_parse_register(raw_text)
+    if window_key == "break_list":
+        return wp_parse_break_list(raw_text)
+    if window_key == "var_watch":
+        return wp_parse_var_watch(raw_text)
+    if window_key == "var_local":
+        return wp_parse_var_watch(raw_text)
+    if window_key == "trace_list":
+        return wp_parse_trace_list(raw_text)
+    if window_key == "task_list":
+        return wp_parse_task_list(raw_text)
+    if window_key == "stack_frame":
+        return wp_parse_stack_frame(raw_text)
+    if window_key == "data_dump":
+        return wp_parse_memory_dump(raw_text)
+    if window_key == "source_list":
+        return wp_parse_source_list(raw_text)
+    if window_key == "coverage_list":
+        return wp_parse_coverage(raw_text)
+    if window_key == "symbol_browse":
+        return wp_parse_symbol_browse(raw_text)
+    if window_key == "perf_list":
+        return wp_parse_perf(raw_text)
+    if window_key == "mmu_list":
+        return wp_parse_mmu(raw_text)
+    if window_key == "per_view":
+        return wp_parse_peripheral(raw_text)
+    if window_key == "data_list":
+        return wp_parse_data_list(raw_text)
+    if window_key == "semihost_area":
+        return wp_parse_area(raw_text)
+    # Unknown window — return raw as single-element JSON
+    t32_jo1(t32_jp("raw", t32_js(raw_text)))

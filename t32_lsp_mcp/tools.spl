@@ -1,9 +1,10 @@
+#![allow(unnamed_duplicate_typed_args)]
 # T32 LSP MCP — Tool implementations
 # Each handler receives the request id and raw arguments JSON, returns a JSON response.
 
 use cmm_lsp.cmm_parser.{parse_cmm_source}
-use cmm_lsp.cmm_analyzer.{analyze_program, CmmSymbolKind}
-use cmm_lsp.cmm_commands.{build_command_db, lookup_command, get_completions}
+use cmm_lsp.cmm_analyzer.{analyze_program, CmmSymbol, CmmSymbolKind}
+use cmm_lsp.cmm_commands.{build_command_db, get_completions}
 use cmm_lsp.cmm_diagnostics.{format_diagnostic, severity_text}
 
 # --- cmm_parse: Parse CMM source, return AST summary + errors ---
@@ -79,10 +80,7 @@ fn handle_cmm_complete(id: text, args: text) -> text:
 
     # Extract the word prefix at the given position
     val lines = split_to_lines(source)
-    var prefix = ""
-    if target_line >= 1 and target_line <= lines.len():
-        val line_text = lines[target_line - 1]
-        prefix = extract_word_at(line_text, target_char)
+    var prefix = extract_word_from_lines(lines, target_line, target_char)
 
     # Get completions from the command database
     val db = build_command_db()
@@ -122,31 +120,18 @@ fn handle_cmm_hover(id: text, args: text) -> text:
 
     # Extract the word at the given position
     val lines = split_to_lines(source)
-    var word = ""
-    if target_line >= 1 and target_line <= lines.len():
-        val line_text = lines[target_line - 1]
-        word = extract_word_at(line_text, target_char)
+    var word = extract_word_from_lines(lines, target_line, target_char)
 
     if word == "":
         return lsp_make_tool_result(id, lsp_jo1(lsp_jp("hover", lsp_js(""))))
 
-    # Look up in command database
     val db = build_command_db()
-    val info = lookup_command(db, word)
-    match info:
-        Some(cmd):
-            val hover_text = cmd.full_name + " (" + cmd.short_name + ") - " + cmd.description + " [" + cmd.group + "]"
-            val result = lsp_jo2(
-                lsp_jp("word", lsp_js(word)),
-                lsp_jp("hover", lsp_js(hover_text))
-            )
-            return lsp_make_tool_result(id, result)
-        nil:
-            val result = lsp_jo2(
-                lsp_jp("word", lsp_js(word)),
-                lsp_jp("hover", lsp_js("Unknown command: " + word))
-            )
-            return lsp_make_tool_result(id, result)
+    val hover_text = lookup_hover_text(db, word)
+    val result = lsp_jo2(
+        lsp_jp("word", lsp_js(word)),
+        lsp_jp("hover", lsp_js(hover_text))
+    )
+    return lsp_make_tool_result(id, result)
 
 # --- cmm_symbols: List labels and macros from parsed AST ---
 
@@ -156,7 +141,17 @@ fn handle_cmm_symbols(id: text, args: text) -> text:
         return lsp_make_tool_error(id, -32602, "Missing required parameter: source")
     val program = parse_cmm_source(source)
     val analysis = analyze_program(program)
-    val syms = analysis.symbols.symbols
+    val labels = analysis.symbols.labels()
+    val macros = analysis.symbols.macros()
+    var syms: [CmmSymbol] = []
+    var li = 0
+    while li < labels.len():
+        syms.push(labels[li])
+        li = li + 1
+    var mi = 0
+    while mi < macros.len():
+        syms.push(macros[mi])
+        mi = mi + 1
 
     var arr = lsp_SB_L()
     var si = 0
@@ -268,28 +263,100 @@ fn split_to_lines(content: text) -> [text]:
         lines.push(content[start:content.len()])
     lines
 
+fn line_text_for_position(lines: [text], target_line: i64) -> text:
+    # MCP/LSP callers often use 0-based lines; tolerate both 0-based and 1-based.
+    if target_line >= 0 and target_line < lines.len():
+        return lines[target_line]
+    if target_line >= 1 and target_line <= lines.len():
+        return lines[target_line - 1]
+    ""
+
+fn extract_word_from_lines(lines: [text], target_line: i64, target_char: i64) -> text:
+    var word = ""
+    if target_line >= 1 and target_line <= lines.len():
+        val line_text_1 = lines[target_line - 1]
+        word = extract_word_at(line_text_1, target_char)
+        if word == "":
+            word = extract_word_at(line_text_1, target_char + 1)
+    if word == "" and target_line >= 0 and target_line < lines.len():
+        val line_text_0 = lines[target_line]
+        word = extract_word_at(line_text_0, target_char)
+        if word == "":
+            word = extract_word_at(line_text_0, target_char + 1)
+    word
+
 # --- Helper: extract word at character offset ---
 
 fn extract_word_at(line: text, char_offset: i64) -> text:
-    if char_offset < 0 or char_offset > line.len():
+    if line.len() == 0:
         return ""
+    var pos = char_offset
+    if pos < 0:
+        return ""
+    if pos > line.len():
+        pos = line.len()
+    # If the cursor is on whitespace/punctuation, walk right first, then left.
+    while pos < line.len():
+        val ch = line[pos:pos + 1]
+        if is_word_char(ch):
+            break
+        pos = pos + 1
+    if pos >= line.len():
+        pos = char_offset
+        if pos >= line.len():
+            pos = line.len() - 1
+        while pos >= 0:
+            val ch = line[pos:pos + 1]
+            if is_word_char(ch):
+                break
+            pos = pos - 1
+        if pos < 0:
+            return ""
     # Find word start (scan backwards)
-    var ws = char_offset
+    var ws = pos
     while ws > 0:
         val ch = line[ws - 1:ws]
-        if ch == " " or ch == "\t" or ch == "(" or ch == ")" or ch == "," or ch == "=":
+        if not is_word_char(ch):
             break
         ws = ws - 1
     # Find word end (scan forwards)
-    var we = char_offset
+    var we = pos
     while we < line.len():
         val ch = line[we:we + 1]
-        if ch == " " or ch == "\t" or ch == "(" or ch == ")" or ch == "," or ch == "=" or ch == "\n":
+        if not is_word_char(ch):
             break
         we = we + 1
     if ws >= we:
         return ""
     line[ws:we]
+
+fn is_word_char(ch: text) -> bool:
+    if ch == "_" or ch == "." or ch == "&":
+        return true
+    if ch >= "a" and ch <= "z":
+        return true
+    if ch >= "A" and ch <= "Z":
+        return true
+    if ch >= "0" and ch <= "9":
+        return true
+    false
+
+fn lookup_hover_text(db: CmmCommandDB, word: text) -> text:
+    val lower_word = to_lower_cli(word)
+    var i = 0
+    while i < db.commands.len():
+        val cmd = db.commands[i]
+        if to_lower_cli(cmd.full_name) == lower_word or to_lower_cli(cmd.short_name) == lower_word:
+            var hover_text = cmd.full_name
+            if cmd.description != "":
+                hover_text = hover_text + " - " + cmd.description
+            if cmd.short_name != "":
+                hover_text = hover_text + " (" + cmd.short_name + ")"
+            if cmd.group != "":
+                hover_text = hover_text + " [" + cmd.group + "]"
+            return hover_text
+        i = i + 1
+    return "Unknown command: " + word
 
 # --- Helper: symbol kind to string ---
 

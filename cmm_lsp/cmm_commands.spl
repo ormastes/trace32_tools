@@ -358,4 +358,4 @@ fn get_group_commands(db: CmmCommandDB, group: text) -> [CmmCommandInfo]:
 fn starts_with(haystack: text, prefix: text) -> bool:
     if prefix.len() > haystack.len():
         return false
-    haystack.slice(0, prefix.len()) == prefix
+    haystack.starts_with(prefix)

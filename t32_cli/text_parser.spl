@@ -1,71 +1,32 @@
+#![allow(unnamed_duplicate_typed_args)]
 # T32 CLI — WinPrint text output parsers
 # Parses raw text output from TRACE32 WinPrint commands into structured data
 
 # Split a string on whitespace (spaces and tabs), skipping consecutive delimiters
 fn split_whitespace(input: text) -> [text]:
     var parts: [text] = []
-    var start = -1
-    var i = 0
-    while i < input.len():
-        val ch = input[i]
-        var is_space = false
-        if ch == ' ':
-            is_space = true
-        if ch == '\t':
-            is_space = true
-
-        if is_space:
-            if start >= 0:
-                val part = input.slice(start, i)
-                parts.push(part)
-                start = -1
+    var buf: [text] = []
+    var in_word = false
+    for ch in input:
+        if ch == " " or ch == "\t":
+            if in_word:
+                parts.push(buf.join(""))
+                buf = []
+                in_word = false
         else:
-            if start < 0:
-                start = i
-        i = i + 1
-
-    # Trailing token
-    if start >= 0:
-        val part = input.slice(start, input.len())
-        parts.push(part)
-
+            buf.push(ch)
+            in_word = true
+    if in_word:
+        parts.push(buf.join(""))
     parts
 
 # Split text into lines
 fn split_lines(content: text) -> [text]:
-    var lines: [text] = []
-    var start = 0
-    var i = 0
-    while i < content.len():
-        if content[i] == '\n':
-            val line = content.slice(start, i)
-            lines.push(line)
-            start = i + 1
-        i = i + 1
-    if start < content.len():
-        val line = content.slice(start, content.len())
-        lines.push(line)
-    lines
+    content.split("\n")
 
 # Trim leading/trailing whitespace
 fn trim(s: text) -> text:
-    var start = 0
-    while start < s.len():
-        val ch = s[start]
-        if (ch != ' ' and ch != '\t' and ch != '\r'):
-            break
-        start = start + 1
-
-    var end_idx = s.len()
-    while end_idx > start:
-        val ch = s[end_idx - 1]
-        if (ch != ' ' and ch != '\t' and ch != '\r'):
-            break
-        end_idx = end_idx - 1
-
-    if start >= end_idx:
-        return ""
-    s.slice(start, end_idx)
+    s.trim()
 
 # Generic tabular output parser
 # First non-empty, non-comment line is treated as column headers
@@ -117,17 +78,14 @@ fn parse_tabular_output(raw: text, delimiter: text) -> [Dict<text, text>]:
 # Split on a single-character delimiter
 fn split_on(s: text, delim: text) -> [text]:
     var parts: [text] = []
-    var start = 0
-    var i = 0
-    while i < s.len():
-        if s[i] == delim:
-            val part = s.slice(start, i)
-            parts.push(part)
-            start = i + 1
-        i = i + 1
-    if start <= s.len():
-        val part = s.slice(start, s.len())
-        parts.push(part)
+    var buf: [text] = []
+    for ch in s:
+        if ch == delim:
+            parts.push(buf.join(""))
+            buf = []
+        else:
+            buf.push(ch)
+    parts.push(buf.join(""))
     parts
 
 # Parse Break.List output
@@ -180,10 +138,10 @@ fn parse_register_output(raw: text) -> [Dict<text, text>]:
             val eq_pos = find_char(token, '=')
             if eq_pos > 0:
                 var row: Dict<text, text> = {}
-                val name = token.slice(0, eq_pos)
+                val name = substr(token, 0, eq_pos)
                 var value = ""
                 if eq_pos + 1 < token.len():
-                    value = token.slice(eq_pos + 1, token.len())
+                    value = substr(token, eq_pos + 1, token.len())
                 row["name"] = name
                 row["value"] = value
                 rows.push(row)
@@ -281,13 +239,335 @@ fn parse_task_list_output(raw: text) -> [Dict<text, text>]:
     rows
 
 # Helper: find first occurrence of character
-fn find_char(s: text, ch: text) -> i64:
-    var i = 0
-    while i < s.len():
-        if s[i] == ch:
-            return i
-        i = i + 1
+fn find_char(s: text, target: text) -> i64:
+    var idx = 0
+    for ch in s:
+        if ch == target:
+            return idx
+        idx = idx + 1
     -1
+
+# Helper: find character starting from a given index
+fn find_char_from(s: text, target: text, from: i64) -> i64:
+    var idx = 0
+    for ch in s:
+        if idx >= from and ch == target:
+            return idx
+        idx = idx + 1
+    -1
+
+# Helper: find first occurrence of double-space "  "
+fn find_double_space(s: text) -> i64:
+    var prev = ""
+    var idx = 0
+    for ch in s:
+        if idx > 0 and prev == " " and ch == " ":
+            return idx - 1
+        prev = ch
+        idx = idx + 1
+    -1
+
+# Helper: extract substring using for-ch-in iteration (workaround for broken .slice())
+fn substr(s: text, start: i64, end_pos: i64) -> text:
+    var buf: [text] = []
+    var idx = 0
+    for ch in s:
+        if idx >= start and idx < end_pos:
+            buf.push(ch)
+        idx = idx + 1
+    buf.join("")
+
+# Parse Frame.view (stack frame) output
+# Format: #0  0x08001234  main+0x10       src/main.c:42
+fn parse_stack_frame_output(raw: text) -> [Dict<text, text>]:
+    val lines = split_lines(raw)
+    var rows: [Dict<text, text>] = []
+
+    for line in lines:
+        val trimmed = trim(line)
+        if trimmed == "":
+            continue
+        if trimmed.starts_with("frame"):
+            continue
+
+        val tokens = split_whitespace(trimmed)
+        if tokens.len() >= 3:
+            var row: Dict<text, text> = {}
+            row["frame_id"] = tokens[0]
+            row["address"] = tokens[1]
+            row["function"] = tokens[2]
+            if tokens.len() >= 4:
+                row["file_line"] = tokens[3]
+            else:
+                row["file_line"] = ""
+            rows.push(row)
+
+    rows
+
+# Parse Data.dump (memory dump) output
+# Format: D:0x20000000: 48 65 6C 6C 6F 20 57 6F  Hello Wo
+fn parse_memory_dump_output(raw: text) -> [Dict<text, text>]:
+    val lines = split_lines(raw)
+    var rows: [Dict<text, text>] = []
+
+    for line in lines:
+        val trimmed = trim(line)
+        if trimmed == "":
+            continue
+        if trimmed.starts_with("#"):
+            continue
+
+        # Find the address prefix (e.g., "D:0x20000000:")
+        val colon1 = find_char(trimmed, ":")
+        if colon1 < 0:
+            continue
+        # Look for second colon after address
+        var colon2 = find_char_from(trimmed, ":", colon1 + 1)
+        var address = ""
+        var rest = ""
+        if colon2 > 0:
+            address = substr(trimmed, 0, colon2 + 1).trim()
+            if colon2 + 1 < trimmed.len():
+                rest = substr(trimmed, colon2 + 1, trimmed.len()).trim()
+        else:
+            address = substr(trimmed, 0, colon1 + 1).trim()
+            if colon1 + 1 < trimmed.len():
+                rest = substr(trimmed, colon1 + 1, trimmed.len()).trim()
+        if address == "":
+            continue
+
+        # Split rest into hex bytes and ASCII via double-space separator
+        var hex_part = rest
+        var ascii_part = ""
+        val dbl_space_pos = find_double_space(rest)
+        if dbl_space_pos >= 0:
+            hex_part = substr(rest, 0, dbl_space_pos).trim()
+            ascii_part = substr(rest, dbl_space_pos, rest.len()).trim()
+
+        var row: Dict<text, text> = {}
+        row["address"] = address
+        row["hex_bytes"] = hex_part
+        row["ascii"] = ascii_part
+        rows.push(row)
+
+    rows
+
+# Parse List (source listing) output
+# Format:   42 0x08001234  printf("hello");
+fn parse_source_list_output(raw: text) -> [Dict<text, text>]:
+    val lines = split_lines(raw)
+    var rows: [Dict<text, text>] = []
+
+    for line in lines:
+        val trimmed = trim(line)
+        if trimmed == "":
+            continue
+        if trimmed.starts_with("#"):
+            continue
+        if trimmed.starts_with("line"):
+            continue
+
+        val tokens = split_whitespace(trimmed)
+        if tokens.len() >= 2:
+            var row: Dict<text, text> = {}
+            row["line_number"] = tokens[0]
+            row["address"] = tokens[1]
+            # Source is everything from token 2 onwards
+            var source = ""
+            if tokens.len() >= 3:
+                source = tokens[2]
+                var si = 3
+                while si < tokens.len():
+                    source = source + " " + tokens[si]
+                    si = si + 1
+            row["source"] = source
+            rows.push(row)
+
+    rows
+
+# Parse COVerage.ListFunc output
+# Format: main           85.3%   1024
+fn parse_coverage_output(raw: text) -> [Dict<text, text>]:
+    val lines = split_lines(raw)
+    var rows: [Dict<text, text>] = []
+
+    for line in lines:
+        val trimmed = trim(line)
+        if trimmed == "":
+            continue
+        if trimmed.starts_with("#"):
+            continue
+        if trimmed.starts_with("-"):
+            continue
+        if trimmed.starts_with("function"):
+            continue
+
+        val tokens = split_whitespace(trimmed)
+        if tokens.len() >= 3:
+            var row: Dict<text, text> = {}
+            row["function"] = tokens[0]
+            row["percent"] = tokens[1]
+            row["hits"] = tokens[2]
+            rows.push(row)
+
+    rows
+
+# Parse sYmbol.Browse output
+# Format: main           0x08001000  0x00000100  Code
+fn parse_symbol_browse_output(raw: text) -> [Dict<text, text>]:
+    val lines = split_lines(raw)
+    var rows: [Dict<text, text>] = []
+
+    for line in lines:
+        val trimmed = trim(line)
+        if trimmed == "":
+            continue
+        if trimmed.starts_with("#"):
+            continue
+        if trimmed.starts_with("-"):
+            continue
+        if trimmed.starts_with("name"):
+            continue
+
+        val tokens = split_whitespace(trimmed)
+        if tokens.len() >= 4:
+            var row: Dict<text, text> = {}
+            row["name"] = tokens[0]
+            row["address"] = tokens[1]
+            row["size"] = tokens[2]
+            row["type"] = tokens[3]
+            rows.push(row)
+
+    rows
+
+# Parse Perf.ListMODULE output
+# Format: main           12.5ms   1024  42.1%
+fn parse_perf_output(raw: text) -> [Dict<text, text>]:
+    val lines = split_lines(raw)
+    var rows: [Dict<text, text>] = []
+
+    for line in lines:
+        val trimmed = trim(line)
+        if trimmed == "":
+            continue
+        if trimmed.starts_with("#"):
+            continue
+        if trimmed.starts_with("-"):
+            continue
+        if trimmed.starts_with("module"):
+            continue
+
+        val tokens = split_whitespace(trimmed)
+        if tokens.len() >= 4:
+            var row: Dict<text, text> = {}
+            row["module"] = tokens[0]
+            row["time"] = tokens[1]
+            row["calls"] = tokens[2]
+            row["percent"] = tokens[3]
+            rows.push(row)
+
+    rows
+
+# Parse MMU.List output
+# Format: 0x00000000  0x80000000  0x00100000  RWX
+fn parse_mmu_output(raw: text) -> [Dict<text, text>]:
+    val lines = split_lines(raw)
+    var rows: [Dict<text, text>] = []
+
+    for line in lines:
+        val trimmed = trim(line)
+        if trimmed == "":
+            continue
+        if trimmed.starts_with("#"):
+            continue
+        if trimmed.starts_with("-"):
+            continue
+        if trimmed.starts_with("virt"):
+            continue
+
+        val tokens = split_whitespace(trimmed)
+        if tokens.len() >= 4:
+            var row: Dict<text, text> = {}
+            row["virt_addr"] = tokens[0]
+            row["phys_addr"] = tokens[1]
+            row["size"] = tokens[2]
+            row["perms"] = tokens[3]
+            rows.push(row)
+
+    rows
+
+# Parse PER.view (peripheral) output
+# Format: GPIOA_MODER  0x48000000  0x28000000  [31:0]
+fn parse_peripheral_output(raw: text) -> [Dict<text, text>]:
+    val lines = split_lines(raw)
+    var rows: [Dict<text, text>] = []
+
+    for line in lines:
+        val trimmed = trim(line)
+        if trimmed == "":
+            continue
+        if trimmed.starts_with("#"):
+            continue
+        if trimmed.starts_with("-"):
+            continue
+        if trimmed.starts_with("name"):
+            continue
+
+        val tokens = split_whitespace(trimmed)
+        if tokens.len() >= 4:
+            var row: Dict<text, text> = {}
+            row["name"] = tokens[0]
+            row["address"] = tokens[1]
+            row["value"] = tokens[2]
+            row["bits"] = tokens[3]
+            rows.push(row)
+
+    rows
+
+# Parse Data.List (disassembly) output
+# Format: 0x08001234  BL main+0x10  main
+fn parse_data_list_output(raw: text) -> [Dict<text, text>]:
+    val lines = split_lines(raw)
+    var rows: [Dict<text, text>] = []
+
+    for line in lines:
+        val trimmed = trim(line)
+        if trimmed == "":
+            continue
+        if trimmed.starts_with("#"):
+            continue
+        if trimmed.starts_with("-"):
+            continue
+        if trimmed.starts_with("address"):
+            continue
+
+        val tokens = split_whitespace(trimmed)
+        if tokens.len() >= 2:
+            var row: Dict<text, text> = {}
+            row["address"] = tokens[0]
+            # instruction is tokens 1..n-1, last token is symbol (if >= 3 tokens)
+            var instruction = tokens[1]
+            var symbol = ""
+            if tokens.len() >= 3:
+                symbol = tokens[tokens.len() - 1]
+                var ii = 2
+                while ii < tokens.len() - 1:
+                    instruction = instruction + " " + tokens[ii]
+                    ii = ii + 1
+            row["instruction"] = instruction
+            row["symbol"] = symbol
+            rows.push(row)
+
+    rows
+
+# Parse AREA (semihosting output)
+# Format: just lines of text
+fn parse_area_output(raw: text) -> [text]:
+    split_lines(raw)
+
+# Parse Var.Local output — reuses parse_var_watch_output
+fn parse_var_local_output(raw: text) -> [Dict<text, text>]:
+    parse_var_watch_output(raw)
 
 # Format a list of dicts as an aligned text table
 fn format_table(headers: [text], rows: [Dict<text, text>]) -> text:

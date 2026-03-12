@@ -1,3 +1,4 @@
+#![allow(unnamed_duplicate_typed_args)]
 # T32 CLI/MCP — Error codes, valid-item lists, and message builders
 # Error code scheme: T4xxx
 #
@@ -11,6 +12,9 @@
 # T4070-T4072  Remote (t32rem not found, command failed, connection refused)
 # T4080-T4082  MCP protocol (missing tool name, unknown tool, missing params)
 # T4090        Resource (not found)
+# T4100        Run state (target running, tool requires halted)
+# T4101        Timeout (command timed out)
+# T4102        State capture (failed to read window/register state)
 
 # ============================================================================
 # Error Code Constants
@@ -40,6 +44,9 @@ val T4080 = "T4080"
 val T4081 = "T4081"
 val T4082 = "T4082"
 val T4090 = "T4090"
+val T4100 = "T4100"
+val T4101 = "T4101"
+val T4102 = "T4102"
 
 # ============================================================================
 # Valid Item Lists
@@ -76,14 +83,24 @@ fn mcp_valid_resource_uris() -> [text]:
 # Inlined Suggestion Helpers (no stdlib dependency)
 # ============================================================================
 
+# Helper: extract substring from start to end using for-ch-in pattern
+fn ec_substr(s: text, start: i64, end_pos: i64) -> text:
+    var result = ""
+    var idx = 0
+    for ch in s:
+        if idx >= start and idx < end_pos:
+            result = result + ch
+        idx = idx + 1
+    result
+
 fn t32_suggest_similar(name: text, candidates: [text]) -> [text]:
     var matches: [text] = []
     if name.len() == 0:
         return matches
-    val first_char = name.slice(0, 1)
+    val first_char = ec_substr(name, 0, 1)
     var prefix2 = ""
     if name.len() >= 2:
-        prefix2 = name.slice(0, 2)
+        prefix2 = ec_substr(name, 0, 2)
     for candidate in candidates:
         if candidate.len() == 0:
             continue
@@ -206,7 +223,10 @@ fn t32_err_catalog_warning(path: text) -> text:
 # ============================================================================
 
 fn t32_err_t32rem_not_found() -> text:
-    "T4070: t32rem not found.\n  Set the T32REM environment variable to the path of t32rem,\n  or install TRACE32 to /opt/t32/."
+    "T4070: t32rem not found.\n  Set the T32REM environment variable to the path of t32rem,\n  or install TRACE32 to /opt/t32/.\n  Fallback: pip install lauterbach-trace32-rcl and place t32_python_bridge.py in PATH."
+
+fn t32_err_backend_not_found() -> text:
+    "T4070: No TRACE32 backend found.\n  Primary: install t32rem (set T32REM env var or install TRACE32 to /opt/t32/).\n  Fallback: pip install lauterbach-trace32-rcl and ensure t32_python_bridge.py is available\n  (set T32_PYTHON_BRIDGE env var or place alongside MCP server)."
 
 fn t32_err_cmd_failed(kind: text, exit_code: text, output: text) -> text:
     "T4071: {kind} failed (exit {exit_code}).\n  Output: {output}"
@@ -241,6 +261,19 @@ fn t32_err_resource_not_found(uri: text) -> text:
     val valid = mcp_valid_resource_uris()
     val available = t32_join_list(valid, ", ")
     "T4090: Resource not found: {uri}\n  Valid URIs: {available}"
+
+# ============================================================================
+# Message Builders — Run State / Timeout
+# ============================================================================
+
+fn t32_err_target_running(tool_name: text) -> text:
+    "T4100: Target is running — '{tool_name}' requires a halted CPU.\n  Use 't32_cmd_run(command: \"Break\")' to halt the target first."
+
+fn t32_err_command_timeout(tool_name: text, elapsed_ms: i64) -> text:
+    "T4101: Command '{tool_name}' timed out after {elapsed_ms}ms.\n  The target may be unresponsive. Check connection and target state."
+
+fn t32_err_state_capture_failed(detail: text) -> text:
+    "T4102: State capture failed: {detail}\n  Window content or register read returned an error."
 
 # ============================================================================
 # Generic Not-Found Builder

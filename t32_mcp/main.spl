@@ -1,31 +1,40 @@
 # T32 MCP Server — TRACE32 debug session control via MCP protocol
 #
-# Tools: 20 tools for session management, window capture, action invocation
+# Tools: 26 tools for session management, lifecycle management, window capture,
+#        action invocation, headless setup, AREA buffer, and command database
 # Protocol: MCP 2025-06-18 (Content-Length framing + JSON-Lines auto-detect)
 #
 # Architecture: Zero stdlib imports, inline JSON helpers, direct extern fn calls
 #
 # Split into multiple files:
-#   - json_helpers.spl   — JSON helpers, tool result helpers, shell helpers
-#   - protocol.spl       — Protocol I/O, initialize, tools list, schemas
-#   - session_tools.spl  — Session/core/command tool handlers
-#   - window_tools.spl   — Window tool handlers
-#   - action_tools.spl   — Action/field/history/resource handlers + dispatcher
+#   - json_helpers.spl    — JSON helpers, tool result helpers, shell helpers
+#   - protocol.spl        — Protocol I/O, initialize, tools list, schemas
+#   - session_tools.spl   — Session/core/command tool handlers
+#   - window_tools.spl    — Window tool handlers
+#   - action_tools.spl    — Action/field/history/resource handlers + dispatcher
+#   - headless_tools.spl  — Headless setup, AREA read, CMM command database
 
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 extern fn rt_env_get(name: text) -> text
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_exists(path: text) -> bool
+extern fn stderr_write(data: text) -> i64
+extern fn stderr_flush() -> i64
+extern fn rt_time_now_unix_micros() -> i64
 
 use app.mcp_t32.json_helpers
 use app.mcp_t32.protocol
 use app.mcp_t32.session_tools
 use app.mcp_t32.window_tools
+use app.mcp_t32.window_parsers
 use app.mcp_t32.action_tools
+use app.mcp_t32.headless_tools
+use app.mcp_t32.run_guard
+use app.mcp_t32.lifecycle_tools
 
 val T32_SERVER_NAME = "simple-mcp-t32"
-val T32_SERVER_VERSION = "1.0.0"
+val T32_SERVER_VERSION = "0.2.0"
 val T32_NL = "\n"
 
 # Protocol auto-detection
@@ -61,30 +70,43 @@ var MCP_T32_SESSIONS: [McpT32Session] = []
 var MCP_T32_CURRENT_SESSION = ""
 var MCP_T32_CURRENT_CORE = ""
 var MCP_T32_HISTORY: [McpT32HistoryItem] = []
+var MCP_T32_AREA_READY = false
+var MCP_T32_AREA_NAME = ""
+var T32_SEEN_FIRST_MESSAGE = false
+
+fn t32_startup_diag(message: text):
+    stderr_write("[t32-mcp] " + message + "\n")
+    stderr_flush()
 
 # --- Entry point ---
 
-fn t32_mcp_main():
+fn main():
+    if rt_env_get("SIMPLE_LIB") == "":
+        t32_startup_diag("startup warning: SIMPLE_LIB is not set; relative imports/resources may fail in some launch modes")
     t32_start_server()
 
 fn t32_start_server():
-    var running = true
-    for _iter in range(0, 999999):
-        if not running:
-            return
+    while true:
         var msg = t32_read_stdin_message()
         if msg == "":
-            running = false
+            if not T32_SEEN_FIRST_MESSAGE:
+                t32_startup_diag("startup error: no MCP request received on stdin")
+            return
         else:
+            T32_SEEN_FIRST_MESSAGE = true
             var method = t32_extract_field(msg, "method")
             var id = t32_extract_id(msg)
             var response = ""
             if method == "initialize":
+                t32_startup_diag("initialize received; server version " + T32_SERVER_VERSION)
                 response = t32_make_init_response(id)
             elif method == "initialized" or method == "notifications/initialized":
                 response = ""
             elif method == "shutdown":
                 response = t32_make_json_result(id, "null")
+                t32_write_stdout_message(response)
+                t32_shutdown_cleanup()
+                return
             elif method == "tools/list":
                 response = t32_make_tools_list(id)
             elif method == "tools/call":
@@ -98,9 +120,26 @@ fn t32_start_server():
             elif method == "notifications/cancelled" or method == "notifications/roots/list_changed":
                 response = ""
             else:
+                if method == "":
+                    t32_startup_diag("protocol error: request missing method field: " + msg)
                 if id != "" and id != "null":
                     response = t32_make_error(id, -32601, "Method not found: " + method)
             if response != "":
                 t32_write_stdout_message(response)
 
-t32_mcp_main()
+fn t32_shutdown_cleanup():
+    # Clean up AREA buffer if set up
+    if MCP_T32_AREA_READY:
+        val session_opt = t32_find_current_session()
+        match session_opt:
+            Some(session):
+                t32_run_remote(session, "AREA.CLEAR " + MCP_T32_AREA_NAME)
+                t32_run_remote(session, "SCREEN.ON")
+            nil:
+                pass_dn
+    # Close all sessions (best-effort)
+    for s in MCP_T32_SESSIONS:
+        t32_startup_diag("shutdown: closing session " + s.id)
+    MCP_T32_SESSIONS = []
+    MCP_T32_CURRENT_SESSION = ""
+    t32_startup_diag("shutdown complete")

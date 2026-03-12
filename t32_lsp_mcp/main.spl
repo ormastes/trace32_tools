@@ -1,3 +1,4 @@
+#![allow(unnamed_duplicate_typed_args)]
 # T32 LSP MCP Server — CMM language intelligence via MCP protocol
 #
 # Tools: 6 tools for parsing, diagnostics, completions, hover, symbols, CLI validation
@@ -15,7 +16,7 @@ use t32_lsp_mcp.protocol
 use t32_lsp_mcp.tools
 
 val LSP_SERVER_NAME = "simple-mcp-t32-lsp"
-val LSP_SERVER_VERSION = "1.0.0"
+val LSP_SERVER_VERSION = "0.1.2"
 val LSP_NL = "\n"
 
 # Protocol auto-detection
@@ -27,17 +28,14 @@ var LSP_INIT_CACHE = ""
 
 # --- Entry point ---
 
-fn lsp_mcp_main():
+fn main():
     lsp_start_server()
 
 fn lsp_start_server():
-    var running = true
-    for _iter in range(0, 999999):
-        if not running:
-            return
+    while true:
         var msg = lsp_read_stdin_message()
         if msg == "":
-            running = false
+            return
         else:
             var method = lsp_extract_field(msg, "method")
             var id = lsp_extract_id(msg)
@@ -84,5 +82,3 @@ fn lsp_dispatch_tool(id: text, body: text) -> text:
         return handle_cmm_validate_cli(id, args_raw)
 
     lsp_result_error(id, -32602, "Unknown tool: " + tool_name)
-
-lsp_mcp_main()

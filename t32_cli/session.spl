@@ -177,7 +177,12 @@ fn cli_run_t32rem(session: CliSessionInfo, cmd: text) -> Result<text, text>:
     val t32rem = session.t32rem_path
     if t32rem == "":
         return Err("t32rem not found - install TRACE32 or set T32_PATH")
-    val full_cmd = "{t32rem} {session.host} port={session.port} {cmd}"
+    val safe_host = cli_shell_escape(session.host)
+    var full_cmd = "{t32rem} {safe_host} port={session.port}"
+    if session.intercom_name != "":
+        val safe_intercom = cli_shell_escape(session.intercom_name)
+        full_cmd = "{full_cmd} INTERCOM={safe_intercom}"
+    full_cmd = "{full_cmd} {cmd}"
     var stdout = ""
     var stderr = ""
     var rc: i64 = 0
@@ -185,3 +190,14 @@ fn cli_run_t32rem(session: CliSessionInfo, cmd: text) -> Result<text, text>:
     if rc != 0:
         return Err("t32rem error (exit {rc}): {stderr.trim()}")
     Ok(stdout.trim())
+
+# Shell escape: wrap in single quotes, escape embedded quotes
+fn cli_shell_escape(s: text) -> text:
+    var result = "'"
+    for ch in s:
+        if ch == "'":
+            result = result + "'\\''"
+        else:
+            result = result + ch
+    result = result + "'"
+    result

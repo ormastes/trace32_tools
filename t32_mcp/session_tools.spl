@@ -1,46 +1,177 @@
+#![allow(unnamed_duplicate_typed_args)]
 # T32 MCP — Session tool handlers
 # Handles: sessions_list, session_open, session_resume, session_close,
 #          core_list, core_select, cmd_run, cmm_run, eval
 
-use app.t32_cli.error_codes.{T4010, T4013, T4070, T4071, T4082, t32_err_not_found, t32_err_no_session_mcp, t32_err_missing_param, t32_err_t32rem_not_found, t32_err_cmd_failed}
+use app.t32_cli.error_codes.{T4010, T4013, T4070, T4071, T4082, t32_err_not_found, t32_err_no_session_mcp, t32_err_missing_param, t32_err_backend_not_found, t32_err_cmd_failed}
 
-# --- t32rem helper ---
+# --- Backend detection (t32rem primary, python t32-rcl fallback) ---
 
-fn t32_find_t32rem() -> text:
+var MCP_T32_BACKEND_TYPE = ""    # "t32rem" | "python_rcl" | ""
+var MCP_T32_BACKEND_CMD = ""     # Cached command path/prefix
+
+fn t32_find_python_rcl_bridge() -> text:
+    # Check if python3 has lauterbach.trace32.rcl installed
+    var py_stdout = ""
+    var py_stderr = ""
+    var py_rc: i64 = 0
+    (py_stdout, py_stderr, py_rc) = rt_process_run("/bin/sh", ["-c", "python3 -c 'import lauterbach.trace32.rcl' 2>/dev/null"])
+    if py_rc != 0:
+        return ""
+    # Check T32_PYTHON_BRIDGE env var
+    val bridge_env = rt_env_get("T32_PYTHON_BRIDGE") ?? ""
+    if bridge_env != "" and rt_file_exists(bridge_env):
+        return "python3 " + bridge_env
+    # Search common paths for bridge script
+    val candidates = [
+        "examples/10_tooling/trace32_tools/t32_mcp/t32_python_bridge.py",
+        "t32_python_bridge.py",
+        "/opt/t32/python/t32_python_bridge.py"
+    ]
+    for path in candidates:
+        if rt_file_exists(path):
+            return "python3 " + path
+    # Try PATH
+    var which_stdout = ""
+    var which_stderr = ""
+    var which_rc: i64 = 0
+    (which_stdout, which_stderr, which_rc) = rt_process_run("/bin/sh", ["-c", "which t32_python_bridge.py 2>/dev/null"])
+    if which_rc == 0 and which_stdout.trim() != "":
+        return "python3 " + which_stdout.trim()
+    ""
+
+fn t32_is_wsl() -> bool:
+    var stdout = ""
+    var stderr = ""
+    var rc: i64 = 0
+    (stdout, stderr, rc) = rt_process_run("/bin/sh", ["-c", "cat /proc/version 2>/dev/null"])
+    if rc != 0:
+        return false
+    val lower = stdout.to_lower()
+    if lower.contains("microsoft") or lower.contains("wsl"):
+        return true
+    false
+
+fn t32_find_backend() -> text:
+    # Return cached result
+    if MCP_T32_BACKEND_CMD != "":
+        return MCP_T32_BACKEND_CMD
+    # --- Primary: t32rem binary ---
     # Check T32REM env var first
     val env_path = rt_env_get("T32REM") ?? ""
     if env_path != "":
+        MCP_T32_BACKEND_TYPE = "t32rem"
+        MCP_T32_BACKEND_CMD = env_path
         return env_path
-    # Check common paths
+    # Check T32MEM env var — derive paths from install root
+    val t32mem = rt_env_get("T32MEM") ?? ""
+    if t32mem != "":
+        # Try T32MEM-based paths
+        if rt_file_exists(t32mem + "/bin/pc_linux64/t32rem"):
+            MCP_T32_BACKEND_TYPE = "t32rem"
+            MCP_T32_BACKEND_CMD = t32mem + "/bin/pc_linux64/t32rem"
+            return MCP_T32_BACKEND_CMD
+        if rt_file_exists(t32mem + "/bin/t32rem"):
+            MCP_T32_BACKEND_TYPE = "t32rem"
+            MCP_T32_BACKEND_CMD = t32mem + "/bin/t32rem"
+            return MCP_T32_BACKEND_CMD
+        # WSL: try Windows executables under T32MEM
+        if t32_is_wsl():
+            if rt_file_exists(t32mem + "/bin/windows64/t32rem.exe"):
+                MCP_T32_BACKEND_TYPE = "t32rem"
+                MCP_T32_BACKEND_CMD = t32mem + "/bin/windows64/t32rem.exe"
+                return MCP_T32_BACKEND_CMD
+            if rt_file_exists(t32mem + "/bin/t32rem.exe"):
+                MCP_T32_BACKEND_TYPE = "t32rem"
+                MCP_T32_BACKEND_CMD = t32mem + "/bin/t32rem.exe"
+                return MCP_T32_BACKEND_CMD
+    # Check common Linux paths
     if rt_file_exists("/opt/t32/bin/pc_linux64/t32rem"):
-        return "/opt/t32/bin/pc_linux64/t32rem"
+        MCP_T32_BACKEND_TYPE = "t32rem"
+        MCP_T32_BACKEND_CMD = "/opt/t32/bin/pc_linux64/t32rem"
+        return MCP_T32_BACKEND_CMD
     if rt_file_exists("/opt/t32/bin/t32rem"):
-        return "/opt/t32/bin/t32rem"
+        MCP_T32_BACKEND_TYPE = "t32rem"
+        MCP_T32_BACKEND_CMD = "/opt/t32/bin/t32rem"
+        return MCP_T32_BACKEND_CMD
+    # WSL: check default Windows T32 installation paths
+    if t32_is_wsl():
+        if rt_file_exists("/mnt/c/T32/bin/windows64/t32rem.exe"):
+            MCP_T32_BACKEND_TYPE = "t32rem"
+            MCP_T32_BACKEND_CMD = "/mnt/c/T32/bin/windows64/t32rem.exe"
+            return MCP_T32_BACKEND_CMD
+        if rt_file_exists("/mnt/c/T32/bin/t32rem.exe"):
+            MCP_T32_BACKEND_TYPE = "t32rem"
+            MCP_T32_BACKEND_CMD = "/mnt/c/T32/bin/t32rem.exe"
+            return MCP_T32_BACKEND_CMD
     # Try PATH
     var stdout = ""
     var stderr = ""
     var rc: i64 = 0
     (stdout, stderr, rc) = rt_process_run("/bin/sh", ["-c", "which t32rem 2>/dev/null"])
     if rc == 0 and stdout.trim() != "":
-        return stdout.trim()
+        MCP_T32_BACKEND_TYPE = "t32rem"
+        MCP_T32_BACKEND_CMD = stdout.trim()
+        return MCP_T32_BACKEND_CMD
+    # --- Fallback: python lauterbach-trace32-rcl ---
+    val python_bridge = t32_find_python_rcl_bridge()
+    if python_bridge != "":
+        MCP_T32_BACKEND_TYPE = "python_rcl"
+        MCP_T32_BACKEND_CMD = python_bridge
+        return python_bridge
     ""
 
+fn t32_get_backend_type() -> text:
+    if MCP_T32_BACKEND_TYPE == "":
+        t32_find_backend()
+    MCP_T32_BACKEND_TYPE
+
 fn t32_run_remote(session: McpT32Session, cmd: text) -> (text, i64):
-    val t32rem = t32_find_t32rem()
-    if t32rem == "":
-        return (t32_err_t32rem_not_found(), -1)
+    val backend = t32_find_backend()
+    if backend == "":
+        return (t32_err_backend_not_found(), -1)
     val intercom = session.intercom_name
-    var full_cmd = t32rem + " " + session.host + " port=" + str(session.port)
+    val safe_host = t32_shell_escape(session.host)
+    var full_cmd = backend + " " + safe_host + " port=" + str(session.port)
     if intercom != "":
-        full_cmd = full_cmd + " INTERCOM=" + intercom
+        val safe_intercom = t32_shell_escape(intercom)
+        full_cmd = full_cmd + " INTERCOM=" + safe_intercom
     full_cmd = full_cmd + " " + cmd
     var stdout = ""
     var stderr = ""
     var rc: i64 = 0
     (stdout, stderr, rc) = rt_process_run("/bin/sh", ["-c", full_cmd + " < /dev/null"])
     if rc != 0 and stderr != "":
-        return ("t32rem error (exit " + str(rc) + "): " + stderr.trim(), rc)
+        val backend_label = MCP_T32_BACKEND_TYPE
+        return (backend_label + " error (exit " + str(rc) + "): " + stderr.trim(), rc)
     (stdout, rc)
+
+fn t32_run_remote_timed(session: McpT32Session, cmd: text, timeout_ms: i64) -> (text, i64, bool):
+    val backend = t32_find_backend()
+    if backend == "":
+        return (t32_err_backend_not_found(), -1, false)
+    val intercom = session.intercom_name
+    val safe_host = t32_shell_escape(session.host)
+    var full_cmd = backend + " " + safe_host + " port=" + str(session.port)
+    if intercom != "":
+        val safe_intercom = t32_shell_escape(intercom)
+        full_cmd = full_cmd + " INTERCOM=" + safe_intercom
+    full_cmd = full_cmd + " timeout=" + str(timeout_ms) + " " + cmd
+    val start_time = rt_time_now_unix_micros()
+    var stdout = ""
+    var stderr = ""
+    var rc: i64 = 0
+    (stdout, stderr, rc) = rt_process_run("/bin/sh", ["-c", full_cmd + " < /dev/null"])
+    val end_time = rt_time_now_unix_micros()
+    val elapsed_ms = (end_time - start_time) / 1000
+    # Detect timeout: if elapsed >= timeout, mark as timed out
+    var timed_out = false
+    if elapsed_ms >= timeout_ms:
+        timed_out = true
+    if rc != 0 and stderr != "":
+        val backend_label = MCP_T32_BACKEND_TYPE
+        return (backend_label + " error (exit " + str(rc) + "): " + stderr.trim(), rc, timed_out)
+    (stdout, rc, timed_out)
 
 fn t32_find_current_session() -> Option<McpT32Session>:
     if MCP_T32_CURRENT_SESSION == "":
@@ -64,12 +195,12 @@ fn t32_add_history(command: text, result: text, session_id: text, core_id: text)
         core_id: core_id
     )
     MCP_T32_HISTORY = MCP_T32_HISTORY + [entry]
-    # Cap history to 500 entries
+    # Cap history to 500 entries — drop oldest one at a time
     var count: i64 = 0
     for _h in MCP_T32_HISTORY:
         count = count + 1
     if count > 500:
-        MCP_T32_HISTORY = MCP_T32_HISTORY[250..]
+        MCP_T32_HISTORY = MCP_T32_HISTORY[1..]
 
 var MCP_T32_NEXT_SESSION_ID: i64 = 1
 
@@ -105,12 +236,15 @@ fn handle_t32_session_open(id: text, body: text) -> text:
     val arch = t32_extract_field(body, "architecture")
     if host == "" or port_str == "":
         return t32_make_tool_error(id, -32602, t32_err_missing_param("host, port", "t32_session_open", "t32_session_open(host: \"<host>\", port: \"<port>\")", "t32_session_open(host: \"localhost\", port: \"20000\")"))
+    # Validate port is numeric
+    if not t32_is_all_digits(port_str):
+        return t32_make_tool_error(id, -32602, "Invalid port: must be numeric. Got: " + port_str)
     var port: i64 = 0
     var pi = 0
     for _i in range(0, 10):
         if pi >= port_str.len():
             break
-        val ch = port_str.substring(pi, pi + 1)
+        val ch = t32_char_at(port_str, pi)
         var digit = int(ch)
         port = port * 10 + digit
         pi = pi + 1
@@ -160,6 +294,7 @@ fn handle_t32_session_open(id: text, body: text) -> text:
     if connected:
         conn_str = "true"
     r = r + "," + t32_jp("connected", conn_str)
+    r = r + "," + t32_jp("backend", t32_js(t32_get_backend_type()))
     r = r + t32_RB()
     t32_make_tool_result(id, r)
 
@@ -195,31 +330,69 @@ fn handle_t32_session_close(id: text, body: text) -> text:
     t32_add_history("session_close", "ok", session_id, "")
     t32_make_tool_result(id, t32_jo2(t32_jp("closed", t32_js(session_id)), t32_jp("status", t32_js("ok"))))
 
+fn t32_find_session_by_id(session_id: text) -> Option<McpT32Session>:
+    for s in MCP_T32_SESSIONS:
+        if s.id == session_id:
+            return Some(s)
+    nil
+
 fn handle_t32_core_list(id: text, body: text) -> text:
     var session_id = t32_extract_field(body, "session_id")
-    if session_id == "":
-        session_id = MCP_T32_CURRENT_SESSION
-    val found = t32_find_current_session()
+    # Use provided session_id to look up session, fall back to current
+    var found: Option<McpT32Session> = nil
+    if session_id != "":
+        found = t32_find_session_by_id(session_id)
+    else:
+        found = t32_find_current_session()
     match found:
         nil: return t32_make_tool_error(id, -32602, t32_err_no_session_mcp())
         Some(s):
+            # Query T32 for real core count via EVAL CORE.NUMBER()
+            var count_out = ""
+            var count_rc: i64 = 0
+            (count_out, count_rc) = t32_run_remote(s, "EVAL CORE.NUMBER()")
+            var core_count: i64 = 0
+            var core_query_failed = false
+            if count_rc == 0:
+                val trimmed_count = count_out.trim().replace(".", "")
+                core_count = int(trimmed_count)
+            # If query failed or returned 0, fall back to at least 1 core
+            if core_count < 1:
+                core_count = 1
+                core_query_failed = true
             var arr = t32_SB_L()
             var first = true
-            for c in s.cores:
+            var ci: i64 = 0
+            while ci < core_count:
+                # Query core name via EVAL CORE.NAME(n)
+                var name_out = ""
+                var name_rc: i64 = 0
+                (name_out, name_rc) = t32_run_remote(s, "EVAL CORE.NAME(" + str(ci) + ".)")
+                var core_name = "core" + str(ci)
+                if name_rc == 0 and name_out.trim() != "":
+                    core_name = name_out.trim().replace("\"", "")
                 if not first:
                     arr = arr + ","
                 first = false
+                var is_selected = "false"
+                if MCP_T32_CURRENT_CORE == core_name or (MCP_T32_CURRENT_CORE == "" and ci == 0):
+                    is_selected = "true"
                 var obj = t32_LB()
-                obj = obj + t32_jp("core_id", t32_js(c.core_id))
-                obj = obj + "," + t32_jp("label", t32_js(c.label))
-                obj = obj + "," + t32_jp("instance_binding", t32_js(c.instance_binding))
+                obj = obj + t32_jp("id", str(ci))
+                obj = obj + "," + t32_jp("name", t32_js(core_name))
+                obj = obj + "," + t32_jp("selected", is_selected)
                 obj = obj + t32_RB()
                 arr = arr + obj
+                ci = ci + 1
             arr = arr + t32_SB_R()
+            t32_add_history("core_list", str(core_count) + " cores", s.id, MCP_T32_CURRENT_CORE)
             var result = t32_LB()
             result = result + t32_jp("session_id", t32_js(s.id))
             result = result + "," + t32_jp("current_core", t32_js(MCP_T32_CURRENT_CORE))
+            result = result + "," + t32_jp("core_count", str(core_count))
             result = result + "," + t32_jp("cores", arr)
+            if core_query_failed:
+                result = result + "," + t32_jp("warning", t32_js("core_query_failed"))
             result = result + t32_RB()
             return t32_make_tool_result(id, result)
 
@@ -227,8 +400,21 @@ fn handle_t32_core_select(id: text, body: text) -> text:
     val core_id = t32_extract_field(body, "core_id")
     if core_id == "":
         return t32_make_tool_error(id, -32602, t32_err_missing_param("core_id", "t32_core_select", "t32_core_select(core_id: \"<id>\")", "t32_core_select(core_id: \"core0\")"))
-    MCP_T32_CURRENT_CORE = core_id
-    t32_make_tool_result(id, t32_jo2(t32_jp("current_core", t32_js(core_id)), t32_jp("status", t32_js("ok"))))
+    val session_opt = t32_find_current_session()
+    match session_opt:
+        nil: return t32_make_tool_error(id, -32602, t32_err_no_session_mcp())
+        Some(session):
+            # Send real CORE.select command to T32
+            var stdout = ""
+            var rc: i64 = 0
+            (stdout, rc) = t32_run_remote(session, "CORE.select " + core_id + ".")
+            if rc != 0 and rc != -1:
+                return t32_make_tool_error(id, -32000, "Core select failed (exit " + str(rc) + "): " + stdout.trim())
+            if rc == -1:
+                return t32_make_tool_error(id, -32000, stdout.trim())
+            MCP_T32_CURRENT_CORE = core_id
+            t32_add_history("CORE.select " + core_id, "ok", session.id, core_id)
+            return t32_make_tool_result(id, t32_jo2(t32_jp("current_core", t32_js(core_id)), t32_jp("status", t32_js("ok"))))
 
 fn handle_t32_cmd_run(id: text, body: text) -> text:
     val command = t32_extract_field(body, "command")
@@ -258,6 +444,9 @@ fn handle_t32_cmm_run(id: text, body: text) -> text:
     val script = t32_extract_field(body, "script")
     if script == "":
         return t32_make_tool_error(id, -32602, t32_err_missing_param("script", "t32_cmm_run", "t32_cmm_run(script: \"<path>\")", "t32_cmm_run(script: \"scripts/init.cmm\")"))
+    # Validate script path — reject shell metacharacters
+    if t32_has_shell_meta(script):
+        return t32_make_tool_error(id, -32602, "Invalid CMM script path: contains shell metacharacters. Path: " + script)
     val wait_str = t32_extract_field(body, "wait")
     var wait = false
     if wait_str == "true":
@@ -268,10 +457,30 @@ fn handle_t32_cmm_run(id: text, body: text) -> text:
         timeout_ms = int(timeout_str)
         if timeout_ms < 1000:
             timeout_ms = 30000
+    val capture_area_str = t32_extract_field(body, "capture_area")
+    var capture_area = false
+    if capture_area_str == "true":
+        capture_area = true
     val session_opt = t32_find_current_session()
     match session_opt:
         nil: return t32_make_tool_error(id, -32602, t32_err_no_session_mcp())
         Some(session):
+            # Auto-setup AREA if capture requested and not yet ready
+            if capture_area and not MCP_T32_AREA_READY:
+                var area_name = MCP_T32_AREA_NAME
+                if area_name == "":
+                    area_name = "MCP_OUT"
+                var s1 = ""
+                var r1: i64 = 0
+                (s1, r1) = t32_run_remote(session, "SCREEN.OFF")
+                var s2 = ""
+                var r2: i64 = 0
+                (s2, r2) = t32_run_remote(session, "AREA.Create " + area_name)
+                var s3 = ""
+                var r3: i64 = 0
+                (s3, r3) = t32_run_remote(session, "AREA.Select " + area_name)
+                MCP_T32_AREA_READY = true
+                MCP_T32_AREA_NAME = area_name
             val do_cmd = "DO " + script
             var stdout = ""
             var rc: i64 = 0
@@ -285,11 +494,24 @@ fn handle_t32_cmm_run(id: text, body: text) -> text:
             var practice_status = "fired"
             if wait:
                 practice_status = t32_poll_practice_state(session, timeout_ms)
+            # Capture AREA output if requested
+            var area_output = ""
+            if capture_area and MCP_T32_AREA_READY:
+                var area_name = MCP_T32_AREA_NAME
+                if area_name == "":
+                    area_name = "MCP_OUT"
+                var area_stdout = ""
+                var area_rc: i64 = 0
+                (area_stdout, area_rc) = t32_run_remote(session, "WinPrint.AREA " + area_name)
+                if area_rc == 0:
+                    area_output = area_stdout.trim()
             var r = t32_LB()
             r = r + t32_jp("script", t32_js(script))
             r = r + "," + t32_jp("output", t32_js(stdout.trim()))
             r = r + "," + t32_jp("exit_code", str(rc))
             r = r + "," + t32_jp("practice_state", t32_js(practice_status))
+            if area_output != "":
+                r = r + "," + t32_jp("area_output", t32_js(area_output))
             r = r + t32_RB()
             return t32_make_tool_result(id, r)
 
