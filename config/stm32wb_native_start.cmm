@@ -1,0 +1,5 @@
+; Repo-managed STM32WB TRACE32 startup for native Remote API runs.
+DO /opt/t32/stm32wb_startup.cmm
+SYStem.Option SemiHost ON
+Break
+ENDDO

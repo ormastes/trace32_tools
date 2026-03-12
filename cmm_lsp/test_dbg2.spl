@@ -1,0 +1,35 @@
+use cmm_parser.{parse_cmm_source}
+use cmm_ast.{CmmProgram, CmmStmt}
+
+fn show_stmts(source: text):
+    val p = parse_cmm_source(source)
+    var i = 0
+    while i < p.statements.len():
+        val s = p.statements[i]
+        match s:
+            case CmmStmt.If(cond, then_body, else_body, sp):
+                print "  [{i}] IF ... then_body=yes else_body={else_body.?}"
+            case CmmStmt.Block(stmts, sp):
+                print "  [{i}] BLOCK({stmts.len()} stmts)"
+            case CmmStmt.Command(name, args, sp):
+                print "  [{i}] CMD {name}"
+            case CmmStmt.EmptyLine(sp):
+                print "  [{i}] EMPTY"
+            case CmmStmt.ErrorNode(msg, sp):
+                print "  [{i}] ERROR: {msg}"
+            case CmmStmt.CommentLine(text, sp):
+                print "  [{i}] COMMENT"
+            case _:
+                print "  [{i}] OTHER"
+    if p.errors.len() > 0:
+        print "  ERRORS:"
+        var ei = 0
+        while ei < p.errors.len():
+            print "    {p.errors[ei]}"
+            ei = ei + 1
+
+print "=== Simple IF/ELSE ==="
+show_stmts("if 1==1\n(\n  PRINT \"yes\"\n)\nelse\n(\n  PRINT \"no\"\n)\n")
+
+print "=== IF with & condition + ELSE ==="
+show_stmts("if \"&sval\"!=\"\"&&dialog.boolean(HEX)\n(\n  PRINT \"yes\"\n)\nelse if \"&sval\"!=\"\"\n(\n  PRINT \"no\"\n)\n")

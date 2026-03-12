@@ -1,0 +1,307 @@
+# CMM Language Server — Go-to-Definition Provider
+# Resolves definition locations for labels, macros, and file references
+# in PRACTICE CMM scripts.
+#
+# Supports:
+#   - GOTO/GOSUB/JUMPTO target labels -> label definition line
+#   - &macro references -> LOCAL/GLOBAL/PRIVATE declaration line
+#   - DO file references -> file URI (if resolvable)
+
+export DefinitionResult, get_definition_at
+
+use cmm_ast.{CmmProgram, CmmStmt, CmmExpr, CmmLiteral, CmmSpan}
+use cmm_analyzer.{CmmSymbolTable, CmmSymbol, CmmSymbolKind}
+
+val _default_sp = CmmSpan(start_line: 0, start_col: 0, end_line: 0, end_col: 0)
+
+# ---------------------------------------------------------------------------
+# DefinitionResult — location of the definition
+# ---------------------------------------------------------------------------
+
+struct DefinitionResult:
+    uri: text
+    line: i64
+    column: i64
+
+# ---------------------------------------------------------------------------
+# Main entry point
+# ---------------------------------------------------------------------------
+
+# Find the definition location for the symbol at (line, col) in the program.
+# Returns nil if no navigable definition is found.
+fn get_definition_at(program: CmmProgram, symbols: CmmSymbolTable, line: i64, col: i64, uri: text) -> DefinitionResult?:
+    var i = 0
+    while i < program.statements.len():
+        val result = definition_for_stmt(program.statements[i], symbols, line, col, uri)
+        if result.?:
+            return result
+        i = i + 1
+    nil
+
+# ---------------------------------------------------------------------------
+# Statement-level definition resolution
+# ---------------------------------------------------------------------------
+
+fn definition_for_stmt(stmt: CmmStmt, symbols: CmmSymbolTable, line: i64, col: i64, uri: text) -> DefinitionResult?:
+    match stmt:
+        # GOTO target -> find label definition
+        case CmmStmt.Goto(target, sp):
+            if span_contains(sp, line, col):
+                return find_label_definition(target, symbols, uri)
+
+        # GOSUB target -> find label definition
+        case CmmStmt.Gosub(target, args, sp):
+            if span_contains(sp, line, col):
+                return find_label_definition(target, symbols, uri)
+
+        # JUMPTO target -> find label definition (may be cross-module)
+        case CmmStmt.JumpTo(target, sp):
+            if span_contains(sp, line, col):
+                return find_label_definition(target, symbols, uri)
+
+        # Macro assignment — go to the declaration of the macro
+        case CmmStmt.MacroAssign(name, expr, sp):
+            if span_contains(sp, line, col):
+                return find_macro_definition(name, symbols, uri)
+
+        case CmmStmt.MacroRecAssign(name, expr, sp):
+            if span_contains(sp, line, col):
+                return find_macro_definition(name, symbols, uri)
+
+        # DO file -> resolve to file URI
+        case CmmStmt.DoCall(file_expr, args, sp):
+            if span_contains(sp, line, col):
+                val file_name = extract_file_name(file_expr)
+                if file_name != "":
+                    return resolve_file_reference(file_name, uri)
+                # Also check for macro refs in args/file_expr
+                return definition_for_expr(file_expr, symbols, line, col, uri)
+
+        # RUN file -> resolve to file URI
+        case CmmStmt.RunCall(file_expr, args, sp):
+            if span_contains(sp, line, col):
+                val file_name = extract_file_name(file_expr)
+                if file_name != "":
+                    return resolve_file_reference(file_name, uri)
+
+        # Commands — check for macro refs in parameters
+        case CmmStmt.Command(cmd, params, sp):
+            if span_contains(sp, line, col):
+                return definition_for_exprs(params, symbols, line, col, uri)
+
+        case CmmStmt.DeviceCommand(dev, cmd, params, sp):
+            if span_contains(sp, line, col):
+                return definition_for_exprs(params, symbols, line, col, uri)
+
+        # IF/ELSE — recurse into condition and bodies
+        case CmmStmt.IfElse(cond, then_body, else_body, sp):
+            if span_contains(sp, line, col):
+                val cond_result = definition_for_expr(cond, symbols, line, col, uri)
+                if cond_result.?:
+                    return cond_result
+                val body_result = definition_for_stmt(then_body, symbols, line, col, uri)
+                if body_result.?:
+                    return body_result
+                if else_body.?:
+                    val eb = else_body ?? CmmStmt.EmptyLine(_default_sp)
+                    return definition_for_stmt(eb, symbols, line, col, uri)
+
+        # WHILE — recurse
+        case CmmStmt.WhileLoop(cond, body, sp):
+            if span_contains(sp, line, col):
+                val cond_result = definition_for_expr(cond, symbols, line, col, uri)
+                if cond_result.?:
+                    return cond_result
+                return definition_for_stmt(body, symbols, line, col, uri)
+
+        # RePeaT — recurse
+        case CmmStmt.RepeatLoop(count, body, sp):
+            if span_contains(sp, line, col):
+                return definition_for_stmt(body, symbols, line, col, uri)
+
+        # Block — recurse into children
+        case CmmStmt.Block(stmts, sp):
+            if span_contains(sp, line, col):
+                var bi = 0
+                while bi < stmts.len():
+                    val result = definition_for_stmt(stmts[bi], symbols, line, col, uri)
+                    if result.?:
+                        return result
+                    bi = bi + 1
+
+        # ON/GLOBALON — recurse into action
+        case CmmStmt.OnEvent(event, action, sp):
+            if span_contains(sp, line, col):
+                return definition_for_stmt(action, symbols, line, col, uri)
+
+        case CmmStmt.GlobalOnEvent(event, action, sp):
+            if span_contains(sp, line, col):
+                return definition_for_stmt(action, symbols, line, col, uri)
+
+        # PRINT/WRITE — check expressions for macro references
+        case CmmStmt.PrintStmt(exprs, sp):
+            if span_contains(sp, line, col):
+                return definition_for_exprs(exprs, symbols, line, col, uri)
+
+        case CmmStmt.WriteFile(channel, exprs, sp):
+            if span_contains(sp, line, col):
+                return definition_for_exprs(exprs, symbols, line, col, uri)
+
+        case _: ()
+
+    nil
+
+# ---------------------------------------------------------------------------
+# Expression-level definition resolution
+# ---------------------------------------------------------------------------
+
+fn definition_for_expr(expr: CmmExpr, symbols: CmmSymbolTable, line: i64, col: i64, uri: text) -> DefinitionResult?:
+    match expr:
+        # Macro reference -> go to declaration
+        case CmmExpr.MacroRef(name):
+            return find_macro_definition(name, symbols, uri)
+
+        # Recursive macro reference -> go to declaration
+        case CmmExpr.MacroRecRef(name):
+            return find_macro_definition(name, symbols, uri)
+
+        # Macro expansion -> go to declaration
+        case CmmExpr.MacroExpand(name, inner):
+            return find_macro_definition(name, symbols, uri)
+
+        # Binary — recurse
+        case CmmExpr.Binary(op, lhs, rhs):
+            val lhs_result = definition_for_expr(lhs, symbols, line, col, uri)
+            if lhs_result.?:
+                return lhs_result
+            return definition_for_expr(rhs, symbols, line, col, uri)
+
+        # Unary — recurse
+        case CmmExpr.Unary(op, inner):
+            return definition_for_expr(inner, symbols, line, col, uri)
+
+        # Parenthesized — recurse
+        case CmmExpr.Parenthesized(inner):
+            return definition_for_expr(inner, symbols, line, col, uri)
+
+        # Braced — recurse
+        case CmmExpr.Braced(inner):
+            return definition_for_expr(inner, symbols, line, col, uri)
+
+        # Function call — recurse into arguments
+        case CmmExpr.FunctionCall(name, args):
+            return definition_for_exprs(args, symbols, line, col, uri)
+
+        case _: ()
+
+    nil
+
+# Resolve definitions across a list of expressions.
+fn definition_for_exprs(exprs: [CmmExpr], symbols: CmmSymbolTable, line: i64, col: i64, uri: text) -> DefinitionResult?:
+    var i = 0
+    while i < exprs.len():
+        val result = definition_for_expr(exprs[i], symbols, line, col, uri)
+        if result.?:
+            return result
+        i = i + 1
+    nil
+
+# ---------------------------------------------------------------------------
+# Symbol resolution helpers
+# ---------------------------------------------------------------------------
+
+# Find the definition of a label in the symbol table.
+fn find_label_definition(name: text, symbols: CmmSymbolTable, uri: text) -> DefinitionResult?:
+    val syms = symbols.find_by_name(name)
+    var i = 0
+    while i < syms.len():
+        match syms[i].kind:
+            case CmmSymbolKind.LabelSym:
+                return DefinitionResult(
+                    uri: uri,
+                    line: syms[i].def_line,
+                    column: syms[i].def_column
+                )
+            case _: ()
+        i = i + 1
+    nil
+
+# Find the declaration of a macro in the symbol table.
+fn find_macro_definition(name: text, symbols: CmmSymbolTable, uri: text) -> DefinitionResult?:
+    val syms = symbols.find_by_name(name)
+    var i = 0
+    while i < syms.len():
+        match syms[i].kind:
+            case CmmSymbolKind.MacroSym:
+                return DefinitionResult(
+                    uri: uri,
+                    line: syms[i].def_line,
+                    column: syms[i].def_column
+                )
+            case _: ()
+        i = i + 1
+    nil
+
+# Resolve a DO/RUN file reference to a URI.
+# Tries to construct a URI relative to the current document's directory.
+fn resolve_file_reference(file_name: text, current_uri: text) -> DefinitionResult?:
+    # Extract directory from current URI
+    val dir = extract_directory(current_uri)
+    var target_uri = ""
+    if dir != "":
+        target_uri = dir + "/" + file_name
+    else:
+        target_uri = file_name
+
+    # Add .cmm extension if not present
+    if not ends_with(target_uri, ".cmm") and not ends_with(target_uri, ".CMM"):
+        target_uri = target_uri + ".cmm"
+
+    DefinitionResult(
+        uri: target_uri,
+        line: 1,
+        column: 1
+    )
+
+# ---------------------------------------------------------------------------
+# Utility helpers
+# ---------------------------------------------------------------------------
+
+# Check whether a span contains a given (line, col) position.
+fn span_contains(sp: CmmSpan, line: i64, col: i64) -> bool:
+    if line < sp.start_line or line > sp.end_line:
+        return false
+    if line == sp.start_line and col < sp.start_col:
+        return false
+    if line == sp.end_line and col > sp.end_col:
+        return false
+    true
+
+# Extract a file name from an expression.
+fn extract_file_name(expr: CmmExpr) -> text:
+    match expr:
+        case CmmExpr.Ident(name): name
+        case CmmExpr.Lit(lit):
+            match lit:
+                case CmmLiteral.Str(s): s
+                case _: ""
+        case CmmExpr.DotPath(path): path
+        case _: ""
+
+# Extract directory path from a URI (everything up to and excluding the last /).
+fn extract_directory(uri: text) -> text:
+    var last_slash = -1
+    var i = 0
+    while i < uri.len():
+        if uri[i:i + 1] == "/":
+            last_slash = i
+        i = i + 1
+    if last_slash >= 0:
+        return uri[0:last_slash]
+    ""
+
+# Check if text ends with a given suffix.
+fn ends_with(s: text, suffix: text) -> bool:
+    if suffix.len() > s.len():
+        return false
+    s[s.len() - suffix.len():s.len()] == suffix

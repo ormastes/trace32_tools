@@ -1,0 +1,82 @@
+; @target: STM32H743
+; @arch: Cortex-M7
+; @purpose: Peripheral register inspection
+; @requires: SWD, Power Debug II USB
+; @cli-mode: batch
+
+; STM32H743 Peripheral Register Inspection
+
+SCREEN.OFF
+AREA.Create CLI_OUTPUT
+AREA.Select CLI_OUTPUT
+ON ERROR GOSUB error_handler
+
+LOCAL &gpio_moder &gpio_odr &gpio_idr
+LOCAL &usart_cr1 &usart_brr &usart_isr
+LOCAL &spi_cr1 &spi_sr &spi_dr
+
+SYStem.RESet
+SYStem.CPU STM32H743
+SYStem.CONFIG.DEBUGPORTTYPE SWD
+SYStem.Up
+
+; Load symbols for peripheral names
+Data.LOAD.Elf "stm32h7_app.elf" /NoCODE
+
+; Print peripheral views
+WinPrint.PER.view "GPIOA" 0x58020000
+WinPrint.PER.view "USART1" 0x40011000
+WinPrint.PER.view "SPI1" 0x40013000
+
+; Read GPIO registers
+&gpio_moder=Data.Long(D:0x58020000)     ; GPIOA_MODER
+&gpio_odr=Data.Long(D:0x58020014)       ; GPIOA_ODR
+&gpio_idr=Data.Long(D:0x58020010)       ; GPIOA_IDR
+PRINT "[PERIPH] gpio_a_moder=" FORMAT.Hex(8., &gpio_moder)
+PRINT "[PERIPH] gpio_a_odr=" FORMAT.Hex(8., &gpio_odr)
+PRINT "[PERIPH] gpio_a_idr=" FORMAT.Hex(8., &gpio_idr)
+
+; Configure GPIOA pin 5 as output (LED on Nucleo board)
+&gpio_moder=(&gpio_moder&~(0x3<<10.))|(0x1<<10.)
+Data.Set D:0x58020000 %Long &gpio_moder
+
+; Toggle LED
+Data.Set D:0x58020014 %Long (&gpio_odr|0x20)   ; Set pin 5
+PRINT "[PERIPH] gpio_a_pin5=HIGH"
+WAIT 1s
+Data.Set D:0x58020014 %Long (&gpio_odr&~0x20)  ; Clear pin 5
+PRINT "[PERIPH] gpio_a_pin5=LOW"
+
+; Read USART1 registers
+&usart_cr1=Data.Long(D:0x40011000)      ; USART1_CR1
+&usart_brr=Data.Long(D:0x4001100C)      ; USART1_BRR
+&usart_isr=Data.Long(D:0x4001101C)      ; USART1_ISR
+PRINT "[PERIPH] usart1_cr1=" FORMAT.Hex(8., &usart_cr1)
+PRINT "[PERIPH] usart1_brr=" FORMAT.Hex(8., &usart_brr)
+PRINT "[PERIPH] usart1_isr=" FORMAT.Hex(8., &usart_isr)
+
+; Read SPI1 registers
+&spi_cr1=Data.Long(D:0x40013000)        ; SPI1_CR1
+&spi_sr=Data.Long(D:0x40013008)         ; SPI1_SR
+PRINT "[PERIPH] spi1_cr1=" FORMAT.Hex(8., &spi_cr1)
+PRINT "[PERIPH] spi1_sr=" FORMAT.Hex(8., &spi_sr)
+
+; Check USART transmit ready
+IF (&usart_isr&0x80)!=0
+  PRINT "[PERIPH] usart1_txe=READY"
+ELSE
+  PRINT "[PERIPH] usart1_txe=NOT_READY"
+
+; Check SPI busy flag
+IF (&spi_sr&0x80)!=0
+  PRINT "[PERIPH] spi1_bsy=BUSY"
+ELSE
+  PRINT "[PERIPH] spi1_bsy=IDLE"
+
+PRINT "[STATUS] operation=SUCCESS"
+
+ENDDO TRUE()
+
+error_handler:
+  PRINT "[ERROR] line=" PRACTICE.CALLER.LINE()
+  ENDDO FALSE()

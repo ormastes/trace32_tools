@@ -1,0 +1,52 @@
+# Debug: test specific failing patterns
+use cmm_parser.{parse_cmm_source}
+use cmm_lexer.{lex_cmm_line}
+use cmm_tokens.{CmmToken, CmmTokenKind}
+
+fn test_lex(name: text, source: text):
+    val tokens = lex_cmm_line(source, 1)
+    var parts: [text] = []
+    var i = 0
+    while i < tokens.len():
+        parts.push(tokens[i].text)
+        i = i + 1
+    print "LEX  {name}: {parts}"
+
+fn test_parse(name: text, source: text):
+    val p = parse_cmm_source(source)
+    if p.errors.len() > 0:
+        print "FAIL {name}: {p.errors[0]}"
+    if p.errors.len() == 0:
+        print "OK   {name}"
+
+# Pattern 1: CAnalyzer.mode pipe
+test_lex("dotcmd", "CAnalyzer.mode pipe")
+test_parse("dotcmd", "CAnalyzer.mode pipe\n")
+
+# Pattern 2: BookMark.Create "1" main\34
+test_lex("bookmark", "  BookMark.Create \"1\" main\\34")
+test_parse("bookmark", "  BookMark.Create \"1\" main\\34\n")
+
+# Pattern 3: winclear (lowercase)
+test_lex("lower", "winclear FDXOC")
+test_parse("lower", "winclear FDXOC\n")
+
+# Pattern 4: ENTRY &func %line &arg
+test_lex("entry", "ENTRY &func %line &arg")
+test_parse("entry", "ENTRY &func %line &arg\n")
+
+# Pattern 5: FLASH.Create with range
+test_lex("flash_range", "  FLASH.Create 1. 0x0--0x7ff 0x200 TARGET Word")
+test_parse("flash_range", "  FLASH.Create 1. 0x0--0x7ff 0x200 TARGET Word\n")
+
+# Pattern 6: string!=string
+test_lex("str_ne", "  IF \"&param\"!=\"\"")
+test_parse("str_ne", "  IF \"&param\"!=\"\"\n    Step\n")
+
+# Pattern 7: sYmbol.OVERLAY.Create 1,,,".page1","task.c"
+test_lex("overlay", "  sYmbol.OVERLAY.Create 1,,,\".page1\",\"task.c\"")
+test_parse("overlay", "  sYmbol.OVERLAY.Create 1,,,\".page1\",\"task.c\"\n")
+
+# Pattern 8: framepos
+test_lex("framepos", "framepos ,,,,maximized")
+test_parse("framepos", "framepos ,,,,maximized\n")

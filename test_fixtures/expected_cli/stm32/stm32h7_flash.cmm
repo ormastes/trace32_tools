@@ -1,0 +1,80 @@
+; @target: STM32H743
+; @arch: Cortex-M7
+; @purpose: Flash programming and verify
+; @requires: SWD, Power Debug II USB
+; @cli-mode: batch
+
+; STM32H743 Flash Programming and Verify
+
+SCREEN.OFF
+AREA.Create CLI_OUTPUT
+AREA.Select CLI_OUTPUT
+ON ERROR GOSUB error_handler
+
+LOCAL &elf_path &confirm &flash_result
+LOCAL &verify_ok
+
+ENTRY &elf_path &confirm
+IF "&elf_path"==""
+  &elf_path="stm32h7_app.elf"
+
+SYStem.RESet
+SYStem.CPU STM32H743
+SYStem.CONFIG.DEBUGPORTTYPE SWD
+SYStem.Up
+
+; CLI confirmation via ENTRY parameter
+IF "&confirm"!="TRUE"
+(
+  PRINT "[FLASH] operation=CANCELLED reason=no_confirmation"
+  ENDDO FALSE()
+)
+
+PRINT "[FLASH] operation=ERASE status=STARTED"
+
+; Flash configuration - STM32H743 internal flash
+; Bank 1: 0x08000000--0x080FFFFF (1MB, 128KB sectors)
+; Bank 2: 0x08100000--0x081FFFFF (1MB, 128KB sectors)
+FLASH.RESet
+FLASH.Create 1. 0x08000000--0x080FFFFF 0x20000 TARGET Long
+FLASH.Create 2. 0x08100000--0x081FFFFF 0x20000 TARGET Long
+
+PRINT "[FLASH] operation=ERASE status=COMPLETE"
+
+; Program
+PRINT "[FLASH] operation=PROGRAM file=&elf_path"
+FLASH.Program ALL /Erase
+Data.LOAD.Elf "&elf_path"
+FLASH.Program off
+
+PRINT "[FLASH] operation=PROGRAM status=COMPLETE"
+
+; Show loaded code
+WinPrint.Data.List
+
+; Verify
+Data.LOAD.Elf "&elf_path" /ComPare
+IF FOUND()
+(
+  PRINT "[FLASH] verify=FAILED"
+  PRINT "[STATUS] operation=FAILED reason=verify_mismatch"
+  ENDDO FALSE()
+)
+ELSE
+(
+  PRINT "[FLASH] verify=PASSED"
+)
+
+; Reset and run from flash
+SYStem.Down
+SYStem.Up
+Go
+WAIT !STATE.RUN() 5s
+
+PRINT "[STATUS] operation=SUCCESS"
+
+ENDDO TRUE()
+
+error_handler:
+  PRINT "[ERROR] line=" PRACTICE.CALLER.LINE()
+  ENDDO FALSE()

@@ -1,0 +1,339 @@
+# T32 MCP — Session tool handlers
+# Handles: sessions_list, session_open, session_resume, session_close,
+#          core_list, core_select, cmd_run, cmm_run, eval
+
+use app.t32_cli.error_codes.{T4010, T4013, T4070, T4071, T4082, t32_err_not_found, t32_err_no_session_mcp, t32_err_missing_param, t32_err_t32rem_not_found, t32_err_cmd_failed}
+
+# --- t32rem helper ---
+
+fn t32_find_t32rem() -> text:
+    # Check T32REM env var first
+    val env_path = rt_env_get("T32REM") ?? ""
+    if env_path != "":
+        return env_path
+    # Check common paths
+    if rt_file_exists("/opt/t32/bin/pc_linux64/t32rem"):
+        return "/opt/t32/bin/pc_linux64/t32rem"
+    if rt_file_exists("/opt/t32/bin/t32rem"):
+        return "/opt/t32/bin/t32rem"
+    # Try PATH
+    var stdout = ""
+    var stderr = ""
+    var rc: i64 = 0
+    (stdout, stderr, rc) = rt_process_run("/bin/sh", ["-c", "which t32rem 2>/dev/null"])
+    if rc == 0 and stdout.trim() != "":
+        return stdout.trim()
+    ""
+
+fn t32_run_remote(session: McpT32Session, cmd: text) -> (text, i64):
+    val t32rem = t32_find_t32rem()
+    if t32rem == "":
+        return (t32_err_t32rem_not_found(), -1)
+    val intercom = session.intercom_name
+    var full_cmd = t32rem + " " + session.host + " port=" + str(session.port)
+    if intercom != "":
+        full_cmd = full_cmd + " INTERCOM=" + intercom
+    full_cmd = full_cmd + " " + cmd
+    var stdout = ""
+    var stderr = ""
+    var rc: i64 = 0
+    (stdout, stderr, rc) = rt_process_run("/bin/sh", ["-c", full_cmd + " < /dev/null"])
+    if rc != 0 and stderr != "":
+        return ("t32rem error (exit " + str(rc) + "): " + stderr.trim(), rc)
+    (stdout, rc)
+
+fn t32_find_current_session() -> Option<McpT32Session>:
+    if MCP_T32_CURRENT_SESSION == "":
+        # Return first session if any
+        var count = 0
+        for s in MCP_T32_SESSIONS:
+            if count == 0:
+                return Some(s)
+            count = count + 1
+        return nil
+    for s in MCP_T32_SESSIONS:
+        if s.id == MCP_T32_CURRENT_SESSION:
+            return Some(s)
+    nil
+
+fn t32_add_history(command: text, result: text, session_id: text, core_id: text):
+    val entry = McpT32HistoryItem(
+        command: command,
+        result: result,
+        session_id: session_id,
+        core_id: core_id
+    )
+    MCP_T32_HISTORY = MCP_T32_HISTORY + [entry]
+    # Cap history to 500 entries
+    var count: i64 = 0
+    for _h in MCP_T32_HISTORY:
+        count = count + 1
+    if count > 500:
+        MCP_T32_HISTORY = MCP_T32_HISTORY[250..]
+
+var MCP_T32_NEXT_SESSION_ID: i64 = 1
+
+# --- Tool handlers ---
+
+fn handle_t32_sessions_list(id: text, body: text) -> text:
+    var arr = t32_SB_L()
+    var first = true
+    for s in MCP_T32_SESSIONS:
+        if not first:
+            arr = arr + ","
+        first = false
+        var obj = t32_LB()
+        obj = obj + t32_jp("id", t32_js(s.id))
+        obj = obj + "," + t32_jp("host", t32_js(s.host))
+        obj = obj + "," + t32_jp("port", str(s.port))
+        obj = obj + "," + t32_jp("intercom_name", t32_js(s.intercom_name))
+        obj = obj + "," + t32_jp("architecture", t32_js(s.architecture))
+        obj = obj + "," + t32_jp("connected", t32_js(str(s.connected)))
+        var core_count: i64 = 0
+        for _c in s.cores:
+            core_count = core_count + 1
+        obj = obj + "," + t32_jp("core_count", str(core_count))
+        obj = obj + t32_RB()
+        arr = arr + obj
+    arr = arr + t32_SB_R()
+    t32_make_tool_result(id, arr)
+
+fn handle_t32_session_open(id: text, body: text) -> text:
+    val host = t32_extract_field(body, "host")
+    val port_str = t32_extract_field(body, "port")
+    val name = t32_extract_field(body, "name")
+    val arch = t32_extract_field(body, "architecture")
+    if host == "" or port_str == "":
+        return t32_make_tool_error(id, -32602, t32_err_missing_param("host, port", "t32_session_open", "t32_session_open(host: \"<host>\", port: \"<port>\")", "t32_session_open(host: \"localhost\", port: \"20000\")"))
+    var port: i64 = 0
+    var pi = 0
+    for _i in range(0, 10):
+        if pi >= port_str.len():
+            break
+        val ch = port_str.substring(pi, pi + 1)
+        var digit = int(ch)
+        port = port * 10 + digit
+        pi = pi + 1
+    val session_id = "t32_" + str(MCP_T32_NEXT_SESSION_ID)
+    MCP_T32_NEXT_SESSION_ID = MCP_T32_NEXT_SESSION_ID + 1
+    var intercom_name = name
+    if intercom_name == "":
+        intercom_name = session_id
+    var architecture = arch
+    if architecture == "":
+        architecture = "unknown"
+    val session = McpT32Session(
+        id: session_id,
+        host: host,
+        port: port,
+        intercom_name: intercom_name,
+        architecture: architecture,
+        connected: false,
+        cores: []
+    )
+    # Try PING to verify connection
+    var ping_result = ""
+    var ping_rc: i64 = 0
+    (ping_result, ping_rc) = t32_run_remote(session, "PING")
+    var connected = false
+    if ping_rc == 0:
+        connected = true
+    val final_session = McpT32Session(
+        id: session_id,
+        host: host,
+        port: port,
+        intercom_name: intercom_name,
+        architecture: architecture,
+        connected: connected,
+        cores: []
+    )
+    MCP_T32_SESSIONS = MCP_T32_SESSIONS + [final_session]
+    MCP_T32_CURRENT_SESSION = session_id
+    t32_add_history("session_open " + host + ":" + port_str, "ok", session_id, "")
+    var r = t32_LB()
+    r = r + t32_jp("session_id", t32_js(session_id))
+    r = r + "," + t32_jp("host", t32_js(host))
+    r = r + "," + t32_jp("port", str(port))
+    r = r + "," + t32_jp("intercom_name", t32_js(intercom_name))
+    r = r + "," + t32_jp("architecture", t32_js(architecture))
+    var conn_str = "false"
+    if connected:
+        conn_str = "true"
+    r = r + "," + t32_jp("connected", conn_str)
+    r = r + t32_RB()
+    t32_make_tool_result(id, r)
+
+fn handle_t32_session_resume(id: text, body: text) -> text:
+    val session_id = t32_extract_field(body, "session_id")
+    if session_id == "":
+        return t32_make_tool_error(id, -32602, t32_err_missing_param("session_id", "t32_session_resume", "t32_session_resume(session_id: \"<id>\")", "t32_session_resume(session_id: \"t32_1\")"))
+    var found = false
+    for s in MCP_T32_SESSIONS:
+        if s.id == session_id:
+            found = true
+    if not found:
+        return t32_make_tool_error(id, -32602, t32_err_not_found(T4010, "session", session_id, t32_mcp_session_ids()))
+    MCP_T32_CURRENT_SESSION = session_id
+    t32_make_tool_result(id, t32_jo2(t32_jp("current_session", t32_js(session_id)), t32_jp("status", t32_js("ok"))))
+
+fn handle_t32_session_close(id: text, body: text) -> text:
+    val session_id = t32_extract_field(body, "session_id")
+    if session_id == "":
+        return t32_make_tool_error(id, -32602, t32_err_missing_param("session_id", "t32_session_close", "t32_session_close(session_id: \"<id>\")", "t32_session_close(session_id: \"t32_1\")"))
+    var found = false
+    var kept: [McpT32Session] = []
+    for s in MCP_T32_SESSIONS:
+        if s.id == session_id:
+            found = true
+        else:
+            kept = kept + [s]
+    if not found:
+        return t32_make_tool_error(id, -32602, t32_err_not_found(T4010, "session", session_id, t32_mcp_session_ids()))
+    MCP_T32_SESSIONS = kept
+    if MCP_T32_CURRENT_SESSION == session_id:
+        MCP_T32_CURRENT_SESSION = ""
+    t32_add_history("session_close", "ok", session_id, "")
+    t32_make_tool_result(id, t32_jo2(t32_jp("closed", t32_js(session_id)), t32_jp("status", t32_js("ok"))))
+
+fn handle_t32_core_list(id: text, body: text) -> text:
+    var session_id = t32_extract_field(body, "session_id")
+    if session_id == "":
+        session_id = MCP_T32_CURRENT_SESSION
+    val found = t32_find_current_session()
+    match found:
+        nil: return t32_make_tool_error(id, -32602, t32_err_no_session_mcp())
+        Some(s):
+            var arr = t32_SB_L()
+            var first = true
+            for c in s.cores:
+                if not first:
+                    arr = arr + ","
+                first = false
+                var obj = t32_LB()
+                obj = obj + t32_jp("core_id", t32_js(c.core_id))
+                obj = obj + "," + t32_jp("label", t32_js(c.label))
+                obj = obj + "," + t32_jp("instance_binding", t32_js(c.instance_binding))
+                obj = obj + t32_RB()
+                arr = arr + obj
+            arr = arr + t32_SB_R()
+            var result = t32_LB()
+            result = result + t32_jp("session_id", t32_js(s.id))
+            result = result + "," + t32_jp("current_core", t32_js(MCP_T32_CURRENT_CORE))
+            result = result + "," + t32_jp("cores", arr)
+            result = result + t32_RB()
+            return t32_make_tool_result(id, result)
+
+fn handle_t32_core_select(id: text, body: text) -> text:
+    val core_id = t32_extract_field(body, "core_id")
+    if core_id == "":
+        return t32_make_tool_error(id, -32602, t32_err_missing_param("core_id", "t32_core_select", "t32_core_select(core_id: \"<id>\")", "t32_core_select(core_id: \"core0\")"))
+    MCP_T32_CURRENT_CORE = core_id
+    t32_make_tool_result(id, t32_jo2(t32_jp("current_core", t32_js(core_id)), t32_jp("status", t32_js("ok"))))
+
+fn handle_t32_cmd_run(id: text, body: text) -> text:
+    val command = t32_extract_field(body, "command")
+    if command == "":
+        return t32_make_tool_error(id, -32602, t32_err_missing_param("command", "t32_cmd_run", "t32_cmd_run(command: \"<PRACTICE command>\")", "t32_cmd_run(command: \"Break.Set main\")"))
+    val session_opt = t32_find_current_session()
+    match session_opt:
+        nil: return t32_make_tool_error(id, -32602, t32_err_no_session_mcp())
+        Some(session):
+            var stdout = ""
+            var rc: i64 = 0
+            (stdout, rc) = t32_run_remote(session, command)
+            t32_add_history(command, stdout.trim(), session.id, MCP_T32_CURRENT_CORE)
+            if rc != 0 and rc != -1:
+                return t32_make_tool_error(id, -32000, t32_err_cmd_failed("Command", str(rc), stdout.trim()))
+            if rc == -1:
+                # t32rem not found
+                return t32_make_tool_error(id, -32000, stdout.trim())
+            var r = t32_LB()
+            r = r + t32_jp("command", t32_js(command))
+            r = r + "," + t32_jp("output", t32_js(stdout.trim()))
+            r = r + "," + t32_jp("exit_code", str(rc))
+            r = r + t32_RB()
+            return t32_make_tool_result(id, r)
+
+fn handle_t32_cmm_run(id: text, body: text) -> text:
+    val script = t32_extract_field(body, "script")
+    if script == "":
+        return t32_make_tool_error(id, -32602, t32_err_missing_param("script", "t32_cmm_run", "t32_cmm_run(script: \"<path>\")", "t32_cmm_run(script: \"scripts/init.cmm\")"))
+    val wait_str = t32_extract_field(body, "wait")
+    var wait = false
+    if wait_str == "true":
+        wait = true
+    val timeout_str = t32_extract_field(body, "timeout")
+    var timeout_ms: i64 = 30000
+    if timeout_str != "":
+        timeout_ms = int(timeout_str)
+        if timeout_ms < 1000:
+            timeout_ms = 30000
+    val session_opt = t32_find_current_session()
+    match session_opt:
+        nil: return t32_make_tool_error(id, -32602, t32_err_no_session_mcp())
+        Some(session):
+            val do_cmd = "DO " + script
+            var stdout = ""
+            var rc: i64 = 0
+            (stdout, rc) = t32_run_remote(session, do_cmd)
+            t32_add_history(do_cmd, stdout.trim(), session.id, MCP_T32_CURRENT_CORE)
+            if rc != 0 and rc != -1:
+                return t32_make_tool_error(id, -32000, t32_err_cmd_failed("CMM script", str(rc), stdout.trim()))
+            if rc == -1:
+                return t32_make_tool_error(id, -32000, stdout.trim())
+            # Poll PRACTICE.STATE() if wait=true
+            var practice_status = "fired"
+            if wait:
+                practice_status = t32_poll_practice_state(session, timeout_ms)
+            var r = t32_LB()
+            r = r + t32_jp("script", t32_js(script))
+            r = r + "," + t32_jp("output", t32_js(stdout.trim()))
+            r = r + "," + t32_jp("exit_code", str(rc))
+            r = r + "," + t32_jp("practice_state", t32_js(practice_status))
+            r = r + t32_RB()
+            return t32_make_tool_result(id, r)
+
+# Poll PRACTICE.STATE() until idle (value=0) or timeout
+fn t32_poll_practice_state(session: McpT32Session, timeout_ms: i64) -> text:
+    val max_polls = timeout_ms / 500
+    var polls: i64 = 0
+    while polls < max_polls:
+        var state_out = ""
+        var state_rc: i64 = 0
+        (state_out, state_rc) = t32_run_remote(session, "EVAL PRACTICE.STATE()")
+        if state_rc != 0:
+            return "poll_error"
+        val state_trimmed = state_out.trim()
+        # PRACTICE.STATE() returns 0 when idle
+        if state_trimmed == "0" or state_trimmed == "0.":
+            return "idle"
+        # Sleep 500ms between polls
+        var sleep_stdout = ""
+        var sleep_stderr = ""
+        var sleep_rc: i64 = 0
+        (sleep_stdout, sleep_stderr, sleep_rc) = rt_process_run("/bin/sh", ["-c", "sleep 0.5"])
+        polls = polls + 1
+    "timeout"
+
+fn handle_t32_eval(id: text, body: text) -> text:
+    val expression = t32_extract_field(body, "expression")
+    if expression == "":
+        return t32_make_tool_error(id, -32602, t32_err_missing_param("expression", "t32_eval", "t32_eval(expression: \"<expr>\")", "t32_eval(expression: \"Register(PC)\")"))
+    val session_opt = t32_find_current_session()
+    match session_opt:
+        nil: return t32_make_tool_error(id, -32602, t32_err_no_session_mcp())
+        Some(session):
+            val eval_cmd = "EVAL " + expression
+            var stdout = ""
+            var rc: i64 = 0
+            (stdout, rc) = t32_run_remote(session, eval_cmd)
+            t32_add_history(eval_cmd, stdout.trim(), session.id, MCP_T32_CURRENT_CORE)
+            if rc != 0 and rc != -1:
+                return t32_make_tool_error(id, -32000, t32_err_cmd_failed("Eval", str(rc), stdout.trim()))
+            if rc == -1:
+                return t32_make_tool_error(id, -32000, stdout.trim())
+            var r = t32_LB()
+            r = r + t32_jp("expression", t32_js(expression))
+            r = r + "," + t32_jp("result", t32_js(stdout.trim()))
+            r = r + t32_RB()
+            return t32_make_tool_result(id, r)

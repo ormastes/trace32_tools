@@ -1,0 +1,6 @@
+; Repo-managed STM32WB TRACE32 startup for GDB bridge runs.
+DO /opt/t32/stm32wb_startup.cmm
+SYStem.Option SemiHost ON
+SETUP.API.GDB.Enable /PORT 2331
+Break
+ENDDO

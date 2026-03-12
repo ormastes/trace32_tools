@@ -1,0 +1,189 @@
+# CMM (PRACTICE Script) Diagnostics — Formatting and Collection
+# Diagnostic utilities for the CMM Language Server.
+#
+# Provides:
+#   - CmmDiagnostic / CmmDiagnosticKind — diagnostic value types
+#   - DiagnosticCollector — mutable collector with convenience add_* methods
+#   - format_diagnostic / severity_text — rendering helpers
+#
+# These types are shared by the analyzer (cmm_analyzer.spl) and the
+# LSP diagnostic publisher (lsp_diagnostics.spl).
+
+export CmmDiagnostic, CmmDiagnosticKind, DiagnosticCollector
+export format_diagnostic, severity_text, make_diagnostic
+
+# ---------------------------------------------------------------------------
+# Diagnostic severity
+# ---------------------------------------------------------------------------
+
+enum CmmDiagnosticKind:
+    Error
+    Warning
+    Info
+    Hint
+
+# ---------------------------------------------------------------------------
+# Diagnostic value
+# ---------------------------------------------------------------------------
+
+struct CmmDiagnostic:
+    kind: CmmDiagnosticKind
+    message: text
+    line: i64
+    column: i64
+    end_line: i64
+    end_column: i64
+
+# ---------------------------------------------------------------------------
+# Formatting helpers
+# ---------------------------------------------------------------------------
+
+# Format a diagnostic as a human-readable single-line string.
+#
+# Example output:  12:4: error: Undefined label 'cleanup'
+fn format_diagnostic(d: CmmDiagnostic) -> text:
+    val sev = severity_text(d.kind)
+    "{d.line}:{d.column}: {sev}: {d.message}"
+
+# Convert a severity kind to its lowercase name.
+fn severity_text(kind: CmmDiagnosticKind) -> text:
+    match kind:
+        case CmmDiagnosticKind.Error: "error"
+        case CmmDiagnosticKind.Warning: "warning"
+        case CmmDiagnosticKind.Info: "info"
+        case CmmDiagnosticKind.Hint: "hint"
+
+# Shorthand constructor for a single-position diagnostic.
+fn make_diagnostic(kind: CmmDiagnosticKind, msg: text, line: i64, col: i64) -> CmmDiagnostic:
+    CmmDiagnostic(
+        kind: kind,
+        message: msg,
+        line: line,
+        column: col,
+        end_line: line,
+        end_column: col
+    )
+
+# ---------------------------------------------------------------------------
+# DiagnosticCollector — mutable accumulator
+# ---------------------------------------------------------------------------
+
+class DiagnosticCollector:
+    diagnostics: [CmmDiagnostic]
+
+    # Add an error diagnostic at a single position.
+    me add_error(msg: text, line: i64, col: i64):
+        self.diagnostics.push(CmmDiagnostic(
+            kind: CmmDiagnosticKind.Error,
+            message: msg,
+            line: line,
+            column: col,
+            end_line: line,
+            end_column: col
+        ))
+
+    # Add an error diagnostic spanning a range of positions.
+    me add_error_range(msg: text, line: i64, col: i64, end_line: i64, end_col: i64):
+        self.diagnostics.push(CmmDiagnostic(
+            kind: CmmDiagnosticKind.Error,
+            message: msg,
+            line: line,
+            column: col,
+            end_line: end_line,
+            end_column: end_col
+        ))
+
+    # Add a warning diagnostic at a single position.
+    me add_warning(msg: text, line: i64, col: i64):
+        self.diagnostics.push(CmmDiagnostic(
+            kind: CmmDiagnosticKind.Warning,
+            message: msg,
+            line: line,
+            column: col,
+            end_line: line,
+            end_column: col
+        ))
+
+    # Add a warning diagnostic spanning a range of positions.
+    me add_warning_range(msg: text, line: i64, col: i64, end_line: i64, end_col: i64):
+        self.diagnostics.push(CmmDiagnostic(
+            kind: CmmDiagnosticKind.Warning,
+            message: msg,
+            line: line,
+            column: col,
+            end_line: end_line,
+            end_column: end_col
+        ))
+
+    # Add an info diagnostic at a single position.
+    me add_info(msg: text, line: i64, col: i64):
+        self.diagnostics.push(CmmDiagnostic(
+            kind: CmmDiagnosticKind.Info,
+            message: msg,
+            line: line,
+            column: col,
+            end_line: line,
+            end_column: col
+        ))
+
+    # Add a hint diagnostic at a single position.
+    me add_hint(msg: text, line: i64, col: i64):
+        self.diagnostics.push(CmmDiagnostic(
+            kind: CmmDiagnosticKind.Hint,
+            message: msg,
+            line: line,
+            column: col,
+            end_line: line,
+            end_column: col
+        ))
+
+    # Return the total number of diagnostics collected.
+    fn count() -> i64:
+        self.diagnostics.len()
+
+    # Return only error-level diagnostics.
+    fn errors() -> [CmmDiagnostic]:
+        var result: [CmmDiagnostic] = []
+        var i = 0
+        while i < self.diagnostics.len():
+            val d = self.diagnostics[i]
+            match d.kind:
+                case CmmDiagnosticKind.Error:
+                    result.push(d)
+                case _: ()
+            i = i + 1
+        result
+
+    # Return only warning-level diagnostics.
+    fn warnings() -> [CmmDiagnostic]:
+        var result: [CmmDiagnostic] = []
+        var i = 0
+        while i < self.diagnostics.len():
+            val d = self.diagnostics[i]
+            match d.kind:
+                case CmmDiagnosticKind.Warning:
+                    result.push(d)
+                case _: ()
+            i = i + 1
+        result
+
+    # Return true if any error-level diagnostic has been collected.
+    fn has_errors() -> bool:
+        var i = 0
+        while i < self.diagnostics.len():
+            match self.diagnostics[i].kind:
+                case CmmDiagnosticKind.Error: return true
+                case _: ()
+            i = i + 1
+        false
+
+    # Format all diagnostics as newline-separated text.
+    fn format_all() -> text:
+        var result = ""
+        var i = 0
+        while i < self.diagnostics.len():
+            if i > 0:
+                result = result + "\n"
+            result = result + format_diagnostic(self.diagnostics[i])
+            i = i + 1
+        result

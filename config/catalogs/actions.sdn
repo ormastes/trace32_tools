@@ -1,0 +1,149 @@
+# T32 CLI — Action catalog
+# Each entry defines a TRACE32 action available for CLI execution
+
+action set_break
+  label: Set Breakpoint
+  type: execute
+  command: Break.Set {symbol}
+
+action clear_break
+  label: Clear Breakpoint
+  type: execute
+  command: Break.Delete {symbol}
+
+action clear_all_breaks
+  label: Clear All Breakpoints
+  type: execute
+  command: Break.Delete *
+
+action go
+  label: Resume Execution
+  type: execute
+  command: Go
+
+action halt
+  label: Halt Target
+  type: execute
+  command: Break
+
+action step
+  label: Single Step
+  type: execute
+  command: Step
+
+action step_over
+  label: Step Over
+  type: execute
+  command: Step.Over
+
+action step_out
+  label: Step Out
+  type: execute
+  command: Step.Out
+
+action system_up
+  label: System Up
+  type: execute
+  command: SYStem.Up
+
+action system_reset
+  label: System Reset
+  type: execute
+  command: SYStem.ResetTarget
+
+action flash_program
+  label: Flash Program
+  type: execute
+  command: FLASH.ReProgram ALL; Data.LOAD.Elf {elf_path}; FLASH.ReProgram OFF
+
+action trace_init
+  label: Initialize Trace
+  type: execute
+  command: Trace.Init; Trace.Method Analyzer; Trace.Size 8192.
+
+action trace_arm
+  label: Arm Trace
+  type: execute
+  command: Trace.Arm
+
+action coverage_reset
+  label: Reset Coverage
+  type: execute
+  command: COVerage.Reset
+
+action coverage_add
+  label: Add Coverage Module
+  type: execute
+  command: COVerage.Add {module}
+
+action open_break_list
+  label: Open Breakpoint List
+  type: open_window
+  command: Break.List
+  target: break_list
+
+action open_register_view
+  label: Open Register View
+  type: open_window
+  command: Register.view /SpotLight
+  target: register_view
+
+action refresh_registers
+  label: Refresh Registers
+  type: execute
+  command: Register.view
+  target: register_view
+
+action view_all_registers
+  label: View All Registers
+  type: execute
+  command: Register.view /ALL
+  target: register_view
+
+action refresh_break_list
+  label: Refresh Breakpoints
+  type: execute
+  command: Break.List
+  target: break_list
+
+action delete_all_breaks
+  label: Delete All Breakpoints
+  type: execute
+  command: Break.Delete /ALL
+  target: break_list
+
+action refresh_var_local
+  label: Refresh Local Variables
+  type: execute
+  command: Var.Local
+  target: var_local
+
+action refresh_var_watch
+  label: Refresh Watch
+  type: execute
+  command: Var.Watch
+  target: var_watch
+
+action add_watch
+  label: Add Watch Expression
+  type: execute
+  command: Var.AddWatch {expression}
+  target: var_watch
+
+action refresh_trace
+  label: Refresh Trace
+  type: execute
+  command: Trace.List
+  target: trace_list
+
+action clear_trace
+  label: Clear Trace
+  type: execute
+  command: Trace.CLEAR
+  target: trace_list
+
+action refresh_coverage
+  label: Refresh Coverage
+  type: execute
+  command: COVerage.ListFunc
+  target: coverage_list

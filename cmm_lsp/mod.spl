@@ -1,0 +1,468 @@
+# CMM Language Server Protocol — Entry Point
+#
+# A language server for TRACE32 PRACTICE (CMM) scripts,
+# implemented in Simple language.
+#
+# Usage:
+#   simple examples/10_tooling/cmm_lsp/mod.spl --lsp          # Start LSP server (stdio)
+#   simple examples/10_tooling/cmm_lsp/mod.spl parse file.cmm  # Parse and print AST
+#   simple examples/10_tooling/cmm_lsp/mod.spl check file.cmm  # Check for errors
+#   simple examples/10_tooling/cmm_lsp/mod.spl bulk /opt/t32/demo  # Bulk parse CMM files
+#   simple examples/10_tooling/cmm_lsp/mod.spl verify file.cmm  # Deep validation report
+#   simple examples/10_tooling/cmm_lsp/mod.spl --version       # Show version
+
+use cmm_parser.{parse_cmm_source, parse_cmm_file}
+use cmm_ast.{CmmStmt}
+use cmm_analyzer.{analyze_program, CmmAnalysisResult, CmmSymbolTable, CmmSymbolKind}
+use cmm_diagnostics.{format_diagnostic, CmmDiagnosticKind}
+use cmm_commands.{build_command_db}
+use cmm_functions.{build_function_db}
+use cmm_version.{default_config, config_for_version}
+use lsp_server.{start_lsp_server}
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_dir_list(path: text) -> [text]
+extern fn sys_get_args() -> [text]
+
+# ---------------------------------------------------------------------------
+# Main entry point
+# ---------------------------------------------------------------------------
+
+fn cmm_main(args: [text]):
+    if args.len() < 1:
+        print_usage()
+        return
+
+    val cmd = args[0]
+
+    if cmd == "--lsp":
+        start_lsp_server()
+    else if cmd == "parse":
+        if args.len() < 2:
+            print "Usage: cmm_lsp parse <file.cmm>"
+            return
+        cmd_parse(args[1])
+    else if cmd == "check":
+        if args.len() < 2:
+            print "Usage: cmm_lsp check <file.cmm>"
+            return
+        cmd_check(args[1])
+    else if cmd == "verify":
+        if args.len() < 2:
+            print "Usage: cmm_lsp verify <file.cmm>"
+            return
+        cmd_verify(args[1])
+    else if cmd == "bulk":
+        var dir = "/opt/t32/demo"
+        if args.len() >= 2:
+            dir = args[1]
+        cmd_bulk_parse(dir)
+    else if cmd == "--version":
+        print "CMM Language Server v0.1.0"
+        print "Written in Simple language"
+    else if cmd == "--help":
+        print_usage()
+    else:
+        # Treat as file path for check
+        cmd_check(cmd)
+
+# ---------------------------------------------------------------------------
+# Usage
+# ---------------------------------------------------------------------------
+
+fn print_usage():
+    print "CMM Language Server - TRACE32 PRACTICE Script Support"
+    print ""
+    print "Usage:"
+    print "  cmm_lsp --lsp              Start LSP server (stdio)"
+    print "  cmm_lsp parse <file.cmm>   Parse and show AST summary"
+    print "  cmm_lsp check <file.cmm>   Check for errors/warnings"
+    print "  cmm_lsp verify <file.cmm>  Deep validation report"
+    print "  cmm_lsp bulk [dir]         Bulk parse CMM files (default: /opt/t32/demo)"
+    print "  cmm_lsp --version          Show version"
+    print "  cmm_lsp --help             Show this help"
+
+# ---------------------------------------------------------------------------
+# Parse command — parse a single CMM file and show AST summary
+# ---------------------------------------------------------------------------
+
+fn cmd_parse(path: text):
+    if not rt_file_exists(path):
+        print "Error: file not found: {path}"
+        return
+
+    val program = parse_cmm_file(path)
+    print "Parsed: {path}"
+    print "Statements: {program.statements.len()}"
+    print "Parse errors: {program.errors.len()}"
+    var i = 0
+    while i < program.errors.len():
+        print "  ERROR: {program.errors[i]}"
+        i = i + 1
+
+# ---------------------------------------------------------------------------
+# Check command — parse and analyze a single CMM file
+# ---------------------------------------------------------------------------
+
+fn cmd_check(path: text):
+    if not rt_file_exists(path):
+        print "Error: file not found: {path}"
+        return
+
+    val program = parse_cmm_file(path)
+    val result = analyze_program(program)
+    print "Checked: {path}"
+    print "Statements: {program.statements.len()}"
+    print "Parse errors: {program.errors.len()}"
+    print "Diagnostics: {result.diagnostics.len()}"
+
+    # Print parse errors
+    var i = 0
+    while i < program.errors.len():
+        print "  PARSE ERROR: {program.errors[i]}"
+        i = i + 1
+
+    # Print diagnostics
+    i = 0
+    while i < result.diagnostics.len():
+        print "  {format_diagnostic(result.diagnostics[i])}"
+        i = i + 1
+
+    if program.errors.len() == 0 and result.diagnostics.len() == 0:
+        print "  No issues found."
+
+# ---------------------------------------------------------------------------
+# Verify command — deep validation with structured report
+# ---------------------------------------------------------------------------
+
+fn cmd_verify(path: text):
+    if not rt_file_exists(path):
+        print "Error: file not found: {path}"
+        return
+
+    val program = parse_cmm_file(path)
+    val result = analyze_program(program)
+
+    print "=== CMM Verify Report ==="
+    print "File: {path}"
+    print ""
+
+    # Count statements by type
+    var cmd_count = 0
+    var ctrl_count = 0
+    var decl_count = 0
+    var io_count = 0
+    var label_count = 0
+    var comment_count = 0
+    var other_count = 0
+    count_stmt_types(program.statements, cmd_count, ctrl_count, decl_count, io_count, label_count, comment_count, other_count)
+
+    print "--- Statement Summary ---"
+    print "  Commands:     {cmd_count}"
+    print "  Control flow: {ctrl_count}"
+    print "  Declarations: {decl_count}"
+    print "  I/O:          {io_count}"
+    print "  Labels:       {label_count}"
+    print "  Comments:     {comment_count}"
+    print "  Other:        {other_count}"
+    print "  Total:        {program.statements.len()}"
+    print ""
+
+    # Symbol summary
+    val symbols = result.symbols
+    val all_labels = symbols.labels()
+    val all_macros = symbols.macros()
+    print "--- Symbols ---"
+    print "  Labels:  {all_labels.len()}"
+    print "  Macros:  {all_macros.len()}"
+    if all_labels.len() > 0:
+        print "  Label names:"
+        var li = 0
+        while li < all_labels.len():
+            print "    - {all_labels[li].name} (line {all_labels[li].def_line})"
+            li = li + 1
+    if all_macros.len() > 0:
+        print "  Macro names:"
+        var mi = 0
+        while mi < all_macros.len():
+            print "    - &{all_macros[mi].name} [{all_macros[mi].scope}] (line {all_macros[mi].def_line})"
+            mi = mi + 1
+    print ""
+
+    # Parse errors
+    if program.errors.len() > 0:
+        print "--- Parse Errors ({program.errors.len()}) ---"
+        var i = 0
+        while i < program.errors.len():
+            print "  {program.errors[i]}"
+            i = i + 1
+        print ""
+
+    # Diagnostics grouped by severity
+    var error_count = 0
+    var warn_count = 0
+    var info_count = 0
+    var hint_count = 0
+    var di = 0
+    while di < result.diagnostics.len():
+        match result.diagnostics[di].kind:
+            case CmmDiagnosticKind.Error: error_count = error_count + 1
+            case CmmDiagnosticKind.Warning: warn_count = warn_count + 1
+            case CmmDiagnosticKind.Info: info_count = info_count + 1
+            case CmmDiagnosticKind.Hint: hint_count = hint_count + 1
+        di = di + 1
+
+    if result.diagnostics.len() > 0:
+        print "--- Diagnostics ---"
+        if error_count > 0:
+            print "  Errors ({error_count}):"
+            var ei = 0
+            while ei < result.diagnostics.len():
+                match result.diagnostics[ei].kind:
+                    case CmmDiagnosticKind.Error:
+                        print "    {format_diagnostic(result.diagnostics[ei])}"
+                    case _: ()
+                ei = ei + 1
+        if warn_count > 0:
+            print "  Warnings ({warn_count}):"
+            var wi = 0
+            while wi < result.diagnostics.len():
+                match result.diagnostics[wi].kind:
+                    case CmmDiagnosticKind.Warning:
+                        print "    {format_diagnostic(result.diagnostics[wi])}"
+                    case _: ()
+                wi = wi + 1
+        if info_count > 0:
+            print "  Info ({info_count}):"
+            var ii = 0
+            while ii < result.diagnostics.len():
+                match result.diagnostics[ii].kind:
+                    case CmmDiagnosticKind.Info:
+                        print "    {format_diagnostic(result.diagnostics[ii])}"
+                    case _: ()
+                ii = ii + 1
+        if hint_count > 0:
+            print "  Hints ({hint_count}):"
+            var hi = 0
+            while hi < result.diagnostics.len():
+                match result.diagnostics[hi].kind:
+                    case CmmDiagnosticKind.Hint:
+                        print "    {format_diagnostic(result.diagnostics[hi])}"
+                    case _: ()
+                hi = hi + 1
+        print ""
+
+    # Summary line
+    val total_errors = program.errors.len() + error_count
+    if total_errors == 0:
+        print "PASS (0 errors, {warn_count} warnings)"
+    else:
+        print "FAIL ({total_errors} errors, {warn_count} warnings)"
+
+# Count statement types recursively (uses return-value accumulation pattern).
+fn count_stmt_types(stmts: [CmmStmt], cmd_count: i64, ctrl_count: i64, decl_count: i64, io_count: i64, label_count: i64, comment_count: i64, other_count: i64):
+    var i = 0
+    while i < stmts.len():
+        val stmt = stmts[i]
+        match stmt:
+            case CmmStmt.Command(c, p, s): cmd_count = cmd_count + 1
+            case CmmStmt.DeviceCommand(d, c, p, s): cmd_count = cmd_count + 1
+            case CmmStmt.IfElse(c, t, e, s): ctrl_count = ctrl_count + 1
+            case CmmStmt.WhileLoop(c, b, s): ctrl_count = ctrl_count + 1
+            case CmmStmt.RepeatLoop(c, b, s): ctrl_count = ctrl_count + 1
+            case CmmStmt.Goto(t, s): ctrl_count = ctrl_count + 1
+            case CmmStmt.Gosub(t, a, s): ctrl_count = ctrl_count + 1
+            case CmmStmt.ReturnStmt(v, s): ctrl_count = ctrl_count + 1
+            case CmmStmt.JumpTo(t, s): ctrl_count = ctrl_count + 1
+            case CmmStmt.DoCall(f, a, s): ctrl_count = ctrl_count + 1
+            case CmmStmt.Enddo(v, s): ctrl_count = ctrl_count + 1
+            case CmmStmt.RunCall(f, a, s): ctrl_count = ctrl_count + 1
+            case CmmStmt.EndStmt(s): ctrl_count = ctrl_count + 1
+            case CmmStmt.StopStmt(s): ctrl_count = ctrl_count + 1
+            case CmmStmt.ContinueCmd(s): ctrl_count = ctrl_count + 1
+            case CmmStmt.LocalDecl(n, s): decl_count = decl_count + 1
+            case CmmStmt.GlobalDecl(n, s): decl_count = decl_count + 1
+            case CmmStmt.PrivateDecl(n, s): decl_count = decl_count + 1
+            case CmmStmt.EntryDecl(n, s): decl_count = decl_count + 1
+            case CmmStmt.MacroAssign(n, e, s): decl_count = decl_count + 1
+            case CmmStmt.MacroRecAssign(n, e, s): decl_count = decl_count + 1
+            case CmmStmt.OpenFile(c, f, m, s): io_count = io_count + 1
+            case CmmStmt.CloseFile(c, s): io_count = io_count + 1
+            case CmmStmt.ReadFile(c, n, s): io_count = io_count + 1
+            case CmmStmt.WriteFile(c, e, s): io_count = io_count + 1
+            case CmmStmt.WriteBFile(c, e, s): io_count = io_count + 1
+            case CmmStmt.AppendFile(f, e, s): io_count = io_count + 1
+            case CmmStmt.PrintStmt(e, s): io_count = io_count + 1
+            case CmmStmt.LabelDef(n, s): label_count = label_count + 1
+            case CmmStmt.CommentLine(t, s): comment_count = comment_count + 1
+            case _: other_count = other_count + 1
+        i = i + 1
+
+# ---------------------------------------------------------------------------
+# Bulk parse command — recursively parse all .cmm files in a directory
+# ---------------------------------------------------------------------------
+
+fn cmd_bulk_parse(dir: text):
+    print "Bulk parsing CMM files in: {dir}"
+    print ""
+
+    var total_files = 0
+    var parsed_ok = 0
+    var parse_errors = 0
+    var skipped_encrypted = 0
+    var total_stmts = 0
+    var total_diags = 0
+    var error_messages: [text] = []
+
+    # Collect all .cmm files recursively
+    var cmm_files = collect_cmm_files(dir)
+
+    print "Found {cmm_files.len()} CMM files"
+    print ""
+
+    # Parse each file
+    var i = 0
+    while i < cmm_files.len():
+        val path = cmm_files[i]
+        total_files = total_files + 1
+
+        # Read file and check for encrypted marker
+        val content = rt_file_read_text(path) ?? ""
+        if starts_with(content, "trace32 encrypted cmm file"):
+            skipped_encrypted = skipped_encrypted + 1
+            i = i + 1
+            continue
+
+        # Parse the file
+        val program = parse_cmm_source(content)
+        total_stmts = total_stmts + program.statements.len()
+
+        if program.errors.len() > 0:
+            parse_errors = parse_errors + 1
+            # Record first error for summary
+            var ei = 0
+            while ei < program.errors.len():
+                if error_messages.len() < 20:
+                    error_messages.push(path + ": " + program.errors[ei])
+                ei = ei + 1
+        else:
+            parsed_ok = parsed_ok + 1
+
+        # Analyze for diagnostics
+        val result = analyze_program(program)
+        total_diags = total_diags + result.diagnostics.len()
+
+        # Progress indicator every 100 files
+        if total_files % 100 == 0:
+            print "  ... processed {total_files} files"
+
+        i = i + 1
+
+    # Print summary
+    print ""
+    print "=== Bulk Parse Summary ==="
+    print "Total files:      {total_files}"
+    print "Parsed OK:        {parsed_ok}"
+    print "Parse errors:     {parse_errors}"
+    print "Skipped (encrypted): {skipped_encrypted}"
+    print "Total statements: {total_stmts}"
+    print "Total diagnostics: {total_diags}"
+
+    if error_messages.len() > 0:
+        print ""
+        print "=== Top Parse Errors (max 20) ==="
+        var ei = 0
+        while ei < error_messages.len():
+            print "  {error_messages[ei]}"
+            ei = ei + 1
+
+    # Success rate
+    if total_files > 0:
+        val success_pct = parsed_ok * 100 / total_files
+        print ""
+        print "Success rate: {success_pct}%"
+
+# ---------------------------------------------------------------------------
+# File collection — recursively find .cmm files
+# ---------------------------------------------------------------------------
+
+# Recursively collect all .cmm files in a directory tree.
+# Returns a new list (workaround: Simple passes arrays by value).
+fn collect_cmm_files(dir: text) -> [text]:
+    var results: [text] = []
+    val entries = rt_dir_list(dir)
+    var i = 0
+    while i < entries.len():
+        val entry = entries[i]
+        if entry == "." or entry == "..":
+            i = i + 1
+            continue
+
+        val full_path = dir + "/" + entry
+
+        if is_cmm_file(entry):
+            results.push(full_path)
+        else if not has_extension(entry):
+            val sub = collect_cmm_files(full_path)
+            var si = 0
+            while si < sub.len():
+                results.push(sub[si])
+                si = si + 1
+
+        i = i + 1
+    results
+
+# Check if a filename has a .cmm extension (case-insensitive).
+fn is_cmm_file(name: text) -> bool:
+    if name.len() < 5:
+        return false
+    val ext = name[name.len() - 4:name.len()]
+    val lower_ext = to_lower_simple(ext)
+    lower_ext == ".cmm"
+
+# Check if a filename has any extension (contains a dot after the first char).
+fn has_extension(name: text) -> bool:
+    var i = 1
+    while i < name.len():
+        if name[i:i + 1] == ".":
+            return true
+        i = i + 1
+    false
+
+# Heuristic: entry names without dots are likely directories.
+fn is_directory_like(name: text) -> bool:
+    not has_extension(name)
+
+# Simple lowercase conversion for ASCII characters.
+fn to_lower_simple(s: text) -> text:
+    var result = ""
+    var i = 0
+    while i < s.len():
+        val ch = s[i:i + 1]
+        if ch >= "A" and ch <= "Z":
+            result = result + ch.to_lower()
+        else:
+            result = result + ch
+        i = i + 1
+    result
+
+# Check if text starts with a given prefix.
+fn starts_with(s: text, prefix: text) -> bool:
+    if prefix.len() > s.len():
+        return false
+    s[0:prefix.len()] == prefix
+
+# ---------------------------------------------------------------------------
+# Entry point — dispatch from runtime args
+# ---------------------------------------------------------------------------
+
+val args = sys_get_args()
+# Skip the script path (first arg is typically the .spl file itself)
+var cli_args: [text] = []
+var arg_i = 1
+while arg_i < args.len():
+    cli_args.push(args[arg_i])
+    arg_i = arg_i + 1
+
+cmm_main(cli_args)

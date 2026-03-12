@@ -1,0 +1,102 @@
+; Xilinx Zynq-7000 Multi-Core Debug with Power Domain Control
+; Exercises: CORE.select, SYStem.CONFIG.SLAVE, WAIT STATE.RUN(),
+;            Data.LOAD.Elf /NoCODE /NOREG, SYMBOL.SECTION.SET,
+;            DO with arguments, subroutine GOSUB/RETURN,
+;            Var.set, Var.IF, SPRINTF, nested IF/WHILE,
+;            PowerDomain.*, SYStem.DETECT
+
+LOCAL &core &num_cores &elf_a9 &elf_r5
+LOCAL &i &addr &val &msg
+
+&num_cores=4
+&elf_a9="zynq_a9_app.elf"
+&elf_r5="zynq_r5_firmware.elf"
+
+; System setup for Zynq SoC
+SYStem.RESet
+SYStem.CPU ZYNQ-7045
+SYStem.CONFIG.SLAVE OFF
+SYStem.JtagClock 15MHz
+SYStem.DETECT CPU
+
+; Power domain configuration
+PowerDomain.ON ALL
+WAIT 200ms
+
+SYStem.Up
+
+; Load application for ARM Cortex-A9
+CORE.select 0.
+Data.LOAD.Elf "&elf_a9" /NoCODE /NOREG
+sYmbol.SECTION.SET "*.text" +X
+
+CORE.select 1.
+Data.LOAD.Elf "&elf_a9" /NoCODE /NOREG
+
+; Load RPU firmware on R5
+CORE.select 2.
+Data.LOAD.Elf "&elf_r5"
+
+; Initialize shared memory region
+&i=0
+WHILE &i<0x100
+(
+  &addr=0x1FF00000+&i
+  Data.Set D:&addr %Long 0x0
+  &i=&i+4
+)
+
+; Set synchronization flag per core
+&core=0
+WHILE &core<&num_cores
+(
+  CORE.select &core
+  IF &core<2
+  (
+    ; A9 cores - set entry point
+    Register.Set PC main
+    Var.set \core_id=&core
+  )
+  ELSE
+  (
+    ; R5 core - different entry
+    Register.Set PC r5_main
+  )
+  &core=&core+1
+)
+
+; Breakpoints on all cores
+CORE.select 0.
+Break.Set sync_barrier /Onchip
+Break.Set error_handler /Onchip /CMD "GOSUB log_error" /RESUME
+
+; Run all cores
+Go.direct
+WAIT 5s
+
+; Check results per core
+&core=0
+WHILE &core<&num_cores
+(
+  CORE.select &core
+  Break.direct
+  WAIT !STATE.RUN() 2s
+  &val=Data.Long(D:0x1FF00000+(&core*4))
+  &msg=SPRINTF("Core %d result: 0x%08X", &core, &val)
+  PRINT "&msg"
+  IF &val==0xCAFEBABE
+    PRINT %COLOR.GREEN "  PASS"
+  ELSE
+    PRINT %COLOR.RED "  FAIL"
+  &core=&core+1
+)
+
+ENDDO
+
+; Subroutine for error logging
+log_error:
+  LOCAL &pc &lr
+  &pc=Register(PC)
+  &lr=Register(LR)
+  APPEND "error_log.txt" "Error at PC=0x" FORMAT.Hex(8., &pc) " LR=0x" FORMAT.Hex(8., &lr)
+  RETURN

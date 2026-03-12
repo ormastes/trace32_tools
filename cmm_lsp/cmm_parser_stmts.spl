@@ -1,0 +1,1252 @@
+# CMM (PRACTICE Script) Parser — Statement Parsing
+# Extends CmmParser with all statement parsing methods via an impl block.
+#
+# CMM statement types:
+#   Control flow:   IF/ELSE, WHILE, RePeaT, GOTO, GOSUB, JUMPTO, DO, ENDDO, RUN
+#   Declarations:   LOCAL, GLOBAL, PRIVATE, ENTRY
+#   Events:         ON (ERROR/STOP/...), GLOBALON
+#   I/O:            OPEN, CLOSE, READ, WRITE, WRITEB, APPEND, PRINT
+#   Dialog:         DIALOG ( items... )
+#   Basic:          Commands, macro assignments, labels, blocks
+#
+# Case-insensitive: CMM keywords are matched after uppercasing the identifier.
+
+use cmm_tokens.{CmmTokenKind, CmmToken}
+use cmm_ast.{CmmProgram, CmmStmt, CmmExpr, CmmLiteral, CmmSpan, CmmDialogItem}
+use cmm_ast.{span, span_range, merge_spans}
+use cmm_parser.{CmmParser, CmmParseError, to_upper_cmm}
+use cmm_parser_expr.{is_access_class}
+
+# Helper struct for flattened macro assignment detection.
+# Avoids nested match with return in parse_statement.
+struct MacroAssignInfo:
+    is_assign: bool
+    name: text
+    is_recursive: bool
+
+# Helper struct for flattened %LINE option detection.
+# Avoids nested match with mutation in parse_entry and parse_read.
+struct PercentLineInfo:
+    found: bool
+    tokens_to_skip: i64
+
+impl CmmParser:
+
+    # =========================================================================
+    # Top-level statement dispatch
+    # =========================================================================
+
+    me parse_statement() -> Result<CmmStmt, CmmParseError>:
+        val tok = self.peek()
+
+        # --- Labels (must be first — emitted by lexer as Label token) ---
+        match tok.kind:
+            case CmmTokenKind.Label(name):
+                self.advance()
+                return Ok(CmmStmt.LabelDef(name, span(tok.line, tok.column)))
+            case _: ()
+
+        # --- Device selector prefix (e.g. B::Data.dump) ---
+        match tok.kind:
+            case CmmTokenKind.DeviceSelector(dev):
+                return self.parse_device_command(dev)
+            case _: ()
+
+        # --- Comment (;... or //...) ---
+        match tok.kind:
+            case CmmTokenKind.Comment(c):
+                self.advance()
+                return Ok(CmmStmt.CommentLine(c, span(tok.line, tok.column)))
+            case _: ()
+
+        # --- Macro assignment: &name=expr or &&name=expr ---
+        # Flattened to avoid nested match with return (return inside nested match
+        # does not propagate to the outer function in Simple's runtime).
+        val macro_info = self.check_macro_assign()
+        if macro_info.is_assign:
+            return self.parse_macro_assign(macro_info.name, macro_info.is_recursive)
+
+        # --- Standalone macro execution: &cmd (execute macro value as command) ---
+        # Flattened to avoid nested return inside match/case/if
+        if not macro_info.is_assign:
+            val macro_cmd_name = self.extract_macro_cmd_name()
+            if macro_cmd_name != "":
+                self.advance()
+                var params = self.collect_remaining_exprs()
+                return Ok(CmmStmt.Command(macro_cmd_name, params, span(tok.line, tok.column)))
+
+        # --- Block: ( stmt1  stmt2  ... ) ---
+        match tok.kind:
+            case CmmTokenKind.LParen:
+                return self.parse_block()
+            case _: ()
+
+        # --- Bracket block: [ bitmap data ] (TOOLITEM bitmaps, skip content) ---
+        if self.check_kind("LBracket"):
+            val bracket_tok = self.advance()
+            while not self.is_at_end() and not self.check_kind("RBracket"):
+                self.advance()
+            if self.check_kind("RBracket"):
+                self.advance()
+            return Ok(CmmStmt.Command("[]", [], span(bracket_tok.line, bracket_tok.column)))
+
+        # --- Bare colon: used as section separator / no-op in PRACTICE ---
+        if self.check_kind("Colon"):
+            val colon_tok = self.advance()
+            # Skip rest of line (`: CPU setup` style section headers)
+            self.skip_to_next_line()
+            return Ok(CmmStmt.EmptyLine(span(colon_tok.line, colon_tok.column)))
+
+        # --- Keyword dispatch (case-insensitive on Identifier tokens) ---
+        match tok.kind:
+            case CmmTokenKind.Identifier(name):
+                # Check for indented label: name: (identifier followed by colon)
+                val maybe_label = self.check_indented_label()
+                if maybe_label != "":
+                    self.advance()  # consume identifier
+                    self.advance()  # consume colon
+                    return Ok(CmmStmt.LabelDef(maybe_label, span(tok.line, tok.column)))
+                val upper = to_upper_cmm(name)
+                if upper == "IF": return self.parse_if()
+                if upper == "ELSE": return self.parse_else_error()
+                if upper == "WHILE": return self.parse_while()
+                if upper == "REPEAT": return self.parse_repeat()
+                if upper == "GOTO": return self.parse_goto()
+                if upper == "GOSUB": return self.parse_gosub()
+                if upper == "RETURN": return self.parse_return()
+                if upper == "JUMPTO": return self.parse_jumpto()
+                if upper == "DO": return self.parse_do()
+                if upper == "ENDDO": return self.parse_enddo()
+                if upper == "RUN": return self.parse_run()
+                if upper == "END": return self.parse_end()
+                if upper == "STOP": return self.parse_stop()
+                if upper == "CONTINUE": return self.parse_continue()
+                if upper == "LOCAL": return self.parse_local()
+                if upper == "GLOBAL": return self.parse_global()
+                if upper == "PRIVATE": return self.parse_private()
+                if upper == "ENTRY": return self.parse_entry()
+                if upper == "ON": return self.parse_on_event()
+                if upper == "GLOBALON": return self.parse_globalon()
+                if upper == "OPEN": return self.parse_open()
+                if upper == "CLOSE": return self.parse_close()
+                if upper == "READ": return self.parse_read()
+                if upper == "WRITE": return self.parse_write()
+                if upper == "WRITEB": return self.parse_writeb()
+                if upper == "APPEND": return self.parse_append()
+                if upper == "PRINT": return self.parse_print()
+                if upper == "WAIT": return self.parse_wait()
+                if upper == "DIALOG": return self.parse_dialog()
+                if upper == "PARAMETERS": return self.parse_entry()
+                if upper == "RETURNVALUES": return self.parse_return()
+                if upper == "PRINTF" or upper == "ECHO": return self.parse_print()
+                # Fall through to generic command
+                return self.parse_generic_command()
+            case _: ()
+
+        # --- DotCommand (e.g. Data.dump, SYStem.CPU) ---
+        # Handle ON.ERROR, ON.STOP as event handlers (dot-separated variant)
+        match tok.kind:
+            case CmmTokenKind.DotCommand(cmd):
+                val cmd_upper = to_upper_cmm(cmd)
+                if cmd_upper == "ON.ERROR" or cmd_upper == "ON.STOP" or cmd_upper == "ON.ALWAYS":
+                    return self.parse_on_dot_event(cmd_upper)
+                return self.parse_generic_command()
+            case _: ()
+
+        # --- Bare operator tokens that can appear as statement starts ---
+        # DIALOG blocks: (& ... ) — bare & used as block modifier
+        # Lone operator tokens: skip them silently
+        match tok.kind:
+            case CmmTokenKind.Ampersand:
+                self.advance()
+                return Ok(CmmStmt.Command("&", [], span(tok.line, tok.column)))
+            case _: ()
+
+        # --- Question marks at statement start: ??? masks or placeholder text ---
+        # CMM uses ??? for "don't care" data masks. Also appears as placeholder text in dead code.
+        match tok.kind:
+            case CmmTokenKind.Question:
+                self.advance()
+                self.skip_to_next_line()
+                return Ok(CmmStmt.Command("?", [], span(tok.line, tok.column)))
+            case _: ()
+
+        # --- Fallback ---
+        self.parse_generic_command()
+
+    # =========================================================================
+    # Control flow statements
+    # =========================================================================
+
+    # IF condition body [ELSE else_body]
+    # Body is either a single statement on the same line or a ( ... ) block.
+    # Flattened to avoid nested match with return/mutation (3+ levels deep).
+    me parse_if() -> Result<CmmStmt, CmmParseError>:
+        val start_tok = self.advance()  # consume IF
+
+        # Parse condition expression (everything up to newline or block-open)
+        val cond_result = self.parse_expression()
+        match cond_result:
+            case Err(e): return Err(e)
+            case _: ()
+        val condition = self.unwrap_expr(cond_result)
+
+        # Parse then-body
+        val body_result = self.parse_body_or_next()
+        match body_result:
+            case Err(e): return Err(e)
+            case _: ()
+        val then_body = self.unwrap_stmt(body_result)
+
+        # Check for ELSE
+        val saved = self.current
+        self.skip_newlines()
+        var else_body: CmmStmt? = nil
+        if self.check_cmm_keyword("ELSE"):
+            self.advance()  # consume ELSE
+            # Check for ELSE IF
+            if self.check_cmm_keyword("IF"):
+                val elif_result = self.parse_if()
+                match elif_result:
+                    case Err(e): return Err(e)
+                    case _: ()
+                else_body = self.unwrap_stmt(elif_result)
+            else:
+                val eb_result = self.parse_body_or_next()
+                match eb_result:
+                    case Err(e): return Err(e)
+                    case _: ()
+                else_body = self.unwrap_stmt(eb_result)
+        else:
+            # No ELSE found — rewind
+            self.current = saved
+        val sp = span(start_tok.line, start_tok.column)
+        Ok(CmmStmt.IfElse(condition, then_body, else_body, sp))
+
+    # Standalone ELSE without preceding IF is an error.
+    me parse_else_error() -> Result<CmmStmt, CmmParseError>:
+        val tok = self.peek()
+        Err(self.make_error("ELSE without matching IF"))
+
+    # WHILE condition body
+    # Flattened to avoid nested match chains.
+    me parse_while() -> Result<CmmStmt, CmmParseError>:
+        val start_tok = self.advance()  # consume WHILE
+
+        val cond_result = self.parse_expression()
+        match cond_result:
+            case Err(e): return Err(e)
+            case _: ()
+        val condition = self.unwrap_expr(cond_result)
+
+        val body_result = self.parse_body_or_next()
+        match body_result:
+            case Err(e): return Err(e)
+            case _: ()
+        val body = self.unwrap_stmt(body_result)
+        Ok(CmmStmt.WhileLoop(condition, body, span(start_tok.line, start_tok.column)))
+
+    # RePeaT [count] body
+    # count is optional — nil means infinite.
+    me parse_repeat() -> Result<CmmStmt, CmmParseError>:
+        val start_tok = self.advance()  # consume RePeaT
+
+        # Try to parse a count expression before the body.
+        # Count is typically a number literal. If the next token is a number,
+        # consume it as count; otherwise count is nil (infinite).
+        # Flattened: detect numeric/macro token first, then parse outside the match.
+        var count: CmmExpr? = nil
+        if not self.at_stmt_end():
+            val has_count = self.check_repeat_count_start()
+            if has_count:
+                match self.parse_expression():
+                    case Ok(c):
+                        count = c
+                    case Err(e): return Err(e)
+
+        match self.parse_body_or_next():
+            case Ok(body):
+                Ok(CmmStmt.RepeatLoop(count, body, span(start_tok.line, start_tok.column)))
+            case Err(e): Err(e)
+
+    # GOTO label [IF condition] — optional conditional suffix
+    me parse_goto() -> Result<CmmStmt, CmmParseError>:
+        val start_tok = self.advance()  # consume GOTO
+        # GOTO can have: label, macro ref, or empty (for ON ERROR GOTO to clear handler)
+        val label = self.consume_label_or_macro()
+        # Consume optional IF condition suffix (GOTO label IF condition)
+        var params = self.collect_remaining_exprs()
+        Ok(CmmStmt.Goto(label, span(start_tok.line, start_tok.column)))
+
+    # GOSUB label [args...] — target can be identifier, dot-command, or macro ref
+    me parse_gosub() -> Result<CmmStmt, CmmParseError>:
+        val start_tok = self.advance()  # consume GOSUB
+        val label = self.consume_label_or_macro()
+        var args = self.collect_remaining_exprs()
+        Ok(CmmStmt.Gosub(label, args, span(start_tok.line, start_tok.column)))
+
+    # RETURN [values...] or RETurn (abbreviated)
+    me parse_return() -> Result<CmmStmt, CmmParseError>:
+        val start_tok = self.advance()  # consume RETURN
+        var values = self.collect_remaining_exprs()
+        Ok(CmmStmt.ReturnStmt(values, span(start_tok.line, start_tok.column)))
+
+    # JUMPTO label
+    me parse_jumpto() -> Result<CmmStmt, CmmParseError>:
+        val start_tok = self.advance()  # consume JUMPTO
+        match self.expect_identifier("label name after JUMPTO"):
+            case Ok(label):
+                Ok(CmmStmt.JumpTo(label, span(start_tok.line, start_tok.column)))
+            case Err(e): Err(e)
+
+    # DO file [args...] — call another CMM script
+    me parse_do() -> Result<CmmStmt, CmmParseError>:
+        val start_tok = self.advance()  # consume DO
+
+        if self.at_stmt_end():
+            return Err(self.make_error("Expected filename after DO"))
+
+        match self.parse_expression():
+            case Ok(file_expr):
+                var args = self.collect_remaining_exprs()
+                Ok(CmmStmt.DoCall(file_expr, args, span(start_tok.line, start_tok.column)))
+            case Err(e): Err(e)
+
+    # ENDDO [return values...]
+    me parse_enddo() -> Result<CmmStmt, CmmParseError>:
+        val start_tok = self.advance()  # consume ENDDO
+        var values = self.collect_remaining_exprs()
+        Ok(CmmStmt.Enddo(values, span(start_tok.line, start_tok.column)))
+
+    # RUN file [args...] — call clearing the stack
+    me parse_run() -> Result<CmmStmt, CmmParseError>:
+        val start_tok = self.advance()  # consume RUN
+
+        if self.at_stmt_end():
+            return Err(self.make_error("Expected filename after RUN"))
+
+        match self.parse_expression():
+            case Ok(file_expr):
+                var args = self.collect_remaining_exprs()
+                Ok(CmmStmt.RunCall(file_expr, args, span(start_tok.line, start_tok.column)))
+            case Err(e): Err(e)
+
+    # END — terminate script (may have trailing tokens to skip)
+    me parse_end() -> Result<CmmStmt, CmmParseError>:
+        val start_tok = self.advance()  # consume END
+        # Consume any trailing expressions on this line
+        var params = self.collect_remaining_exprs()
+        Ok(CmmStmt.EndStmt(span(start_tok.line, start_tok.column)))
+
+    # STOP [message] — halt execution with optional error message
+    me parse_stop() -> Result<CmmStmt, CmmParseError>:
+        val start_tok = self.advance()  # consume STOP
+        # Consume optional message arguments
+        var params = self.collect_remaining_exprs()
+        Ok(CmmStmt.StopStmt(span(start_tok.line, start_tok.column)))
+
+    # CONTinue — resume target
+    me parse_continue() -> Result<CmmStmt, CmmParseError>:
+        val start_tok = self.advance()  # consume CONTinue
+        Ok(CmmStmt.ContinueCmd(span(start_tok.line, start_tok.column)))
+
+    # =========================================================================
+    # Declaration statements
+    # =========================================================================
+
+    # LOCAL &a &b &c — declare local macros
+    me parse_local() -> Result<CmmStmt, CmmParseError>:
+        val start_tok = self.advance()  # consume LOCAL
+        var names = self.collect_macro_names()
+        if names.len() == 0:
+            return Err(self.make_error("Expected macro name(s) after LOCAL"))
+        Ok(CmmStmt.LocalDecl(names, span(start_tok.line, start_tok.column)))
+
+    # GLOBAL &a — declare global macro
+    me parse_global() -> Result<CmmStmt, CmmParseError>:
+        val start_tok = self.advance()  # consume GLOBAL
+        var names = self.collect_macro_names()
+        if names.len() == 0:
+            return Err(self.make_error("Expected macro name(s) after GLOBAL"))
+        Ok(CmmStmt.GlobalDecl(names, span(start_tok.line, start_tok.column)))
+
+    # PRIVATE &a — declare private macro (block + sub-blocks)
+    me parse_private() -> Result<CmmStmt, CmmParseError>:
+        val start_tok = self.advance()  # consume PRIVATE
+        var names = self.collect_macro_names()
+        if names.len() == 0:
+            return Err(self.make_error("Expected macro name(s) after PRIVATE"))
+        Ok(CmmStmt.PrivateDecl(names, span(start_tok.line, start_tok.column)))
+
+    # ENTRY [%LINE] &a &b — subroutine parameter binding
+    # %LINE means the entire rest of the line is a single text parameter.
+    me parse_entry() -> Result<CmmStmt, CmmParseError>:
+        val start_tok = self.advance()  # consume ENTRY
+
+        # Collect macro names and %LINE markers until end of statement
+        var names: [text] = []
+        while not self.at_stmt_end():
+            # Check for %LINE option anywhere in the list
+            val pct_line = self.check_percent_line()
+            if pct_line.found:
+                self.advance()  # consume %
+                self.advance()  # consume LINE
+                names.push("%LINE")
+            if not pct_line.found:
+                # Try to consume a macro name
+                var got_macro = false
+                match self.peek().kind:
+                    case CmmTokenKind.MacroRef(name):
+                        self.advance()
+                        names.push(name)
+                        got_macro = true
+                    case CmmTokenKind.MacroRecRef(name):
+                        self.advance()
+                        names.push("&" + name)
+                        got_macro = true
+                    case _: ()
+                if not got_macro:
+                    break
+
+        if names.len() == 0:
+            return Err(self.make_error("Expected macro name(s) after ENTRY"))
+        Ok(CmmStmt.EntryDecl(names, span(start_tok.line, start_tok.column)))
+
+    # =========================================================================
+    # Event handlers
+    # =========================================================================
+
+    # ON ERROR GOTO label / ON STOP GOSUB handler / ON ERROR CONTinue / etc.
+    # Flattened to avoid nested match chains.
+    me parse_on_event() -> Result<CmmStmt, CmmParseError>:
+        val start_tok = self.advance()  # consume ON
+
+        # Parse event type: ERROR, STOP, ALWAYS, TIME, PBREAKAT, KEY, CMD, etc.
+        val ev_result = self.expect_identifier("event type after ON")
+        match ev_result:
+            case Err(e): return Err(e)
+            case _: ()
+        val event_upper = to_upper_cmm(self.unwrap_text(ev_result))
+
+        # Some events have arguments before the action keyword:
+        #   ON TIME 100.ms GOTO handler
+        #   ON PBREAKAT &addr GOTO label
+        #   ON KEY 0x4008 GOSUB handler
+        # Consume event arguments until we hit an action keyword or end of stmt
+        while not self.at_stmt_end() and not self.is_event_action_keyword():
+            match self.parse_expression():
+                case Ok(arg): ()
+                case Err(e): break
+
+        # Parse action: GOTO, GOSUB, CONTinue, DO, NOTHING, etc.
+        val action_result = self.parse_event_action()
+        match action_result:
+            case Err(e): return Err(e)
+            case _: ()
+        val action_stmt = self.unwrap_stmt(action_result)
+        Ok(CmmStmt.OnEvent(event_upper, action_stmt, span(start_tok.line, start_tok.column)))
+
+    # ON.ERROR / ON.STOP / ON.ALWAYS — dot-separated variant of ON event
+    # Handles ON.ERROR GOTO label, ON.ERROR GOSUB handler, ON.ERROR continue, etc.
+    me parse_on_dot_event(cmd_upper: text) -> Result<CmmStmt, CmmParseError>:
+        val start_tok = self.advance()  # consume ON.ERROR / ON.STOP / ON.ALWAYS
+
+        # Extract event name from the dot-command: ON.ERROR -> ERROR, ON.STOP -> STOP
+        var event_name = "ERROR"
+        if cmd_upper == "ON.STOP":
+            event_name = "STOP"
+        if cmd_upper == "ON.ALWAYS":
+            event_name = "ALWAYS"
+
+        # Parse action
+        val action_result = self.parse_event_action()
+        match action_result:
+            case Err(e): return Err(e)
+            case _: ()
+        val action_stmt = self.unwrap_stmt(action_result)
+        Ok(CmmStmt.OnEvent(event_name, action_stmt, span(start_tok.line, start_tok.column)))
+
+    # GLOBALON ERROR DO handler.cmm / GLOBALON TIME 1.s DO periodic.cmm
+    # Flattened to avoid nested match with return (3 levels deep).
+    me parse_globalon() -> Result<CmmStmt, CmmParseError>:
+        val start_tok = self.advance()  # consume GLOBALON
+
+        # Parse event type
+        val ev_result = self.expect_identifier("event type after GLOBALON")
+        match ev_result:
+            case Err(e): return Err(e)
+            case _: ()
+        val event_name = self.unwrap_text(ev_result)
+        val event_upper = to_upper_cmm(event_name)
+
+        # For TIME event, there may be a time expression before the action
+        if event_upper == "TIME":
+            if self.at_stmt_end():
+                return Err(self.make_error("Expected time expression after GLOBALON TIME"))
+            # Parse time expression (consumed but not used in AST node)
+            val time_result = self.parse_expression()
+            match time_result:
+                case Err(e): return Err(e)
+                case _: ()
+
+        # Parse the action
+        val action_result = self.parse_event_action()
+        match action_result:
+            case Err(e): return Err(e)
+            case _: ()
+        val action_stmt = self.unwrap_stmt(action_result)
+        Ok(CmmStmt.GlobalOnEvent(event_upper, action_stmt, span(start_tok.line, start_tok.column)))
+
+    # Check if the current token is an event action keyword (GOTO, GOSUB, etc.)
+    fn is_event_action_keyword() -> bool:
+        if self.is_at_end():
+            return false
+        match self.peek().kind:
+            case CmmTokenKind.Identifier(name):
+                val upper = to_upper_cmm(name)
+                (upper == "GOTO" or upper == "GOSUB" or upper == "CONTINUE" or
+                 upper == "DO" or upper == "NOTHING" or upper == "JUMPTO" or
+                 upper == "INHERIT" or upper == "DEFAULT")
+            case _: false
+
+    # Parse event action: GOTO label, GOSUB label, CONTinue, DO file, NOTHING
+    me parse_event_action() -> Result<CmmStmt, CmmParseError>:
+        # ON ERROR (without action) clears the handler
+        if self.at_stmt_end():
+            return Ok(CmmStmt.Command("NOTHING", [], span(0, 0)))
+
+        match self.peek().kind:
+            case CmmTokenKind.Identifier(name):
+                val upper = to_upper_cmm(name)
+                if upper == "GOTO":
+                    return self.parse_goto()
+                if upper == "GOSUB":
+                    return self.parse_gosub()
+                if upper == "CONTINUE":
+                    return self.parse_continue()
+                if upper == "DO":
+                    return self.parse_do()
+                if upper == "NOTHING":
+                    val tok = self.advance()
+                    return Ok(CmmStmt.ContinueCmd(span(tok.line, tok.column)))
+                if upper == "JUMPTO":
+                    return self.parse_jumpto()
+                if upper == "INHERIT" or upper == "DEFAULT":
+                    val tok = self.advance()
+                    return Ok(CmmStmt.Command(upper, [], span(tok.line, tok.column)))
+                # Unknown action — treat as generic command
+                return self.parse_generic_command()
+            case _:
+                # Try generic command for non-Identifier actions (DotCommand, etc.)
+                if not self.at_stmt_end():
+                    return self.parse_generic_command()
+                Err(self.make_error("Expected event action keyword"))
+
+    # =========================================================================
+    # I/O statements
+    # =========================================================================
+
+    # OPEN #n file /mode
+    # Flattened to avoid nested match with mutation (3 levels deep).
+    me parse_open() -> Result<CmmStmt, CmmParseError>:
+        val start_tok = self.advance()  # consume OPEN
+
+        # Parse file channel (#n)
+        val ch_result = self.parse_expression()
+        match ch_result:
+            case Err(e): return Err(e)
+            case _: ()
+        val channel_expr = self.unwrap_expr(ch_result)
+
+        # Parse file path
+        if self.at_stmt_end():
+            return Err(self.make_error("Expected filename after OPEN #n"))
+
+        val file_result = self.parse_expression()
+        match file_result:
+            case Err(e): return Err(e)
+            case _: ()
+        val file_expr = self.unwrap_expr(file_result)
+
+        # Parse optional /mode option
+        var mode = self.consume_option_or_empty()
+        Ok(CmmStmt.OpenFile(channel_expr, file_expr, mode, span(start_tok.line, start_tok.column)))
+
+    # CLOSE #n or CLOSE "callback" (in dialog context)
+    me parse_close() -> Result<CmmStmt, CmmParseError>:
+        val start_tok = self.advance()  # consume CLOSE
+
+        # CLOSE without arguments
+        if self.at_stmt_end():
+            return Ok(CmmStmt.CloseFile(CmmExpr.ExprEmpty, span(start_tok.line, start_tok.column)))
+
+        match self.parse_expression():
+            case Ok(channel_expr):
+                # Consume remaining args (in case of CLOSE #1 /mode etc.)
+                var params = self.collect_remaining_exprs()
+                Ok(CmmStmt.CloseFile(channel_expr, span(start_tok.line, start_tok.column)))
+            case Err(e): Err(e)
+
+    # READ #n [%LINE] &var1 &var2 ...
+    me parse_read() -> Result<CmmStmt, CmmParseError>:
+        val start_tok = self.advance()  # consume READ
+
+        # Parse file channel
+        match self.parse_expression():
+            case Ok(channel_expr):
+                # Collect all remaining tokens: macro names, format specifiers, expressions
+                var names: [text] = []
+                while not self.at_stmt_end():
+                    match self.peek().kind:
+                        case CmmTokenKind.MacroRef(name):
+                            self.advance()
+                            names.push(name)
+                        case CmmTokenKind.MacroRecRef(name):
+                            self.advance()
+                            names.push(name)
+                        case _:
+                            # Consume any remaining expressions (format specifiers, etc.)
+                            match self.parse_expression():
+                                case Ok(e): ()
+                                case Err(e): break
+                Ok(CmmStmt.ReadFile(channel_expr, names, span(start_tok.line, start_tok.column)))
+            case Err(e): Err(e)
+
+    # WRITE #n expr1 expr2
+    me parse_write() -> Result<CmmStmt, CmmParseError>:
+        val start_tok = self.advance()  # consume WRITE
+
+        # Parse file channel
+        match self.parse_expression():
+            case Ok(channel_expr):
+                var exprs = self.collect_remaining_exprs()
+                Ok(CmmStmt.WriteFile(channel_expr, exprs, span(start_tok.line, start_tok.column)))
+            case Err(e): Err(e)
+
+    # WRITEB #n expr1 expr2 (binary write)
+    me parse_writeb() -> Result<CmmStmt, CmmParseError>:
+        val start_tok = self.advance()  # consume WRITEB
+
+        # Parse file channel
+        match self.parse_expression():
+            case Ok(channel_expr):
+                var exprs = self.collect_remaining_exprs()
+                Ok(CmmStmt.WriteBFile(channel_expr, exprs, span(start_tok.line, start_tok.column)))
+            case Err(e): Err(e)
+
+    # APPEND file expr1 expr2
+    me parse_append() -> Result<CmmStmt, CmmParseError>:
+        val start_tok = self.advance()  # consume APPEND
+
+        if self.at_stmt_end():
+            return Err(self.make_error("Expected filename after APPEND"))
+
+        match self.parse_expression():
+            case Ok(file_expr):
+                var exprs = self.collect_remaining_exprs()
+                Ok(CmmStmt.AppendFile(file_expr, exprs, span(start_tok.line, start_tok.column)))
+            case Err(e): Err(e)
+
+    # PRINT expr1 expr2 ...
+    # Also handles PRINT %ERROR "msg", PRINT %WARNING "msg",
+    # PRINT %COLOR.NAVY "msg", PRINT %COLOR.RED "msg"
+    me parse_print() -> Result<CmmStmt, CmmParseError>:
+        val start_tok = self.advance()  # consume PRINT
+
+        # Check for % format specifier (e.g. %ERROR, %WARNING, %COLOR.NAVY)
+        # Flattened: detect %+Identifier or %+DotCommand first, then consume.
+        val has_pct_fmt = self.check_percent_format()
+        if has_pct_fmt:
+            self.advance()  # consume %
+            # Check if next is identifier or dot-command (COLOR.NAVY, etc.)
+            val has_fmt_kw = self.check_kind("Identifier")
+            val has_fmt_dot = self.check_kind("DotCommand")
+            if has_fmt_kw or has_fmt_dot:
+                self.advance()  # consume format keyword or dot-command
+
+        var exprs = self.collect_remaining_exprs()
+        Ok(CmmStmt.PrintStmt(exprs, span(start_tok.line, start_tok.column)))
+
+    # =========================================================================
+    # Wait statement
+    # =========================================================================
+
+    # WAIT expr [timeout] — wait for time or condition with optional timeout
+    me parse_wait() -> Result<CmmStmt, CmmParseError>:
+        val start_tok = self.advance()  # consume WAIT
+
+        if self.at_stmt_end():
+            return Err(self.make_error("Expected expression after WAIT"))
+
+        match self.parse_expression():
+            case Ok(expr):
+                # Consume optional remaining expressions (timeout, etc.)
+                var params = self.collect_remaining_exprs()
+                Ok(CmmStmt.WaitStmt(expr, span(start_tok.line, start_tok.column)))
+            case Err(e): Err(e)
+
+    # =========================================================================
+    # Dialog statement
+    # =========================================================================
+
+    # DIALOG ( items... )
+    # Parses a dialog block with simplified item recognition.
+    # Flattened to avoid nested match with return/mutation.
+    me parse_dialog() -> Result<CmmStmt, CmmParseError>:
+        val start_tok = self.advance()  # consume DIALOG
+
+        # Expect a block next (possibly after newline)
+        self.skip_newlines()
+
+        val has_lparen = self.check_kind("LParen")
+        if not has_lparen:
+            # DIALOG without block — treat as generic command
+            return self.parse_generic_command()
+
+        self.advance()  # consume (
+        var items: [CmmDialogItem] = []
+        self.skip_newlines()
+
+        while not self.is_at_end():
+            if self.check_kind("RParen"):
+                self.advance()  # consume )
+                return Ok(CmmStmt.DialogBlock(items, span(start_tok.line, start_tok.column)))
+            if self.check_kind("Newline"):
+                self.advance()
+            else if self.check_kind("Comment"):
+                self.advance()
+            else if self.check_kind("Eof"):
+                return Err(self.make_error("Unterminated DIALOG block"))
+            else:
+                # Try to parse a dialog item
+                match self.parse_dialog_item():
+                    case Ok(item):
+                        items.push(item)
+                    case Err(e):
+                        # Error recovery: skip to next line within dialog
+                        self.skip_to_next_line()
+
+        Err(self.make_error("Unterminated DIALOG block"))
+
+    # Parse a single dialog item line.
+    # Recognizes HEADER, POS, TEXT, DEFBUTTON, BUTTON, EDIT, CHECKBOX,
+    # CHOOSEBOX, PULLDOWN, LINE, CLOSE, and NAME: prefixed items.
+    # Flattened to avoid nested match with return/mutation.
+    me parse_dialog_item() -> Result<CmmDialogItem, CmmParseError>:
+        val tok = self.peek()
+
+        # Check for label-prefixed items (NAME: EDIT/BUTTON/etc.)
+        # Flattened: detect Label, then check Identifier, all at top level.
+        val label_name = self.extract_label_name()
+        if label_name != "":
+            self.advance()  # consume label
+            # Check for widget keyword after label
+            val widget_name = self.extract_identifier_name()
+            if widget_name == "":
+                self.skip_to_next_line()
+                return Err(self.make_error("Expected dialog widget after label"))
+            val widget_upper = to_upper_cmm(widget_name)
+            self.advance()  # consume widget keyword
+            return self.parse_labeled_dialog_widget(label_name, widget_upper, widget_name)
+
+        # Non-label dialog items: HEADER, POS, TEXT, DEFBUTTON, BUTTON, LINE, CLOSE
+        match tok.kind:
+            case CmmTokenKind.Identifier(name):
+                val upper = to_upper_cmm(name)
+                self.advance()  # consume keyword
+
+                if upper == "HEADER":
+                    val title = self.consume_string_or_empty()
+                    self.skip_to_next_line()
+                    return Ok(CmmDialogItem.DlgHeader(title))
+
+                if upper == "POS":
+                    # POS x. y. [w.] — parse up to 3 numeric expressions
+                    val x = self.parse_expr_or_empty()
+                    val y = self.parse_expr_or_empty()
+                    val w = self.parse_expr_or_empty()
+                    self.skip_to_next_line()
+                    return Ok(CmmDialogItem.DlgPos(x, y, w))
+
+                if upper == "TEXT":
+                    val label_text = self.consume_string_or_empty()
+                    self.skip_to_next_line()
+                    return Ok(CmmDialogItem.DlgText(label_text))
+
+                if upper == "DEFBUTTON":
+                    val btn_text = self.consume_string_or_empty()
+                    val callback = self.consume_string_or_empty()
+                    self.skip_to_next_line()
+                    return Ok(CmmDialogItem.DlgDefButton("", btn_text, callback))
+
+                if upper == "BUTTON":
+                    val btn_text = self.consume_string_or_empty()
+                    val callback = self.consume_string_or_empty()
+                    self.skip_to_next_line()
+                    return Ok(CmmDialogItem.DlgButton("", btn_text, callback))
+
+                if upper == "LINE":
+                    val group_label = self.consume_string_or_empty()
+                    self.skip_to_next_line()
+                    return Ok(CmmDialogItem.DlgLine(group_label))
+
+                if upper == "CLOSE":
+                    val callback = self.consume_string_or_empty()
+                    self.skip_to_next_line()
+                    return Ok(CmmDialogItem.DlgClose(callback))
+
+                # Unknown dialog keyword — skip to end of line
+                self.skip_to_next_line()
+                return Err(self.make_error("Unknown dialog item: {name}"))
+            case _:
+                self.skip_to_next_line()
+                Err(self.make_error("Expected dialog item"))
+
+    # =========================================================================
+    # Block and body parsing
+    # =========================================================================
+
+    # Parse a parenthesized block: ( stmt1  stmt2  ... )
+    # Flattened: main loop uses if/else instead of nested match to avoid
+    # mutation inside nested match arms.
+    me parse_block() -> Result<CmmStmt, CmmParseError>:
+        val start_tok = self.advance()  # consume (
+        var stmts: [CmmStmt] = []
+
+        self.skip_newlines()
+
+        # Skip DIALOG block modifiers: (&, (&+, (&-, etc.
+        # These appear right after ( and before the block content.
+        if self.check_op("&"):
+            self.advance()
+            # Consume optional +/-/= modifiers
+            if self.check_op("+"):
+                self.advance()
+            if self.check_op("-"):
+                self.advance()
+
+        self.skip_newlines()
+
+        while not self.is_at_end():
+            if self.check_kind("RParen"):
+                self.advance()  # consume )
+                return Ok(CmmStmt.Block(stmts, span(start_tok.line, start_tok.column)))
+            if self.check_kind("Eof"):
+                return Err(self.make_error("Unterminated block — expected )"))
+            if self.check_kind("Newline"):
+                val nl_tok = self.advance()
+                stmts.push(CmmStmt.EmptyLine(span(nl_tok.line, nl_tok.column)))
+            else if self.check_kind("Comment"):
+                self.push_comment_stmt(stmts)
+            else:
+                self.parse_block_statement_into(stmts)
+
+        Err(self.make_error("Unterminated block — expected )"))
+
+    # Parse the body following a control-flow keyword.
+    # If the next non-blank token is `(`, parse a block.
+    # Otherwise parse a single statement (rest of current line or next line).
+    me parse_body_or_next() -> Result<CmmStmt, CmmParseError>:
+        # If remaining tokens on this line, treat as inline single statement
+        if not self.at_stmt_end():
+            return self.parse_statement()
+
+        # Skip newlines looking for a block or inline statement
+        val saved = self.current
+        self.skip_newlines()
+
+        match self.peek().kind:
+            case CmmTokenKind.LParen:
+                return self.parse_block()
+            case CmmTokenKind.Eof:
+                return Err(self.make_error("Expected body for control-flow statement"))
+            case _:
+                return self.parse_statement()
+
+    # =========================================================================
+    # Macro assignment
+    # =========================================================================
+
+    # &name=expr or &&name=expr
+    me parse_macro_assign(name: text, is_recursive: bool) -> Result<CmmStmt, CmmParseError>:
+        val start_tok = self.advance()  # consume &name or &&name
+        self.advance()  # consume =
+
+        if self.at_stmt_end():
+            # Empty assignment: &name= (clears the macro)
+            val empty_expr = CmmExpr.Lit(CmmLiteral.Str(""))
+            if is_recursive:
+                return Ok(CmmStmt.MacroRecAssign(name, empty_expr, span(start_tok.line, start_tok.column)))
+            else:
+                return Ok(CmmStmt.MacroAssign(name, empty_expr, span(start_tok.line, start_tok.column)))
+
+        match self.parse_expression():
+            case Ok(value_expr):
+                if is_recursive:
+                    Ok(CmmStmt.MacroRecAssign(name, value_expr, span(start_tok.line, start_tok.column)))
+                else:
+                    Ok(CmmStmt.MacroAssign(name, value_expr, span(start_tok.line, start_tok.column)))
+            case Err(e): Err(e)
+
+    # =========================================================================
+    # Device-qualified command
+    # =========================================================================
+
+    # B::Data.dump 0x0 — device selector followed by a command
+    me parse_device_command(device: text) -> Result<CmmStmt, CmmParseError>:
+        val start_tok = self.advance()  # consume device selector (e.g. B::)
+
+        # Parse the command name (Identifier or DotCommand)
+        val cmd_name = self.consume_command_name()
+        if cmd_name == "":
+            # Standalone device selector (e.g. B:: on its own line) — no command follows
+            return Ok(CmmStmt.Command(device + "::", [], span(start_tok.line, start_tok.column)))
+
+        # Collect remaining expressions as parameters
+        var params = self.collect_remaining_exprs()
+        Ok(CmmStmt.DeviceCommand(device, cmd_name, params, span(start_tok.line, start_tok.column)))
+
+    # =========================================================================
+    # Generic command
+    # =========================================================================
+
+    # Generic command: any unrecognized identifier or dot-command with parameters.
+    # Covers TRACE32 commands like Data.dump, SYStem.CPU, Break.Set, etc.
+    me parse_generic_command() -> Result<CmmStmt, CmmParseError>:
+        val start_tok = self.peek()
+
+        # Get command name
+        val cmd_name = self.consume_command_name()
+        if cmd_name == "":
+            return Err(self.make_error("Expected command"))
+
+        # Collect remaining tokens on this line as parameter expressions
+        var params = self.collect_remaining_exprs()
+        Ok(CmmStmt.Command(cmd_name, params, span(start_tok.line, start_tok.column)))
+
+    # =========================================================================
+    # Helper methods
+    # =========================================================================
+
+    # Advance and push a comment statement into the stmts list.
+    # Extracts comment text from the current Comment token.
+    me push_comment_stmt(stmts: [CmmStmt]):
+        val c_tok = self.peek()
+        val c_text = self.extract_comment_text()
+        self.advance()
+        stmts.push(CmmStmt.CommentLine(c_text, span(c_tok.line, c_tok.column)))
+
+    # Parse a statement inside a block, push result into stmts, handle errors.
+    # Also consumes trailing newline or comment after the statement.
+    me parse_block_statement_into(stmts: [CmmStmt]):
+        match self.parse_statement():
+            case Ok(stmt):
+                stmts.push(stmt)
+                # Skip remaining tokens on this line, but stop at ) which closes the block
+                self.skip_to_next_line_or_rparen()
+            case Err(e):
+                self.errors.push("Line {e.line}: {e.message}")
+                stmts.push(CmmStmt.ErrorNode(e.message, span(e.line, e.column)))
+                self.skip_to_next_line()
+        # Consume trailing newline or comment
+        if not self.is_at_end():
+            if self.check_kind("Newline"):
+                self.advance()
+            else if self.check_kind("Comment"):
+                self.push_comment_stmt(stmts)
+
+    # Extract comment text from the current token (must be Comment kind).
+    fn extract_comment_text() -> text:
+        match self.peek().kind:
+            case CmmTokenKind.Comment(c): c
+            case _: ""
+
+    # Extract macro name as command name (&name → "&name", &&name → "&&name").
+    # Returns "" if current token is not a macro reference.
+    fn extract_macro_cmd_name() -> text:
+        match self.peek().kind:
+            case CmmTokenKind.MacroRef(name): "&" + name
+            case CmmTokenKind.MacroRecRef(name): "&&" + name
+            case _: ""
+
+    # Extract the label name from the current token, or "" if not a Label token.
+    fn extract_label_name() -> text:
+        match self.peek().kind:
+            case CmmTokenKind.Label(name): name
+            case _: ""
+
+    # Extract the identifier name from the current token, or "" if not an Identifier.
+    fn extract_identifier_name() -> text:
+        match self.peek().kind:
+            case CmmTokenKind.Identifier(name): name
+            case _: ""
+
+    # Parse a labeled dialog widget item (called after label and widget keyword consumed).
+    # widget_upper is the uppercased widget keyword, widget_name is the original.
+    me parse_labeled_dialog_widget(label_name: text, widget_upper: text, widget_name: text) -> Result<CmmDialogItem, CmmParseError>:
+        if widget_upper == "EDIT":
+            val default_val = self.consume_string_or_empty()
+            val callback = self.consume_string_or_empty()
+            self.skip_to_next_line()
+            return Ok(CmmDialogItem.DlgEdit(label_name, default_val, callback))
+
+        if widget_upper == "BUTTON":
+            val btn_text = self.consume_string_or_empty()
+            val callback = self.consume_string_or_empty()
+            self.skip_to_next_line()
+            return Ok(CmmDialogItem.DlgButton(label_name, btn_text, callback))
+
+        if widget_upper == "DEFBUTTON":
+            val btn_text = self.consume_string_or_empty()
+            val callback = self.consume_string_or_empty()
+            self.skip_to_next_line()
+            return Ok(CmmDialogItem.DlgDefButton(label_name, btn_text, callback))
+
+        if widget_upper == "CHECKBOX":
+            val cb_text = self.consume_string_or_empty()
+            val callback = self.consume_string_or_empty()
+            self.skip_to_next_line()
+            return Ok(CmmDialogItem.DlgCheckbox(label_name, cb_text, callback))
+
+        if widget_upper == "CHOOSEBOX":
+            val cb_text = self.consume_string_or_empty()
+            val callback = self.consume_string_or_empty()
+            self.skip_to_next_line()
+            return Ok(CmmDialogItem.DlgChoosebox(cb_text, callback))
+
+        if widget_upper == "PULLDOWN":
+            val options = self.consume_string_or_empty()
+            val callback = self.consume_string_or_empty()
+            self.skip_to_next_line()
+            return Ok(CmmDialogItem.DlgPulldown(options, callback))
+
+        # Unknown widget after label — skip line
+        self.skip_to_next_line()
+        Err(self.make_error("Unknown dialog widget: {widget_name}"))
+
+    # Unwrap an Ok(text) from a Result that is known to be Ok.
+    # Must only be called after verifying the result is not Err.
+    fn unwrap_text(result: Result<text, CmmParseError>) -> text:
+        match result:
+            case Ok(v): v
+            case _: ""
+
+    # Unwrap an Ok(CmmExpr) from a Result that is known to be Ok.
+    # Must only be called after verifying the result is not Err.
+    fn unwrap_expr(result: Result<CmmExpr, CmmParseError>) -> CmmExpr:
+        match result:
+            case Ok(v): v
+            case _: CmmExpr.ExprEmpty
+
+    # Unwrap an Ok(CmmStmt) from a Result that is known to be Ok.
+    # Must only be called after verifying the result is not Err.
+    fn unwrap_stmt(result: Result<CmmStmt, CmmParseError>) -> CmmStmt:
+        match result:
+            case Ok(v): v
+            case _: CmmStmt.ErrorNode("unreachable unwrap_stmt", span(0, 0))
+
+    # Check if the current token is a % (for format specifiers like %ERROR, %WARNING).
+    fn check_percent_format() -> bool:
+        match self.peek().kind:
+            case CmmTokenKind.Percent: true
+            case _: false
+
+    # Check if the current token looks like a repeat count (number or macro).
+    # Used by parse_repeat to avoid nested match with return/mutation.
+    fn check_repeat_count_start() -> bool:
+        match self.peek().kind:
+            case CmmTokenKind.IntNumber(n): true
+            case CmmTokenKind.DecNumber(n): true
+            case CmmTokenKind.HexNumber(n): true
+            case CmmTokenKind.MacroRef(n): true
+            case _: false
+
+    # Check if the current token is an identifier followed by a colon (indented label).
+    # Returns the label name, or "" if not a label pattern.
+    # Must distinguish from access class patterns (D:, P:, etc.) — those are handled elsewhere.
+    fn check_indented_label() -> text:
+        match self.peek().kind:
+            case CmmTokenKind.Identifier(name):
+                if is_access_class(name):
+                    return ""
+                match self.peek_ahead(1).kind:
+                    case CmmTokenKind.Colon:
+                        # Check it's not :: (device selector)
+                        match self.peek_ahead(2).kind:
+                            case CmmTokenKind.Colon: ""
+                            case _: name
+                    case _: ""
+            case _: ""
+
+    # Check if the current token + next form a macro assignment pattern.
+    # Returns a MacroAssignInfo with is_assign=true if &name= or &&name= is found.
+    fn check_macro_assign() -> MacroAssignInfo:
+        var name = ""
+        var is_recursive = false
+        var is_macro = false
+        match self.peek().kind:
+            case CmmTokenKind.MacroRef(n):
+                name = n
+                is_macro = true
+            case CmmTokenKind.MacroRecRef(n):
+                name = n
+                is_macro = true
+                is_recursive = true
+            case _: ()
+        if not is_macro:
+            return MacroAssignInfo(is_assign: false, name: "", is_recursive: false)
+        var has_assign = false
+        match self.peek_ahead(1).kind:
+            case CmmTokenKind.Assign:
+                has_assign = true
+            case _: ()
+        MacroAssignInfo(is_assign: has_assign, name: name, is_recursive: is_recursive)
+
+    # Check if the current token is % followed by LINE identifier.
+    # Returns a PercentLineInfo indicating whether the pattern was found.
+    fn check_percent_line() -> PercentLineInfo:
+        var is_percent = false
+        match self.peek().kind:
+            case CmmTokenKind.Percent:
+                is_percent = true
+            case _: ()
+        if not is_percent:
+            return PercentLineInfo(found: false, tokens_to_skip: 0)
+        var is_line = false
+        match self.peek_ahead(1).kind:
+            case CmmTokenKind.Identifier(name):
+                if to_upper_cmm(name) == "LINE":
+                    is_line = true
+            case _: ()
+        PercentLineInfo(found: is_line, tokens_to_skip: 2)
+
+    # Consume and return a command name (Identifier or DotCommand text).
+    # Returns empty string if current token is not a command name.
+    # Consume a label/target for GOTO/GOSUB. Accepts identifier, dot-command, or macro ref.
+    # Returns empty string if nothing to consume (e.g. bare GOTO to clear handler).
+    me consume_label_or_macro() -> text:
+        if self.at_stmt_end():
+            return ""
+        match self.peek().kind:
+            case CmmTokenKind.Identifier(name):
+                self.advance()
+                return name
+            case CmmTokenKind.DotCommand(name):
+                self.advance()
+                return name
+            case CmmTokenKind.MacroRef(name):
+                self.advance()
+                return "&" + name
+            case CmmTokenKind.MacroRecRef(name):
+                self.advance()
+                return "&&" + name
+            case _:
+                return ""
+
+    me consume_command_name() -> text:
+        match self.peek().kind:
+            case CmmTokenKind.Identifier(name):
+                self.advance()
+                return name
+            case CmmTokenKind.DotCommand(name):
+                self.advance()
+                return name
+            case _:
+                return ""
+
+    # Expect an identifier token; return its text or an error.
+    me expect_identifier(context: text) -> Result<text, CmmParseError>:
+        match self.peek().kind:
+            case CmmTokenKind.Identifier(name):
+                self.advance()
+                Ok(name)
+            case CmmTokenKind.DotCommand(name):
+                self.advance()
+                Ok(name)
+            case _:
+                Err(self.make_error("Expected {context}"))
+
+    # Collect macro names (&name tokens) until end of statement.
+    # Also accepts %name (format-typed variables like %srcpath, %line).
+    # Returns list of macro names (without the & prefix).
+    me collect_macro_names() -> [text]:
+        var names: [text] = []
+        while not self.at_stmt_end():
+            match self.peek().kind:
+                case CmmTokenKind.MacroRef(name):
+                    self.advance()
+                    names.push(name)
+                case CmmTokenKind.MacroRecRef(name):
+                    self.advance()
+                    names.push(name)
+                case _:
+                    # Check for %name pattern (format-typed local variable)
+                    if self.check_op("%"):
+                        val pct_tok = self.advance()
+                        val maybe_name = self.peek_identifier()
+                        if maybe_name.?:
+                            val n = maybe_name ?? ""
+                            self.advance()
+                            names.push("%" + n)
+                        else:
+                            # Not %name, put back
+                            self.current = self.current - 1
+                            break
+                    else:
+                        # Stop collecting if we hit a non-macro token
+                        break
+        names
+
+    # Collect remaining expressions on the current line as a list.
+    # Parses space-separated expressions until newline/eof/comment.
+    me collect_remaining_exprs() -> [CmmExpr]:
+        var exprs: [CmmExpr] = []
+        while not self.at_stmt_end():
+            # Skip separators: commas, backslashes, dots (as path/address separators)
+            var skipped = true
+            while skipped:
+                skipped = false
+                if not self.at_stmt_end() and self.check_kind("Comma"):
+                    self.advance()
+                    skipped = true
+                if not self.at_stmt_end() and self.check_kind("Backslash"):
+                    self.advance()
+                    skipped = true
+            if not self.at_stmt_end():
+                val saved_pos = self.current
+                match self.parse_expression():
+                    case Ok(expr):
+                        exprs.push(expr)
+                    case Err(e):
+                        # Restore position and stop — don't consume tokens
+                        # that might belong to the next statement
+                        self.current = saved_pos
+                        self.skip_to_next_line()
+                        break
+        exprs
+
+    # Consume an option token (/mode) and return its text, or return "" if not an option.
+    me consume_option_or_empty() -> text:
+        match self.peek().kind:
+            case CmmTokenKind.Option(opt):
+                self.advance()
+                return opt
+            case _:
+                return ""
+
+    # Consume a string literal token and return its value, or return "".
+    me consume_string_or_empty() -> text:
+        match self.peek().kind:
+            case CmmTokenKind.StringLit(s):
+                self.advance()
+                return s
+            case _:
+                return ""
+
+    # Parse a single expression or return ExprEmpty if at end of statement.
+    me parse_expr_or_empty() -> CmmExpr:
+        if self.at_stmt_end():
+            return CmmExpr.ExprEmpty
+        match self.parse_expression():
+            case Ok(expr): expr
+            case Err(e): CmmExpr.ExprEmpty

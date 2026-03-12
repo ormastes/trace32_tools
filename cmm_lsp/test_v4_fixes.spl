@@ -1,0 +1,94 @@
+# Test V4 parser fixes - all patterns that were fixed during full validation
+use cmm_parser.{parse_cmm_source}
+
+fn test_parse(name: text, source: text) -> bool:
+    val p = parse_cmm_source(source)
+    if p.errors.len() > 0:
+        print "FAIL {name}: {p.errors[0]}"
+        return false
+    true
+
+var ok_count = 0
+var fail_count = 0
+
+# === Line continuation ===
+if test_parse("cont_data_load", "Data.LOAD.Elf \"test\" /nocode \\\n  /reloc .text at 0x1000\n"): ok_count = ok_count + 1
+else: fail_count = fail_count + 1
+if test_parse("cont_multi", "Data.LOAD.Elf \"test\" \\\n  /reloc .text at 0x1000 \\\n  /reloc .data at 0x2000\n"): ok_count = ok_count + 1
+else: fail_count = fail_count + 1
+if test_parse("cont_str_concat", "&str=\"Found\"+format.decimal(0,&fsize)+\" bytes.\"\\\n+\"next\"\n"): ok_count = ok_count + 1
+else: fail_count = fail_count + 1
+if test_parse("cont_dialog_yesno", "dialog.yesno \"Update?\"\\\n\"really?\"\n"): ok_count = ok_count + 1
+else: fail_count = fail_count + 1
+if test_parse("cont_symbol_autoload", "sYmbol.AutoLoad.LOADEPOC &pdkpath\\epoc32\\rom\\&romname.log \\\n  /strippart 999\n"): ok_count = ok_count + 1
+else: fail_count = fail_count + 1
+if test_parse("cont_data_load_exe", "Data.LOAD.EXE \"&filepath\" &space:0 /nocode /noclear \\\n  /name &progname \\\n  /reloc ER_RO at &code\n"): ok_count = ok_count + 1
+else: fail_count = fail_count + 1
+if test_parse("cont_commented", "  ;Data.LOAD.Elf path \\\n  /reloc .text at 0\n"): ok_count = ok_count + 1
+else: fail_count = fail_count + 1
+
+# === C++ scope resolution ===
+if test_parse("cpp_scope_if", "IF y.exist(ExecHandler::ProcessResume)\n  PRINT \"found\"\n"): ok_count = ok_count + 1
+else: fail_count = fail_count + 1
+if test_parse("cpp_scope_backtick", "&breakaddr=address.offset(`ExecHandler::ProcessResume(DProcess*)`)\n"): ok_count = ok_count + 1
+else: fail_count = fail_count + 1
+if test_parse("dev_selector_cmd", "B::Data.dump 0x0\n"): ok_count = ok_count + 1
+else: fail_count = fail_count + 1
+if test_parse("dev_selector_bare", "B::\n"): ok_count = ok_count + 1
+else: fail_count = fail_count + 1
+
+# === IF/ELSE with paren blocks ===
+if test_parse("if_else_paren", "if os.version(0)==0x10\n(\n  os xterm\n)\nelse\n(\n  os pread\n)\n"): ok_count = ok_count + 1
+else: fail_count = fail_count + 1
+if test_parse("if_elif_else", "IF &x==1\n(\n  PRINT \"one\"\n)\nELSE IF &x==2\n(\n  PRINT \"two\"\n)\nELSE\n(\n  PRINT \"other\"\n)\n"): ok_count = ok_count + 1
+else: fail_count = fail_count + 1
+
+# === Macro paths ===
+if test_parse("macro_dot_ext", "OPEN #1 &project.plg /Read\n"): ok_count = ok_count + 1
+else: fail_count = fail_count + 1
+if test_parse("macro_backslash", "OPEN #1 &configdir\\&gen_configfile /Create\n"): ok_count = ok_count + 1
+else: fail_count = fail_count + 1
+if test_parse("macro_trail_dot", "&Time=&Time-&TimeSkip.\n"): ok_count = ok_count + 1
+else: fail_count = fail_count + 1
+if test_parse("macro_dll_path", "Data.LOAD.EXE &reldir\\kernel.dll /nocode /noclear\n"): ok_count = ok_count + 1
+else: fail_count = fail_count + 1
+
+# === Question marks ===
+if test_parse("triple_qmark", "&patchloc1=0x0e60 ???\n"): ok_count = ok_count + 1
+else: fail_count = fail_count + 1
+
+# === Bare ampersand ===
+if test_parse("bare_amp_block", "(\n&\nPRINT \"hello\"\n)\n"): ok_count = ok_count + 1
+else: fail_count = fail_count + 1
+if test_parse("dialog_view_amp", "DIALOG.view\n(&\nHEADER \"Title\"\n)\n"): ok_count = ok_count + 1
+else: fail_count = fail_count + 1
+
+# === READ format ===
+if test_parse("read_pct_line", "READ #1 &address %line &comment\n"): ok_count = ok_count + 1
+else: fail_count = fail_count + 1
+if test_parse("read_macros", "READ #1 &var1 &var2 &var3\n"): ok_count = ok_count + 1
+else: fail_count = fail_count + 1
+
+# === Section names ===
+if test_parse("sec_dynamic", "&end=address.offset(y.secaddress(.dynamic))\n"): ok_count = ok_count + 1
+else: fail_count = fail_count + 1
+if test_parse("sec_bss", "&end=address.offset(y.secend(.bss))\n"): ok_count = ok_count + 1
+else: fail_count = fail_count + 1
+
+# === Stray RParen ===
+if test_parse("stray_rparen", "PRINT \"hello\"\n)\nPRINT \"world\"\n"): ok_count = ok_count + 1
+else: fail_count = fail_count + 1
+
+# === Real-world complex ===
+if test_parse("uclinux_autoload", "&codeaddr=task.proc.codeaddr(\"&progname\")\n&dataaddr=task.proc.dataaddr(\"&progname\")\nData.LOAD.Elf \"&filepath\" /nocode /noclear \\\n  /reloc .text at &codeaddr /reloc .data at &dataaddr /reloc .bss after .data\n"): ok_count = ok_count + 1
+else: fail_count = fail_count + 1
+if test_parse("combiprobe_pipe", "if os.version(0)==0x10\n(\n  os xterm -fg white -bg black\n)\nelse\n(\n  os pread.exe\n)\nwait 500.ms\n"): ok_count = ok_count + 1
+else: fail_count = fail_count + 1
+if test_parse("symbian_kernel", "if y.exist(ExecHandler::ProcessResume)\n  &breakaddr=address.offset(ExecHandler::ProcessResume)\nelse if y.exist(`ExecHandler::ProcessResume(DProcess*)`)\n  &breakaddr=address.offset(`ExecHandler::ProcessResume(DProcess*)`)\n"): ok_count = ok_count + 1
+else: fail_count = fail_count + 1
+if test_parse("psos_qmarks", "&patchloc1=0x0e60 ???\n&patchloc2=0x0e64 ???\n"): ok_count = ok_count + 1
+else: fail_count = fail_count + 1
+
+print ""
+print "=== V4 Fixes Test Results ==="
+print "Passed: {ok_count}  Failed: {fail_count}  Total: {ok_count + fail_count}"

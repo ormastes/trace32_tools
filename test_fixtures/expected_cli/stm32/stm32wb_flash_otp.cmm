@@ -1,0 +1,110 @@
+; @target: STM32WB55
+; @arch: Cortex-M4 + Cortex-M0+
+; @purpose: Flash and OTP programming
+; @requires: SWD, Power Debug II USB
+; @cli-mode: batch
+
+; STM32WB55 Flash and OTP Programming
+
+SCREEN.OFF
+AREA.Create CLI_OUTPUT
+AREA.Select CLI_OUTPUT
+ON ERROR GOSUB error_handler
+
+LOCAL &elf_path &confirm &otp_confirm
+LOCAL &otp_val &flash_result &verify_ok
+
+ENTRY &elf_path &confirm &otp_confirm
+IF "&elf_path"==""
+  &elf_path="stm32wb_app.elf"
+
+SYStem.RESet
+SYStem.CPU STM32WB55
+SYStem.CONFIG.DEBUGPORTTYPE SWD
+SYStem.Up
+
+; CLI confirmation via ENTRY parameter
+IF "&confirm"!="TRUE"
+(
+  PRINT "[FLASH] operation=CANCELLED reason=no_confirmation"
+  ENDDO FALSE()
+)
+
+PRINT "[FLASH] operation=ERASE status=STARTED"
+
+; Flash configuration - STM32WB55
+; Main flash: 0x08000000--0x080FFFFF (1MB, 4KB pages)
+FLASH.RESet
+FLASH.Create 1. 0x08000000--0x080FFFFF 0x1000 TARGET Long
+
+; Program main flash
+FLASH.Program ALL /Erase
+Data.LOAD.Elf "&elf_path"
+FLASH.Program off
+
+PRINT "[FLASH] operation=PROGRAM status=COMPLETE"
+
+; Show loaded code
+WinPrint.Data.List
+
+; Verify main flash
+Data.LOAD.Elf "&elf_path" /ComPare
+IF FOUND()
+(
+  PRINT "[FLASH] verify=FAILED"
+  PRINT "[STATUS] operation=FAILED reason=verify_mismatch"
+  ENDDO FALSE()
+)
+ELSE
+(
+  PRINT "[FLASH] verify=PASSED"
+)
+
+; OTP area access - 0x1FFF7000 (one-time programmable, IRREVERSIBLE)
+; Read current OTP values
+&otp_val=Data.Long(D:0x1FFF7000)
+PRINT "[OTP] current_value=" FORMAT.Hex(8., &otp_val)
+
+; OTP write via CLI parameter
+IF "&otp_confirm"=="TRUE"
+(
+  PRINT "[OTP] status=WRITING"
+
+  ; Unlock OTP
+  Data.Set D:0x58004008 %Long 0x45670123  ; FLASH_KEYR
+  Data.Set D:0x58004008 %Long 0xCDEF89AB  ; FLASH_KEYR
+  Data.Set D:0x5800400C %Long 0x08192A3B  ; FLASH_OPTKEYR
+  Data.Set D:0x5800400C %Long 0x4C5D6E7F  ; FLASH_OPTKEYR
+
+  ; Write OTP data
+  Data.Set D:0x1FFF7000 %Long 0xDEADBEEF
+
+  ; Verify OTP write
+  &otp_val=Data.Long(D:0x1FFF7000)
+  IF &otp_val==0xDEADBEEF
+  (
+    PRINT "[OTP] status=VERIFIED"
+  )
+  ELSE
+  (
+    PRINT "[OTP] status=VERIFY_FAILED"
+    PRINT "[STATUS] operation=FAILED reason=otp_verify"
+    ENDDO FALSE()
+  )
+)
+ELSE
+(
+  PRINT "[OTP] status=SKIPPED"
+)
+
+; Reset target
+SYStem.Down
+SYStem.Up
+
+PRINT "[STATUS] operation=SUCCESS"
+
+ENDDO TRUE()
+
+error_handler:
+  PRINT "[ERROR] line=" PRACTICE.CALLER.LINE()
+  ENDDO FALSE()

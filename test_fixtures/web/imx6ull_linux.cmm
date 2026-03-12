@@ -1,0 +1,50 @@
+; i.MX6 ULL Linux Boot Debug
+; Exercises: DCD interpreter, TERM.Out, serial boot flow,
+;            MMU.FORMAT LINUX, multi-step boot
+
+LOCAL &uboot &zimage &dtb &rootfs
+
+SYStem.RESet
+SYStem.CPU iMX6ULL
+SYStem.JtagClock 20MHz
+
+; Configure for serial boot
+SYStem.Option ResBreak OFF
+SYStem.Option WaitReset 500ms
+SYStem.Up
+
+; Load U-Boot with DCD
+&uboot="u-boot.imx"
+Data.LOAD.Binary "&uboot" 0x87800000
+
+; DCD execution
+Data.Set D:0x020D8000 %Long 0x00000001  ; Enable WDOG timeout
+WAIT 100ms
+
+; Terminal output
+TERM.Out "Boot: loading kernel..." 0x0D 0x0A
+
+; Load kernel
+&zimage="zImage"
+Data.LOAD.Binary "&zimage" 0x80800000
+
+; Load device tree
+&dtb="imx6ull-evk.dtb"
+Data.LOAD.Binary "&dtb" 0x83000000
+
+; Set boot args
+Register.Set R0 0
+Register.Set R1 0
+Register.Set R2 0x83000000
+Register.Set PC 0x80800000
+
+; Configure MMU
+MMU.FORMAT LINUX swapper_pg_dir 0xC0000000--0xDFFFFFFF 0x80000000
+TRANSlation.Create 0xC0000000--0xDFFFFFFF 0x80000000
+TRANSlation.COMMON 0xBF000000--0xFFFFFFFF
+TRANSlation.ON
+
+Go
+WAIT !STATE.RUN() 30s
+
+ENDDO

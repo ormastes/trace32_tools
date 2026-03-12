@@ -1,0 +1,61 @@
+; @target: BeagleBone Black
+; @arch: Cortex-A8 AM3358
+; @purpose: QNX RTOS debug
+; @requires: JTAG
+; @cli-mode: batch
+; QNX on BeagleBone Black Debug Setup
+; Exercises: TERM.METHOD COM, MMU.SCAN,
+;            TRANSlation.*, TASK.CONFIG,
+;            sYmbol.AutoLOAD.CHECKLINUX, GROUP.Create /RED,
+;            HELP.FILTER.Add
+
+SCREEN.OFF
+
+AREA.Create CLI_OUTPUT
+AREA.Select CLI_OUTPUT
+
+ON ERROR GOSUB error_handler
+
+LOCAL &qnx_ifs &procnto
+
+
+SYStem.RESet
+SYStem.CPU AM3358-GP
+SYStem.Option DACR ON
+SYStem.JtagClock 20MHz
+SYStem.Up
+
+; Terminal setup
+TERM.METHOD COM COM1 115200. 8 NONE 1STOP
+
+; Configure MMU and translation
+MMU.FORMAT LINUX swapper_pg_dir 0xC0000000--0xCFFFFFFF 0x80000000
+MMU.SCAN
+TRANSlation.Create 0xC0000000--0xCFFFFFFF 0x80000000
+TRANSlation.COMMON 0xBF000000--0xFFFFFFFF
+TRANSlation.ON
+
+; Load QNX IFS
+&qnx_ifs="ifs-am335x.raw"
+Data.LOAD.Binary "&qnx_ifs" 0x80100000
+
+; RTOS awareness
+TASK.CONFIG ~~/demo/arm/kernel/qnx/qnx.t32
+
+; Symbol auto-loading
+sYmbol.AutoLOAD.CHECKLINUX "do ~~/demo/arm/kernel/qnx/autoload_qnx.cmm"
+
+; Group for threads
+GROUP.Create "MyThreads" thread_1 thread_2 thread_3 /RED
+
+; Help filter
+HELP.FILTER.Add "qnx"
+
+Go
+WAIT 5s
+
+ENDDO TRUE()
+
+error_handler:
+  PRINT "[ERROR] line=" PRACTICE.CALLER.LINE()
+  ENDDO FALSE()

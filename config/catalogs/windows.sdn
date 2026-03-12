@@ -1,0 +1,114 @@
+# T32 CLI — Window catalog
+# Each entry defines a TRACE32 window available for CLI interaction
+
+window break_list
+  title: Breakpoint List
+  kind: built_in
+  capture_mode: print_parse
+  open_command: Break.List
+  capture_command: WinPrint.Break.List
+
+window register_view
+  title: CPU Registers
+  kind: built_in
+  capture_mode: print_parse
+  open_command: Register.view /SpotLight
+  capture_command: WinPrint.Register.view
+
+window var_local
+  title: Local Variables
+  kind: built_in
+  capture_mode: print_parse
+  open_command: Var.Local
+  capture_command: WinPrint.Var.Local
+
+window var_watch
+  title: Variable Watch
+  kind: built_in
+  capture_mode: print_parse
+  open_command: Var.Watch
+  capture_command: WinPrint.Var.Watch
+
+window stack_frame
+  title: Stack Frame
+  kind: built_in
+  capture_mode: print_parse
+  open_command: Frame.view /Caller
+  capture_command: WinPrint.Frame.view
+
+window memory_dump
+  title: Memory Dump
+  kind: built_in
+  capture_mode: print_parse
+  open_command: Data.dump
+  capture_command: WinPrint.Data.dump
+
+window source_list
+  title: Source Listing
+  kind: built_in
+  capture_mode: print_parse
+  open_command: List.auto
+  capture_command: WinPrint.List
+
+window trace_list
+  title: Trace List
+  kind: built_in
+  capture_mode: print_parse
+  open_command: Trace.List
+  capture_command: WinPrint.Trace.List
+
+window coverage_list
+  title: Code Coverage
+  kind: built_in
+  capture_mode: print_parse
+  open_command: COVerage.ListFunc
+  capture_command: WinPrint.COVerage.ListFunc
+
+window task_list
+  title: RTOS Tasks
+  kind: built_in
+  capture_mode: print_parse
+  open_command: TASK.List
+  capture_command: WinPrint.TASK.List
+
+window semihost_area
+  title: Semihosting Output
+  kind: built_in
+  capture_mode: print_parse
+  open_command: AREA
+  capture_command: WinPrint.AREA
+
+window symbol_browse
+  title: Symbol Browser
+  kind: built_in
+  capture_mode: print_parse
+  open_command: sYmbol.Browse
+  capture_command: WinPrint.sYmbol.Browse
+
+window perf_list
+  title: Performance
+  kind: built_in
+  capture_mode: print_parse
+  open_command: Perf.ListMODULE
+  capture_command: WinPrint.Perf.ListMODULE
+
+window mmu_list
+  title: MMU List
+  kind: built_in
+  capture_mode: print_parse
+  open_command: MMU.List
+  capture_command: WinPrint.MMU.List
+
+window per_view
+  title: Peripheral View
+  kind: built_in
+  capture_mode: print_parse
+  open_command: PER.view
+  capture_command: WinPrint.PER.view
+
+window data_list
+  title: Data Listing
+  kind: built_in
+  capture_mode: print_parse
+  open_command: Data.List
+  capture_command: WinPrint.Data.List

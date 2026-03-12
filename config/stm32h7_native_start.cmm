@@ -1,0 +1,5 @@
+; Repo-managed STM32H7 TRACE32 startup for native Remote API runs.
+DO /opt/t32/stm32h7_startup.cmm
+SYStem.Option SemiHost ON
+Break
+ENDDO

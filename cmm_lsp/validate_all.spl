@@ -1,0 +1,384 @@
+# CMM Parser Full Validator — All files with Per-Group Reports
+#
+# Parses ALL CMM files under a directory tree, assigns each to a group (1-6),
+# generates per-group report files and an overall summary.
+#
+# Usage:
+#   bin/release/simple examples/10_tooling/cmm_lsp/validate_all.spl [dir]
+#   (default dir: /opt/t32/demo)
+
+use cmm_parser.{parse_cmm_source}
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_dir_list(path: text) -> [text]
+extern fn rt_file_write_text(path: text, content: text)
+extern fn sys_get_args() -> [text]
+
+# ---------------------------------------------------------------------------
+# Text helpers
+# ---------------------------------------------------------------------------
+
+fn contains(haystack: text, needle: text) -> bool:
+    if needle.len() > haystack.len():
+        return false
+    var i = 0
+    while i <= haystack.len() - needle.len():
+        if haystack[i:i + needle.len()] == needle:
+            return true
+        i = i + 1
+    false
+
+fn starts_with(s: text, prefix: text) -> bool:
+    if prefix.len() > s.len():
+        return false
+    s[0:prefix.len()] == prefix
+
+fn char_to_lower(ch: text) -> text:
+    if ch == "A": return "a"
+    if ch == "B": return "b"
+    if ch == "C": return "c"
+    if ch == "D": return "d"
+    if ch == "E": return "e"
+    if ch == "F": return "f"
+    if ch == "G": return "g"
+    if ch == "H": return "h"
+    if ch == "I": return "i"
+    if ch == "J": return "j"
+    if ch == "K": return "k"
+    if ch == "L": return "l"
+    if ch == "M": return "m"
+    if ch == "N": return "n"
+    if ch == "O": return "o"
+    if ch == "P": return "p"
+    if ch == "Q": return "q"
+    if ch == "R": return "r"
+    if ch == "S": return "s"
+    if ch == "T": return "t"
+    if ch == "U": return "u"
+    if ch == "V": return "v"
+    if ch == "W": return "w"
+    if ch == "X": return "x"
+    if ch == "Y": return "y"
+    if ch == "Z": return "z"
+    ch
+
+fn to_lower_simple(s: text) -> text:
+    var result = ""
+    var i = 0
+    while i < s.len():
+        result = result + char_to_lower(s[i:i + 1])
+        i = i + 1
+    result
+
+# ---------------------------------------------------------------------------
+# Error categorization (extended)
+# ---------------------------------------------------------------------------
+
+fn categorize_error(msg: text) -> text:
+    if contains(msg, "Unterminated block"):
+        return "Unterminated block"
+    if contains(msg, "Unterminated string"):
+        return "Unterminated string"
+    if contains(msg, "Expected expression"):
+        return "Expected expression"
+    if contains(msg, "Expected command"):
+        return "Expected command"
+    if contains(msg, "Unexpected token"):
+        return "Unexpected token"
+    if contains(msg, "ELSE without"):
+        return "ELSE without IF"
+    if contains(msg, "DIALOG"):
+        return "DIALOG issue"
+    if contains(msg, "macro"):
+        return "Macro issue"
+    if contains(msg, "Expected ')'"):
+        return "Missing RParen"
+    if contains(msg, "Expected '}'"):
+        return "Missing RBrace"
+    if contains(msg, "Expected"):
+        return "Expected (other)"
+    "Other"
+
+# ---------------------------------------------------------------------------
+# Group assignment
+# ---------------------------------------------------------------------------
+
+fn extract_first_dir(path: text, root: text) -> text:
+    val prefix_len = root.len()
+    if path.len() <= prefix_len + 1:
+        return ""
+    val rest = path[prefix_len + 1:path.len()]
+    var i = 0
+    while i < rest.len():
+        if rest[i:i + 1] == "/":
+            return to_lower_simple(rest[0:i])
+        i = i + 1
+    to_lower_simple(rest)
+
+fn assign_group(path: text, root: text) -> i64:
+    val dir = extract_first_dir(path, root)
+    if dir == "arm" or dir == "arm64":
+        return 1
+    if starts_with(dir, "powerpc"):
+        return 2
+    if starts_with(dir, "mips"):
+        return 3
+    if dir == "tricore" or dir == "c166":
+        return 4
+    if dir == "m68k" or dir == "x86" or dir == "coldfire":
+        return 5
+    if starts_with(dir, "m68hc"):
+        return 5
+    6
+
+fn group_name(g: i64) -> text:
+    if g == 1: return "arm"
+    if g == 2: return "powerpc"
+    if g == 3: return "mips"
+    if g == 4: return "tricore_c166"
+    if g == 5: return "m68k_x86"
+    "other"
+
+# ---------------------------------------------------------------------------
+# File collection — BFS
+# ---------------------------------------------------------------------------
+
+fn is_cmm_file(name: text) -> bool:
+    if name.len() < 5:
+        return false
+    val ext = name[name.len() - 4:name.len()]
+    to_lower_simple(ext) == ".cmm"
+
+fn has_extension(name: text) -> bool:
+    var i = 1
+    while i < name.len():
+        if name[i:i + 1] == ".":
+            return true
+        i = i + 1
+    false
+
+fn collect_cmm_files(root_dir: text) -> [text]:
+    var result: [text] = []
+    var dirs: [text] = [root_dir]
+    var dir_idx = 0
+    while dir_idx < dirs.len():
+        val dir = dirs[dir_idx]
+        dir_idx = dir_idx + 1
+        val entries = rt_dir_list(dir)
+        var i = 0
+        while i < entries.len():
+            val entry = entries[i]
+            if entry == "." or entry == "..":
+                i = i + 1
+                continue
+            val full_path = dir + "/" + entry
+            if is_cmm_file(entry):
+                result.push(full_path)
+            if not is_cmm_file(entry) and not has_extension(entry):
+                dirs.push(full_path)
+            i = i + 1
+    result
+
+# ---------------------------------------------------------------------------
+# Efficient report building: one array per group, join at end
+# ---------------------------------------------------------------------------
+
+# Each error stored as "PATH|ERROR_MSG" — no snippets to avoid O(n²)
+var errors_g1: [text] = []
+var errors_g2: [text] = []
+var errors_g3: [text] = []
+var errors_g4: [text] = []
+var errors_g5: [text] = []
+var errors_g6: [text] = []
+
+fn push_error(grp: i64, line: text):
+    if grp == 1: errors_g1.push(line)
+    if grp == 2: errors_g2.push(line)
+    if grp == 3: errors_g3.push(line)
+    if grp == 4: errors_g4.push(line)
+    if grp == 5: errors_g5.push(line)
+    if grp == 6: errors_g6.push(line)
+
+fn join_lines(lines: [text]) -> text:
+    var result = ""
+    var i = 0
+    while i < lines.len():
+        result = result + lines[i] + "\n"
+        i = i + 1
+    result
+
+fn write_group_report(grp: i64, ok_count: i64, total_count: i64, skip_count: i64):
+    var err_lines: [text] = []
+    if grp == 1: err_lines = errors_g1
+    if grp == 2: err_lines = errors_g2
+    if grp == 3: err_lines = errors_g3
+    if grp == 4: err_lines = errors_g4
+    if grp == 5: err_lines = errors_g5
+    if grp == 6: err_lines = errors_g6
+
+    val fname = "doc/report/cmm_validate_group{grp}_{group_name(grp)}.txt"
+    val header = "# CMM Validation Report - Group {grp}: {group_name(grp)}\n"
+    val stats = "# Total: {total_count}  OK: {ok_count}  Errors: {err_lines.len()}  Skipped: {skip_count}\n#\n"
+    val body = join_lines(err_lines)
+    rt_file_write_text(fname, header + stats + body)
+    print "Wrote {fname} ({err_lines.len()} failures)"
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+val args = sys_get_args()
+var target_dir = "/opt/t32/demo"
+if args.len() > 1:
+    target_dir = args[1]
+
+print "CMM Parser Full Validator"
+print "========================="
+print "Directory: {target_dir}"
+print ""
+
+if not rt_file_exists(target_dir):
+    print "Error: directory not found: {target_dir}"
+if rt_file_exists(target_dir):
+    val cmm_files = collect_cmm_files(target_dir)
+    print "Found {cmm_files.len()} CMM files"
+    print ""
+
+    # Per-group counters: total, ok, skipped (6 groups)
+    var gt1 = 0
+    var gt2 = 0
+    var gt3 = 0
+    var gt4 = 0
+    var gt5 = 0
+    var gt6 = 0
+    var go1 = 0
+    var go2 = 0
+    var go3 = 0
+    var go4 = 0
+    var go5 = 0
+    var go6 = 0
+    var gs1 = 0
+    var gs2 = 0
+    var gs3 = 0
+    var gs4 = 0
+    var gs5 = 0
+    var gs6 = 0
+
+    var total = 0
+    var ok = 0
+    var error_count = 0
+    var skipped = 0
+
+    # Error category counters
+    var cat_names: [text] = []
+    var cat_counts: [i64] = []
+
+    var i = 0
+    while i < cmm_files.len():
+        val path = cmm_files[i]
+        total = total + 1
+        val grp = assign_group(path, target_dir)
+
+        # Increment group total
+        if grp == 1: gt1 = gt1 + 1
+        if grp == 2: gt2 = gt2 + 1
+        if grp == 3: gt3 = gt3 + 1
+        if grp == 4: gt4 = gt4 + 1
+        if grp == 5: gt5 = gt5 + 1
+        if grp == 6: gt6 = gt6 + 1
+
+        val content = rt_file_read_text(path) ?? ""
+        if starts_with(to_lower_simple(content[0:40]), "trace32 encrypted"):
+            skipped = skipped + 1
+            if grp == 1: gs1 = gs1 + 1
+            if grp == 2: gs2 = gs2 + 1
+            if grp == 3: gs3 = gs3 + 1
+            if grp == 4: gs4 = gs4 + 1
+            if grp == 5: gs5 = gs5 + 1
+            if grp == 6: gs6 = gs6 + 1
+            i = i + 1
+            continue
+
+        val program = parse_cmm_source(content)
+
+        if program.errors.len() > 0:
+            error_count = error_count + 1
+
+            # Categorize first error
+            val category = categorize_error(program.errors[0])
+            var found_cat = false
+            var ci = 0
+            while ci < cat_names.len():
+                if cat_names[ci] == category:
+                    var new_counts: [i64] = []
+                    var cj = 0
+                    while cj < cat_counts.len():
+                        if cj == ci:
+                            new_counts = new_counts + [cat_counts[cj] + 1]
+                        if cj != ci:
+                            new_counts = new_counts + [cat_counts[cj]]
+                        cj = cj + 1
+                    cat_counts = new_counts
+                    found_cat = true
+                ci = ci + 1
+            if not found_cat:
+                cat_names = cat_names + [category]
+                cat_counts = cat_counts + [1]
+
+            # Push to group error array
+            push_error(grp, path + "|" + program.errors[0])
+        if program.errors.len() == 0:
+            ok = ok + 1
+            if grp == 1: go1 = go1 + 1
+            if grp == 2: go2 = go2 + 1
+            if grp == 3: go3 = go3 + 1
+            if grp == 4: go4 = go4 + 1
+            if grp == 5: go5 = go5 + 1
+            if grp == 6: go6 = go6 + 1
+
+        if total % 200 == 0:
+            print "  ... {total} files processed"
+
+        i = i + 1
+
+    # Write per-group reports
+    write_group_report(1, go1, gt1, gs1)
+    write_group_report(2, go2, gt2, gs2)
+    write_group_report(3, go3, gt3, gs3)
+    write_group_report(4, go4, gt4, gs4)
+    write_group_report(5, go5, gt5, gs5)
+    write_group_report(6, go6, gt6, gs6)
+
+    # Summary
+    print ""
+    print "=== Overall Results ==="
+    print "Total files:         {total}"
+    print "Parsed OK:           {ok}"
+    print "Parse errors:        {error_count}"
+    print "Skipped (encrypted): {skipped}"
+    print ""
+
+    print "=== Per-Group Summary ==="
+    print "  Group 1 (arm):          {go1}/{gt1} OK"
+    print "  Group 2 (powerpc):      {go2}/{gt2} OK"
+    print "  Group 3 (mips):         {go3}/{gt3} OK"
+    print "  Group 4 (tricore/c166): {go4}/{gt4} OK"
+    print "  Group 5 (m68k/x86):     {go5}/{gt5} OK"
+    print "  Group 6 (other):        {go6}/{gt6} OK"
+    print ""
+
+    # Error categories
+    if cat_names.len() > 0:
+        print "=== Error Categories ==="
+        var ci = 0
+        while ci < cat_names.len():
+            print "  {cat_names[ci]}: {cat_counts[ci]}"
+            ci = ci + 1
+        print ""
+
+    # Overall rate
+    val parseable = total - skipped
+    if parseable > 0:
+        val pct = ok * 100 / parseable
+        print "Success rate: {pct}% ({ok}/{parseable} parseable files)"

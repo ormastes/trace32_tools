@@ -1,0 +1,180 @@
+# T32 MCP Server — JSON helpers
+# Inlined for zero-import startup. All functions prefixed t32_ to avoid name collisions.
+
+# --- JSON character helpers ---
+
+fn t32_Q() -> text:
+    "\""
+
+fn t32_LB() -> text:
+    "{"
+
+fn t32_RB() -> text:
+    "}"
+
+fn t32_SB_L() -> text:
+    "["
+
+fn t32_SB_R() -> text:
+    "]"
+
+# --- JSON encoding ---
+
+fn t32_escape_json(s: text) -> text:
+    var result = s
+    result = result.replace(r"\", r"\\")
+    result = result.replace(t32_Q(), r"\" + t32_Q())
+    result = result.replace("\n", r"\n")
+    result = result.replace("\r", r"\r")
+    result = result.replace("\t", r"\t")
+    result
+
+fn t32_js(s: text) -> text:
+    t32_Q() + t32_escape_json(s) + t32_Q()
+
+fn t32_jp(key: text, value: text) -> text:
+    t32_Q() + key + t32_Q() + ":" + value
+
+fn t32_jo1(p1: text) -> text:
+    t32_LB() + p1 + t32_RB()
+
+fn t32_jo2(p1: text, p2: text) -> text:
+    t32_LB() + p1 + "," + p2 + t32_RB()
+
+fn t32_jo3(p1: text, p2: text, p3: text) -> text:
+    t32_LB() + p1 + "," + p2 + "," + p3 + t32_RB()
+
+fn t32_jo4(p1: text, p2: text, p3: text, p4: text) -> text:
+    t32_LB() + p1 + "," + p2 + "," + p3 + "," + p4 + t32_RB()
+
+# --- JSON extraction ---
+
+fn t32_extract_field(json: text, key: text) -> text:
+    val search = t32_Q() + key + t32_Q() + ":"
+    val idx_result = json.index_of(search)
+    var idx = -1
+    match idx_result:
+        Some(i): idx = i
+        nil: return ""
+    if idx < 0:
+        return ""
+    val start = idx + search.len()
+    val after = json.substring(start)
+    val trimmed = after.trim()
+    if trimmed.starts_with(t32_Q()):
+        val after_quote = trimmed.substring(1)
+        val end_idx_result = after_quote.index_of(t32_Q())
+        var end_idx = -1
+        match end_idx_result:
+            Some(i): end_idx = i
+            nil: return ""
+        if end_idx < 0:
+            return ""
+        return trimmed.substring(1, end_idx + 1)
+    else:
+        var parts: [text] = []
+        for ch in trimmed:
+            if ch == "," or ch == t32_RB() or ch == t32_SB_R() or ch == " " or ch == "\n":
+                break
+            parts.push(ch)
+        return parts.join("")
+
+fn t32_extract_field_raw(json: text, key: text) -> text:
+    val search = t32_Q() + key + t32_Q() + ":"
+    val idx_result = json.index_of(search)
+    var idx = -1
+    match idx_result:
+        Some(i): idx = i
+        nil: return "null"
+    if idx < 0:
+        return "null"
+    var start = idx + search.len()
+    if start >= json.len():
+        return "null"
+    var rest = json.substring(start)
+    rest = rest.trim()
+    if rest == "":
+        return "null"
+    if rest.starts_with(t32_Q()):
+        var out: [text] = [t32_Q()]
+        var escaped = false
+        var pos = 1
+        for _i in range(0, 100000):
+            if pos >= rest.len():
+                break
+            val ch = rest.substring(pos, pos + 1)
+            out.push(ch)
+            if escaped:
+                escaped = false
+            elif ch == "\\":
+                escaped = true
+            elif ch == t32_Q():
+                break
+            pos = pos + 1
+        return out.join("")
+    var parts: [text] = []
+    for ch in rest:
+        if ch == "," or ch == t32_RB() or ch == t32_SB_R() or ch == " " or ch == "\n":
+            break
+        parts.push(ch)
+    val raw = parts.join("")
+    if raw == "":
+        return "null"
+    raw
+
+fn t32_extract_id(json: text) -> text:
+    t32_extract_field_raw(json, "id")
+
+fn t32_extract_nested(json: text, key: text) -> text:
+    val params_search = t32_Q() + "params" + t32_Q() + ":"
+    val params_idx_result = json.index_of(params_search)
+    var params_idx = -1
+    match params_idx_result:
+        Some(i): params_idx = i
+        nil: return ""
+    if params_idx < 0:
+        return ""
+    val params_start = params_idx + params_search.len()
+    val params = json.substring(params_start)
+    t32_extract_field(params, key)
+
+# --- JSON result helpers ---
+
+fn t32_make_json_result(id: text, result: text) -> text:
+    t32_jo3(t32_jp("jsonrpc", t32_js("2.0")), t32_jp("id", id), t32_jp("result", result))
+
+fn t32_make_error(id: text, code: i64, message: text) -> text:
+    val err = t32_jo2(t32_jp("code", str(code)), t32_jp("message", t32_js(message)))
+    t32_jo3(t32_jp("jsonrpc", t32_js("2.0")), t32_jp("id", id), t32_jp("error", err))
+
+# --- MCP Tool Result helpers ---
+
+fn t32_make_tool_result(id: text, output: text) -> text:
+    val escaped = t32_escape_json(output)
+    val quoted = t32_Q() + escaped + t32_Q()
+    val content = t32_SB_L() + t32_jo2(t32_jp("type", t32_js("text")), t32_jp("text", quoted)) + t32_SB_R()
+    val result = t32_jo1(t32_jp("content", content))
+    t32_make_json_result(id, result)
+
+fn t32_make_tool_error(id: text, code: i64, msg: text) -> text:
+    val content = t32_SB_L() + t32_jo2(t32_jp("type", t32_js("text")), t32_jp("text", t32_js("ERROR " + str(code) + ": " + msg))) + t32_SB_R()
+    var err_result = t32_LB() + t32_jp("content", content) + "," + t32_jp("isError", "true") + t32_RB()
+    t32_make_json_result(id, err_result)
+
+# --- Shell helper ---
+
+fn t32_text_byte_len(s: text) -> i64:
+    s.len()
+
+fn t32_shell_cmd(command: text) -> (text, i64):
+    var stdout = ""
+    var stderr = ""
+    var code: i64 = 0
+    (stdout, stderr, code) = rt_process_run("/bin/sh", ["-c", "export NO_COLOR=1 TERM=dumb; " + command + " < /dev/null"])
+    (stdout, code)
+
+fn t32_file_read(path: text) -> text:
+    rt_file_read_text(path) ?? ""
+
+fn t32_file_write(path: text, content: text) -> bool:
+    rt_file_write_text(path, content) ?? false

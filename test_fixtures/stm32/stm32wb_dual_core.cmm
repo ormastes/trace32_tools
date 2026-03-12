@@ -1,0 +1,96 @@
+; STM32WB55 Dual-Core Debug Session
+; Cortex-M4 (CPU1) + Cortex-M0+ (CPU2) via SWD
+
+LOCAL &elf_cpu1 &elf_cpu2
+LOCAL &pc_m4 &sp_m4 &pc_m0 &sp_m0
+LOCAL &ipcc_c1cr &ipcc_c2cr
+
+ENTRY &elf_cpu1 &elf_cpu2
+IF "&elf_cpu1"==""
+  &elf_cpu1="stm32wb_app_m4.elf"
+IF "&elf_cpu2"==""
+  &elf_cpu2="stm32wb_copro_m0.elf"
+
+SYStem.RESet
+SYStem.CPU STM32WB55
+SYStem.CONFIG.DEBUGPORTTYPE SWD
+SYStem.JtagClock 10MHz
+
+; Dual-core configuration
+SYStem.CONFIG.CORE 1. 2.
+
+; Multi-core refresh
+SCREEN.ALways
+
+SYStem.Up
+
+; Load Cortex-M4 application (CPU1)
+Data.LOAD.Elf "&elf_cpu1" /CORE 0.
+
+; Load Cortex-M0+ coprocessor firmware (CPU2)
+Data.LOAD.Elf "&elf_cpu2" /CORE 1.
+
+TOOLBAR ON
+STATUSBAR ON
+
+; Cortex-M4 register window
+WinPOS 0. 0. 50. 14. 0. 0. W_M4_REGS
+Register.view /CORE 0. /SpotLight
+
+; Cortex-M0+ register window
+WinPOS 52. 0. 50. 14. 0. 0. W_M0_REGS
+Register.view /CORE 1.
+
+; Cortex-M4 code view
+WinPOS 0. 15. 50. 12. 0. 0. W_M4_CODE
+Data.List /CORE 0.
+
+; Cortex-M0+ code view
+WinPOS 52. 15. 50. 12. 0. 0. W_M0_CODE
+Data.List /CORE 1.
+
+; Cortex-M4 local variables
+WinPOS 0. 28. 50. 10. 0. 0. W_M4_VARS
+Var.Frame /CORE 0. /Locals /Caller
+
+; Set breakpoints on both cores
+Break.Set main /CORE 0.
+Break.Set IPCC_C1_RX_IRQHandler /CORE 0.
+Break.Set main /CORE 1.
+Break.Set IPCC_C2_RX_IRQHandler /CORE 1.
+
+; Run both cores
+Go
+WAIT !STATE.RUN() 10s
+
+; Read CPU1 (Cortex-M4) registers
+&pc_m4=Register(/CORE 0. PC)
+&sp_m4=Register(/CORE 0. SP)
+PRINT "M4  PC: " FORMAT.Hex(8., &pc_m4)
+PRINT "M4  SP: " FORMAT.Hex(8., &sp_m4)
+
+; Read CPU2 (Cortex-M0+) registers
+&pc_m0=Register(/CORE 1. PC)
+&sp_m0=Register(/CORE 1. SP)
+PRINT "M0+ PC: " FORMAT.Hex(8., &pc_m0)
+PRINT "M0+ SP: " FORMAT.Hex(8., &sp_m0)
+
+; Check IPCC (Inter-Processor Communication Controller) at 0x58000C00
+&ipcc_c1cr=Data.Long(D:0x58000C00)
+&ipcc_c2cr=Data.Long(D:0x58000C10)
+PRINT "IPCC C1CR: " FORMAT.Hex(8., &ipcc_c1cr)
+PRINT "IPCC C2CR: " FORMAT.Hex(8., &ipcc_c2cr)
+
+; Check shared SRAM2 communication buffer at 0x20030000
+Var.View *(unsigned int*)0x20030000
+
+IF !STATE.RUN()
+(
+  PRINT "Both cores halted"
+  Var.Frame /CORE 0. /Locals
+  Var.Frame /CORE 1. /Locals
+)
+
+PRINT "STM32WB dual-core debug session complete"
+
+ENDDO

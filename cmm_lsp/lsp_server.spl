@@ -1,0 +1,264 @@
+# CMM Language Server — JSON-RPC over stdio
+# Main server loop implementing the LSP protocol transport layer.
+#
+# The LSP protocol uses JSON-RPC 2.0 over stdio with Content-Length headers.
+# Messages are read from stdin, dispatched to handlers, and responses are
+# written to stdout.
+#
+# Architecture:
+#   lsp_json.spl      — JSON builder/parser helpers (shared by server + handlers)
+#   lsp_server.spl    — transport (this file): read/write JSON-RPC messages
+#   lsp_handlers.spl  — protocol: handle LSP methods (initialize, completion, etc.)
+#   lsp_document.spl  — state: open document tracking and re-analysis
+
+export start_lsp_server
+
+use lsp_json.{JsonPair, json_object, json_string, json_number, json_null}
+use lsp_json.{json_get_string, json_get_int, json_get_object}
+use lsp_document.{DocumentStore}
+use lsp_handlers.{handle_initialize, handle_completion, handle_hover}
+use lsp_handlers.{handle_definition, handle_document_symbol}
+use lsp_handlers.{handle_did_open, handle_did_change, handle_did_close}
+use lsp_handlers.{build_diagnostics_notification}
+use cmm_commands.{build_command_db, CmmCommandDB}
+use cmm_functions.{build_function_db, CmmFuncDB}
+
+extern fn input() -> text
+extern fn stdin_read_char() -> text
+extern fn stdout_write(data: text)
+extern fn stdout_flush()
+extern fn to_int(s: text) -> i64
+
+# ---------------------------------------------------------------------------
+# Stdio helpers
+# ---------------------------------------------------------------------------
+
+# Read exactly `count` characters from stdin.
+fn read_n_chars(count: i64) -> text:
+    var result = ""
+    var i = 0
+    while i < count:
+        val ch = stdin_read_char()
+        if ch == "":
+            break
+        result = result + ch
+        i = i + 1
+    result
+
+# ---------------------------------------------------------------------------
+# Content-Length header parsing
+# ---------------------------------------------------------------------------
+
+# Parse the Content-Length value from a header line.
+# Input: "Content-Length: 123\r\n" or "Content-Length: 123"
+fn extract_content_length(header: text) -> i64:
+    # Find the colon
+    var colon_pos = -1
+    var i = 0
+    while i < header.len():
+        if header[i:i + 1] == ":":
+            colon_pos = i
+            break
+        i = i + 1
+    if colon_pos < 0:
+        return 0
+    # Skip colon and whitespace
+    var start = colon_pos + 1
+    while start < header.len():
+        val c = header[start:start + 1]
+        if c == " " or c == "\t":
+            start = start + 1
+        else:
+            break
+    # Read digits
+    var num_str = ""
+    var j = start
+    while j < header.len():
+        val ch = header[j:j + 1]
+        if ch >= "0" and ch <= "9":
+            num_str = num_str + ch
+            j = j + 1
+        else:
+            break
+    if num_str == "":
+        return 0
+    to_int(num_str)
+
+# ---------------------------------------------------------------------------
+# Transport — read and write JSON-RPC messages over stdio
+# ---------------------------------------------------------------------------
+
+# Read a single JSON-RPC message from stdin.
+# Returns the JSON body text, or nil on EOF / error.
+fn read_message() -> text?:
+    # Read headers until blank line
+    var content_length = 0
+    while true:
+        val header_line = input()
+        # EOF or empty (blank separator line)
+        if header_line == "" or header_line == "\r\n" or header_line == "\r" or header_line == "\n":
+            if content_length > 0:
+                break
+            # Could be a blank line before headers; or EOF
+            if header_line == "":
+                return nil
+        # Check for Content-Length header (case-sensitive per spec)
+        if header_line.starts_with("Content-Length"):
+            content_length = extract_content_length(header_line)
+
+    if content_length <= 0:
+        return nil
+
+    # Read exactly content_length bytes of the body
+    val body = read_n_chars(content_length)
+    body
+
+# Write a JSON-RPC message to stdout with Content-Length header.
+fn write_message(json_body: text):
+    val length = json_body.len()
+    val header = "Content-Length: {length}\r\n\r\n"
+    stdout_write(header)
+    stdout_write(json_body)
+    stdout_flush()
+
+# ---------------------------------------------------------------------------
+# Message dispatch
+# ---------------------------------------------------------------------------
+
+# Process a JSON-RPC message and return optional response JSON.
+# Notifications (no id) do not require a response.
+fn process_message(json_text: text, store: DocumentStore, cmd_db: CmmCommandDB, func_db: CmmFuncDB) -> text?:
+    val method = json_get_string(json_text, "method")
+    if not method.?:
+        return nil
+    val method_name = method ?? ""
+    val msg_id = json_get_int(json_text, "id")
+    val params = json_get_object(json_text, "params") ?? "{}"
+
+    # --- Requests (have an id, expect a response) ---
+    if method_name == "initialize":
+        val result = handle_initialize(params)
+        val id_val = msg_id ?? 0
+        return make_response(id_val, result)
+
+    if method_name == "shutdown":
+        val id_val = msg_id ?? 0
+        return make_response(id_val, json_null())
+
+    if method_name == "textDocument/completion":
+        val result = handle_completion(params, store, cmd_db, func_db)
+        val id_val = msg_id ?? 0
+        return make_response(id_val, result)
+
+    if method_name == "textDocument/hover":
+        val result = handle_hover(params, store, cmd_db, func_db)
+        val id_val = msg_id ?? 0
+        return make_response(id_val, result)
+
+    if method_name == "textDocument/definition":
+        val result = handle_definition(params, store)
+        val id_val = msg_id ?? 0
+        return make_response(id_val, result)
+
+    if method_name == "textDocument/documentSymbol":
+        val result = handle_document_symbol(params, store)
+        val id_val = msg_id ?? 0
+        return make_response(id_val, result)
+
+    # --- Notifications (no id, no response expected) ---
+    if method_name == "textDocument/didOpen":
+        handle_did_open(params, store)
+        # Publish diagnostics after open
+        val uri = get_text_document_uri(params)
+        if uri != "":
+            val diag_notif = build_diagnostics_notification(uri, store)
+            if diag_notif.?:
+                return diag_notif
+        return nil
+
+    if method_name == "textDocument/didChange":
+        handle_did_change(params, store)
+        # Publish diagnostics after change
+        val uri = get_text_document_uri(params)
+        if uri != "":
+            val diag_notif = build_diagnostics_notification(uri, store)
+            if diag_notif.?:
+                return diag_notif
+        return nil
+
+    if method_name == "textDocument/didClose":
+        handle_did_close(params, store)
+        return nil
+
+    if method_name == "initialized":
+        # Client acknowledgement — no action needed
+        return nil
+
+    if method_name == "exit":
+        return nil
+
+    # Unknown method — if it has an id, return method-not-found error
+    if msg_id.?:
+        val id_val = msg_id ?? 0
+        return make_error_response(id_val, -32601, "Method not found: " + method_name)
+
+    nil
+
+# Extract textDocument.uri from params JSON.
+fn get_text_document_uri(params: text) -> text:
+    val td = json_get_object(params, "textDocument")
+    if td.?:
+        val td_obj = td ?? "{}"
+        val uri = json_get_string(td_obj, "uri")
+        return uri ?? ""
+    ""
+
+# Build a JSON-RPC success response.
+fn make_response(id: i64, result: text) -> text:
+    var pairs: [JsonPair] = []
+    pairs.push(JsonPair(key: "jsonrpc", value: json_string("2.0")))
+    pairs.push(JsonPair(key: "id", value: json_number(id)))
+    pairs.push(JsonPair(key: "result", value: result))
+    json_object(pairs)
+
+# Build a JSON-RPC error response.
+fn make_error_response(id: i64, code: i64, message: text) -> text:
+    var err_pairs: [JsonPair] = []
+    err_pairs.push(JsonPair(key: "code", value: json_number(code)))
+    err_pairs.push(JsonPair(key: "message", value: json_string(message)))
+    val err_obj = json_object(err_pairs)
+
+    var pairs: [JsonPair] = []
+    pairs.push(JsonPair(key: "jsonrpc", value: json_string("2.0")))
+    pairs.push(JsonPair(key: "id", value: json_number(id)))
+    pairs.push(JsonPair(key: "error", value: err_obj))
+    json_object(pairs)
+
+# ---------------------------------------------------------------------------
+# Main server entry point
+# ---------------------------------------------------------------------------
+
+fn start_lsp_server():
+    var store = DocumentStore(documents: [])
+    val cmd_db = build_command_db()
+    val func_db = build_function_db()
+    var running = true
+
+    while running:
+        val msg = read_message()
+        if msg.?:
+            val json_text = msg ?? ""
+            val method = json_get_string(json_text, "method")
+            val method_name = method ?? ""
+
+            val response = process_message(json_text, store, cmd_db, func_db)
+            if response.?:
+                val resp_text = response ?? ""
+                write_message(resp_text)
+
+            # Check for exit notification
+            if method_name == "exit":
+                running = false
+        else:
+            # EOF on stdin — shut down
+            running = false

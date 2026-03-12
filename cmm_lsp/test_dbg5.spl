@@ -1,0 +1,34 @@
+use cmm_lexer.{lex_cmm_source}
+use cmm_tokens.{CmmTokenKind, CmmToken}
+use cmm_parser.{parse_cmm_source}
+
+fn show_tokens(source: text):
+    val tokens = lex_cmm_source(source)
+    var i = 0
+    while i < tokens.len():
+        val t = tokens[i]
+        print "  [{i}] {t.text}"
+        i = i + 1
+
+fn test_parse(name: text, source: text):
+    val p = parse_cmm_source(source)
+    if p.errors.len() > 0:
+        print "FAIL {name}: {p.errors[0]}"
+    if p.errors.len() == 0:
+        print "OK   {name}"
+
+print "=== Tokens: &ssr2&&ssr2_fba ==="
+show_tokens("(&ssr2&&ssr2_fba_wp_hdr)\n")
+
+print "=== Tokens: 0x1234ebb&&d.l() (should NOT split) ==="
+show_tokens("0x1234ebb&&d.l()\n")
+
+print "=== Parse: macro&&macro ==="
+test_parse("macro_and", "if (&ssr2&&ssr2_fba_wp_hdr)==(&ssr2_fba_wp_hdr)\n  PRINT \"yes\"\n")
+
+print "=== Parse: hex&&fn ==="
+test_parse("hex_and_fn", "d.s d:0x1234ebb&&d.l()\n")
+
+# Regression
+test_parse("str_and_dialog", "if \"&sval\"!=\"\"&&dialog.boolean(HEX)\n(\n  PRINT \"yes\"\n)\nelse if \"&sval\"!=\"\"\n(\n  PRINT \"no\"\n)\n")
+test_parse("bang_and_fns", "if !(bdm()&&powerdebug())\n  goto unsupported\n")

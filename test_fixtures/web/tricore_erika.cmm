@@ -1,0 +1,39 @@
+; ERIKA-OS on TriCore TC277
+; Exercises: SYStem.CPU tc277tf, DAP2 port, CORE.ASSIGN,
+;            MCDS trace, ORTI task config
+
+LOCAL &elf_file &orti_file
+
+SYStem.RESet
+SYStem.CPU TC277TF
+SYStem.CONFIG.DEBUGPORTTYPE DAP2
+
+; Multi-core setup
+CORE.ASSIGN 1. 2. 3.
+
+SYStem.Up
+
+; Load ELF
+&elf_file="erika_tc277.elf"
+Data.LOAD.Elf "&elf_file"
+
+; ORTI awareness for ERIKA-OS
+TASK.ORTI "&orti_file"
+
+; MCDS trace setup
+MCDS.RESet
+MCDS.ON
+
+; Set breakpoints on tasks
+Break.Set Task1_func
+Break.Set Task2_func
+
+; View per-core registers
+Register.view /CORE 1.
+Register.view /CORE 2.
+Register.view /CORE 3.
+
+Go.direct
+WAIT 3s
+
+ENDDO

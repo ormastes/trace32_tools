@@ -1,0 +1,730 @@
+# CMM (PRACTICE Script) Lexer
+# Line-oriented tokenizer for TRACE32 PRACTICE scripting language.
+# CMM is one-command-per-line with macro-based variables and dot-separated commands.
+
+use cmm_tokens.{CmmTokenKind, CmmToken}
+
+export lex_cmm_source, lex_cmm_line
+
+# Lex an entire CMM source file into tokens.
+# Processes line by line, emitting Newline tokens between lines.
+# Handles line continuation (backslash at end of line) by joining lines.
+fn lex_cmm_source(source: text) -> [CmmToken]:
+    var tokens: [CmmToken] = []
+    var lines = split_lines(source)
+    var line_num = 1
+
+    while line_num <= lines.len():
+        var current_line = lines[line_num - 1]
+
+        # Handle line continuation: backslash at end joins with next line
+        while ends_with_continuation(current_line) and line_num < lines.len():
+            # Remove trailing backslash and join with next line
+            current_line = current_line[0:current_line.len() - 1] + " " + lines[line_num]
+            line_num = line_num + 1
+
+        var line_tokens = lex_cmm_line(current_line, line_num)
+        var ti = 0
+        while ti < line_tokens.len():
+            tokens.push(line_tokens[ti])
+            ti = ti + 1
+
+        tokens.push(CmmToken(kind: CmmTokenKind.Newline, line: line_num, column: current_line.len() + 1, text: "\n"))
+        line_num = line_num + 1
+
+    tokens.push(CmmToken(kind: CmmTokenKind.Eof, line: line_num, column: 1, text: ""))
+    tokens
+
+# Lex a single CMM line into tokens.
+# Checks for labels at column 1, comments, and then tokenizes the rest.
+fn lex_cmm_line(line: text, line_number: i64) -> [CmmToken]:
+    var tokens: [CmmToken] = []
+    var pos = 0
+    val length = line.len()
+
+    if length == 0:
+        return tokens
+
+    # Check for label at column 1: identifier followed by colon, no leading whitespace
+    val first_ch = line[0:1]
+    if is_alpha(first_ch) or first_ch == "_":
+        val label_result = try_lex_label(line, line_number)
+        if label_result.?:
+            val label_token = label_result ?? CmmToken(kind: CmmTokenKind.Error(""), line: 0, column: 0, text: "")
+            tokens.push(label_token)
+            pos = label_token.text.len()
+
+    # Main tokenization loop
+    while pos < length:
+        # Skip whitespace (spaces, tabs, carriage returns, and control chars like ^Z)
+        val ws_start = pos
+        while pos < length:
+            val wch = line[pos:pos + 1]
+            if wch == " " or wch == "\t" or wch == "\r" or is_control_char(wch):
+                pos = pos + 1
+            else:
+                break
+        if pos >= length:
+            break
+
+        val ch = line[pos:pos + 1]
+        val col = pos + 1
+        var handled = false
+
+        # Comments: ; or //
+        if not handled and ch == ";":
+            val comment_text = line[pos + 1:length]
+            tokens.push(CmmToken(kind: CmmTokenKind.Comment(comment_text), line: line_number, column: col, text: line[pos:length]))
+            pos = length
+            handled = true
+
+        if not handled and ch == "/" and pos + 1 < length and line[pos + 1:pos + 2] == "/":
+            val comment_text = line[pos + 2:length]
+            tokens.push(CmmToken(kind: CmmTokenKind.Comment(comment_text), line: line_number, column: col, text: line[pos:length]))
+            pos = length
+            handled = true
+
+        # Macro references: && (recursive) or & (simple)
+        if not handled and ch == "&":
+            val macro_result = lex_macro_ref(line, pos, line_number, col)
+            tokens.push(macro_result.token)
+            pos = macro_result.new_pos
+            handled = true
+
+        # Strings: "..."
+        if not handled and ch == "\"":
+            val str_result = lex_string_literal(line, pos, line_number, col)
+            tokens.push(str_result.token)
+            pos = str_result.new_pos
+            handled = true
+
+        # Char literals: 'X'
+        if not handled and ch == "'":
+            val char_result = lex_char_literal(line, pos, line_number, col)
+            tokens.push(char_result.token)
+            pos = char_result.new_pos
+            handled = true
+
+        # Numbers: 0x (hex), 0y (binary), digits
+        if not handled and is_digit(ch):
+            val num_result = lex_number(line, pos, line_number, col)
+            tokens.push(num_result.token)
+            pos = num_result.new_pos
+            handled = true
+
+        # Option tokens: /Word (but not // which is comment)
+        if not handled and ch == "/":
+            if pos + 1 < length and is_alpha(line[pos + 1:pos + 2]):
+                val opt_result = lex_option(line, pos, line_number, col)
+                tokens.push(opt_result.token)
+                pos = opt_result.new_pos
+                handled = true
+
+        # File channels: #N (but not #A#, #O#, #X# classic operators)
+        if not handled and ch == "#":
+            val hash_result = lex_hash_token(line, pos, line_number, col)
+            tokens.push(hash_result.token)
+            pos = hash_result.new_pos
+            handled = true
+
+        # Classic operators starting with colon: :A:, :O:, :X:
+        if not handled and ch == ":":
+            val classic_result = try_lex_classic_colon_op(line, pos, line_number, col)
+            if classic_result.?:
+                val classic_tok = classic_result ?? CmmToken(kind: CmmTokenKind.Error(""), line: 0, column: 0, text: "")
+                tokens.push(classic_tok)
+                pos = pos + 3
+                handled = true
+
+        # Identifiers and dot-commands
+        if not handled and (is_alpha(ch) or ch == "_"):
+            val id_result = lex_identifier_or_command(line, pos, line_number, col)
+            tokens.push(id_result.token)
+            pos = id_result.new_pos
+            handled = true
+
+        # Operators and delimiters
+        if not handled:
+            val op_result = lex_operator_or_delimiter(line, pos, line_number, col)
+            tokens.push(op_result.token)
+            pos = op_result.new_pos
+            handled = true
+
+    tokens
+
+# --- Helper structs ---
+
+# Result of lexing a single token: the token and the new position in the line
+struct LexResult:
+    token: CmmToken
+    new_pos: i64
+
+# --- Character classification ---
+
+fn is_digit(ch: text) -> bool:
+    ch >= "0" and ch <= "9"
+
+fn is_alpha(ch: text) -> bool:
+    (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z")
+
+fn is_alnum(ch: text) -> bool:
+    is_alpha(ch) or is_digit(ch)
+
+fn is_ident_char(ch: text) -> bool:
+    is_alnum(ch) or ch == "_"
+
+# Check for control characters (< space, except tab/newline/carriage return)
+# Catches ^Z (0x1A), ^A-^H, ^K, ^L, etc. that appear in some Windows CMM files.
+fn is_control_char(ch: text) -> bool:
+    ch < " " and ch != "\t" and ch != "\n" and ch != "\r"
+
+fn is_hex_digit(ch: text) -> bool:
+    is_digit(ch) or (ch >= "a" and ch <= "f") or (ch >= "A" and ch <= "F")
+
+fn is_hex_or_mask(ch: text) -> bool:
+    is_hex_digit(ch) or ch == "x" or ch == "X"
+
+fn is_bin_or_mask(ch: text) -> bool:
+    ch == "0" or ch == "1" or ch == "x" or ch == "X"
+
+# --- Line utilities ---
+
+# Split source text into lines
+fn split_lines(source: text) -> [text]:
+    var lines: [text] = []
+    var start = 0
+    var i = 0
+    while i < source.len():
+        if source[i:i + 1] == "\n":
+            lines.push(source[start:i])
+            start = i + 1
+        i = i + 1
+    # Last line (may not end with newline)
+    if start <= source.len():
+        lines.push(source[start:source.len()])
+    lines
+
+# Check if line ends with backslash (line continuation)
+fn ends_with_continuation(line: text) -> bool:
+    val len = line.len()
+    if len == 0:
+        return false
+    line[len - 1:len] == "\\"
+
+# --- Label detection ---
+
+# Try to lex a label at column 1. Labels are identifiers followed by colon at the start of a line.
+fn try_lex_label(line: text, line_number: i64) -> CmmToken?:
+    var i = 0
+    val length = line.len()
+
+    # Must start with alpha or underscore
+    if length == 0:
+        return nil
+    val first = line[0:1]
+    if not is_alpha(first) and first != "_":
+        return nil
+
+    # Consume identifier chars
+    while i < length:
+        val ch = line[i:i + 1]
+        if is_ident_char(ch):
+            i = i + 1
+        else:
+            break
+
+    # Must be followed by colon
+    if i < length and line[i:i + 1] == ":":
+        # Make sure this is not a device selector (e.g. B::) or access class (e.g. D:0x)
+        val name = line[0:i]
+        if i + 1 < length and line[i + 1:i + 2] == ":":
+            # This is a device selector like B::, not a label
+            return nil
+        val label_text = line[0:i + 1]
+        return CmmToken(kind: CmmTokenKind.Label(name), line: line_number, column: 1, text: label_text)
+
+    nil
+
+# --- Macro reference lexing ---
+
+fn lex_macro_ref(line: text, pos: i64, line_num: i64, col: i64) -> LexResult:
+    val length = line.len()
+    var i = pos + 1  # skip first &
+
+    # Check for recursive macro: &&
+    var is_recursive = false
+    if i < length and line[i:i + 1] == "&":
+        is_recursive = true
+        i = i + 1
+
+    # When &&name immediately follows a non-hex-number token, split into & (AND) + &name.
+    # Requires identifier to follow (so &&( stays as LogicalAnd).
+    if is_recursive and pos > 0 and i < length and is_ident_char(line[i:i + 1]):
+        val prev_ch = line[pos - 1:pos]
+        var split_here = false
+        # Split after non-hex identifier chars (g-z, G-Z, _)
+        if is_ident_char(prev_ch) and not is_hex_digit(prev_ch) and not is_digit(prev_ch):
+            split_here = true
+        # Split after closing quote, closing paren, or trailing dot
+        if prev_ch == "\"" or prev_ch == ")" or prev_ch == ".":
+            split_here = true
+        # Split after digits/hex that are part of a macro name (&name ending in digit)
+        # Scan backwards: if we find & before ident chars, it's &macro&&name, so split.
+        if not split_here and (is_digit(prev_ch) or is_hex_digit(prev_ch)):
+            var back = pos - 1
+            while back > 0 and is_ident_char(line[back - 1:back]):
+                back = back - 1
+            # If the character before the identifier is &, this is &macro_name&&
+            if back > 0 and line[back - 1:back] == "&":
+                split_here = true
+        if split_here:
+            return LexResult(token: CmmToken(kind: CmmTokenKind.Ampersand, line: line_num, column: col, text: "&"), new_pos: pos + 1)
+
+    # Special case: && as logical AND operator (no identifier follows, or digit follows)
+    # Macro names start with letter or _, NOT with digit. &&0xFF = LogicalAnd + hex.
+    if is_recursive and (i >= length or not is_ident_char(line[i:i + 1]) or is_digit(line[i:i + 1])):
+        return LexResult(token: CmmToken(kind: CmmTokenKind.LogicalAnd, line: line_num, column: col, text: "&&"), new_pos: i)
+
+    # Special case: & as binary AND operator (no identifier follows, or digit follows)
+    # Macro names start with letter or _, NOT with digit. &0xFF = AND + hex, not MacroRef.
+    if not is_recursive and (i >= length or not is_ident_char(line[i:i + 1]) or is_digit(line[i:i + 1])):
+        return LexResult(token: CmmToken(kind: CmmTokenKind.Ampersand, line: line_num, column: col, text: "&"), new_pos: i)
+
+    # Consume macro name
+    val name_start = i
+    while i < length:
+        val ch = line[i:i + 1]
+        if is_ident_char(ch):
+            i = i + 1
+        else:
+            break
+
+    val name = line[name_start:i]
+    val full_text = line[pos:i]
+
+    if is_recursive:
+        LexResult(token: CmmToken(kind: CmmTokenKind.MacroRecRef(name), line: line_num, column: col, text: full_text), new_pos: i)
+    else:
+        LexResult(token: CmmToken(kind: CmmTokenKind.MacroRef(name), line: line_num, column: col, text: full_text), new_pos: i)
+
+# --- String literal lexing ---
+
+# Lex a double-quoted string. Inside the string, "" is an escaped double-quote.
+fn lex_string_literal(line: text, pos: i64, line_num: i64, col: i64) -> LexResult:
+    val length = line.len()
+    var i = pos + 1  # skip opening quote
+    var content = ""
+
+    while i < length:
+        val ch = line[i:i + 1]
+        if ch == "\"":
+            # Check for escaped quote ""
+            if i + 1 < length and line[i + 1:i + 2] == "\"":
+                content = content + "\""
+                i = i + 2
+            else:
+                # End of string
+                i = i + 1
+                val full_text = line[pos:i]
+                return LexResult(token: CmmToken(kind: CmmTokenKind.StringLit(content), line: line_num, column: col, text: full_text), new_pos: i)
+        else:
+            content = content + ch
+            i = i + 1
+
+    # Unterminated string — PRACTICE extends to EOL, treat as valid string
+    val full_text = line[pos:i]
+    LexResult(token: CmmToken(kind: CmmTokenKind.StringLit(content), line: line_num, column: col, text: full_text), new_pos: i)
+
+# --- Char literal lexing ---
+
+fn lex_char_literal(line: text, pos: i64, line_num: i64, col: i64) -> LexResult:
+    val length = line.len()
+    # Expect 'X' (3 chars minimum)
+    if pos + 2 < length and line[pos + 2:pos + 3] == "'":
+        val ch_val = line[pos + 1:pos + 2]
+        val full_text = line[pos:pos + 3]
+        return LexResult(token: CmmToken(kind: CmmTokenKind.CharLiteral(ch_val), line: line_num, column: col, text: full_text), new_pos: pos + 3)
+
+    # Not a valid char literal — emit as error
+    LexResult(token: CmmToken(kind: CmmTokenKind.Error("Invalid char literal"), line: line_num, column: col, text: line[pos:pos + 1]), new_pos: pos + 1)
+
+# --- Number lexing ---
+
+# Lex a numeric literal. Handles hex (0x), binary (0y), decimal (digits with trailing dot),
+# float (digits with embedded dot and optional exponent), time literals (number + s/ms/us/ns),
+# hex masks (0x with X), binary masks (0y with X), and plain integers.
+fn lex_number(line: text, pos: i64, line_num: i64, col: i64) -> LexResult:
+    val length = line.len()
+    var i = pos
+
+    # Check for hex prefix: 0x
+    if i + 1 < length and line[i:i + 1] == "0" and (line[i + 1:i + 2] == "x" or line[i + 1:i + 2] == "X"):
+        return lex_hex_number(line, pos, line_num, col)
+
+    # Check for binary prefix: 0y
+    if i + 1 < length and line[i:i + 1] == "0" and (line[i + 1:i + 2] == "y" or line[i + 1:i + 2] == "Y"):
+        return lex_bin_number(line, pos, line_num, col)
+
+    # Consume digit sequence
+    while i < length and is_digit(line[i:i + 1]):
+        i = i + 1
+
+    # Check for bare hex: digits followed by hex letters (a-f/A-F) without 0x prefix.
+    # CMM allows bare hex like 9ff, 0ffff8000, etc.
+    if i < length and is_hex_digit(line[i:i + 1]) and not is_digit(line[i:i + 1]):
+        while i < length and is_hex_digit(line[i:i + 1]):
+            i = i + 1
+        val hex_text = line[pos:i]
+        return LexResult(token: CmmToken(kind: CmmTokenKind.HexNumber(hex_text), line: line_num, column: col, text: hex_text), new_pos: i)
+
+    # Check for dot
+    if i < length and line[i:i + 1] == ".":
+        # Look ahead: is there a digit after the dot?
+        if i + 1 < length and is_digit(line[i + 1:i + 2]):
+            # Float: digits.digits with optional exponent
+            i = i + 1
+            while i < length and is_digit(line[i:i + 1]):
+                i = i + 1
+
+            # Check for exponent: e or E followed by optional +/- and digits
+            if i < length and (line[i:i + 1] == "e" or line[i:i + 1] == "E"):
+                i = i + 1
+                if i < length and (line[i:i + 1] == "+" or line[i:i + 1] == "-"):
+                    i = i + 1
+                while i < length and is_digit(line[i:i + 1]):
+                    i = i + 1
+
+            # Check for time suffix on float
+            val time_result = try_lex_time_suffix(line, i, pos, line_num, col)
+            if time_result.?:
+                return time_result ?? LexResult(token: CmmToken(kind: CmmTokenKind.Error(""), line: 0, column: 0, text: ""), new_pos: 0)
+
+            val float_text = line[pos:i]
+            return LexResult(token: CmmToken(kind: CmmTokenKind.FloatNumber(float_text), line: line_num, column: col, text: float_text), new_pos: i)
+        else:
+            # Trailing dot: explicit decimal (e.g. 100.)
+            # But check if followed by a dot again (..) which is range operator
+            if i + 1 < length and line[i + 1:i + 2] == ".":
+                # This is integer followed by .. range — do not consume the dot
+                val int_text = line[pos:i]
+                return LexResult(token: CmmToken(kind: CmmTokenKind.IntNumber(int_text), line: line_num, column: col, text: int_text), new_pos: i)
+
+            i = i + 1  # consume the trailing dot
+
+            # Check for time suffix on decimal
+            val time_result = try_lex_time_suffix(line, i, pos, line_num, col)
+            if time_result.?:
+                return time_result ?? LexResult(token: CmmToken(kind: CmmTokenKind.Error(""), line: 0, column: 0, text: ""), new_pos: 0)
+
+            val dec_text = line[pos:i]
+            return LexResult(token: CmmToken(kind: CmmTokenKind.DecNumber(dec_text), line: line_num, column: col, text: dec_text), new_pos: i)
+
+    # Plain integer — check for time suffix first
+    val time_result = try_lex_time_suffix(line, i, pos, line_num, col)
+    if time_result.?:
+        return time_result ?? LexResult(token: CmmToken(kind: CmmTokenKind.Error(""), line: 0, column: 0, text: ""), new_pos: 0)
+
+    val int_text = line[pos:i]
+    LexResult(token: CmmToken(kind: CmmTokenKind.IntNumber(int_text), line: line_num, column: col, text: int_text), new_pos: i)
+
+# Lex hex number (after 0x prefix detected). Detects masks (X in hex digits).
+fn lex_hex_number(line: text, pos: i64, line_num: i64, col: i64) -> LexResult:
+    val length = line.len()
+    var i = pos + 2  # skip 0x
+    var has_mask = false
+
+    while i < length and is_hex_or_mask(line[i:i + 1]):
+        val ch = line[i:i + 1]
+        if ch == "x" or ch == "X":
+            has_mask = true
+        i = i + 1
+
+    val num_text = line[pos:i]
+    if has_mask:
+        LexResult(token: CmmToken(kind: CmmTokenKind.HexMask(num_text), line: line_num, column: col, text: num_text), new_pos: i)
+    else:
+        LexResult(token: CmmToken(kind: CmmTokenKind.HexNumber(num_text), line: line_num, column: col, text: num_text), new_pos: i)
+
+# Lex binary number (after 0y prefix detected). Detects masks (X in binary digits).
+fn lex_bin_number(line: text, pos: i64, line_num: i64, col: i64) -> LexResult:
+    val length = line.len()
+    var i = pos + 2  # skip 0y
+    var has_mask = false
+
+    while i < length and is_bin_or_mask(line[i:i + 1]):
+        val ch = line[i:i + 1]
+        if ch == "x" or ch == "X":
+            has_mask = true
+        i = i + 1
+
+    val num_text = line[pos:i]
+    if has_mask:
+        LexResult(token: CmmToken(kind: CmmTokenKind.BinMask(num_text), line: line_num, column: col, text: num_text), new_pos: i)
+    else:
+        LexResult(token: CmmToken(kind: CmmTokenKind.BinNumber(num_text), line: line_num, column: col, text: num_text), new_pos: i)
+
+# Try to lex a time suffix (s, ms, us, ns) after a number.
+# Returns nil if no time suffix is found.
+fn try_lex_time_suffix(line: text, num_end: i64, num_start: i64, line_num: i64, col: i64) -> LexResult?:
+    val length = line.len()
+    var suffix_len = 0
+
+    # Check for ms, us, ns (2-char suffixes)
+    if num_end + 1 < length:
+        val two = line[num_end:num_end + 2]
+        if two == "ms" or two == "us" or two == "ns":
+            suffix_len = 2
+
+    # Check for s (1-char suffix) — only if not already matched ms/us/ns
+    if suffix_len == 0 and num_end < length:
+        val one = line[num_end:num_end + 1]
+        if one == "s":
+            # Make sure it is not followed by more alpha (e.g. "start")
+            if num_end + 1 >= length or not is_alpha(line[num_end + 1:num_end + 2]):
+                suffix_len = 1
+
+    if suffix_len > 0:
+        val end_pos = num_end + suffix_len
+        val time_text = line[num_start:end_pos]
+        return LexResult(token: CmmToken(kind: CmmTokenKind.TimeLiteral(time_text), line: line_num, column: col, text: time_text), new_pos: end_pos)
+
+    nil
+
+# --- Option lexing ---
+
+# Lex a /Option token (slash followed by identifier).
+fn lex_option(line: text, pos: i64, line_num: i64, col: i64) -> LexResult:
+    val length = line.len()
+    var i = pos + 1  # skip /
+
+    while i < length and is_ident_char(line[i:i + 1]):
+        i = i + 1
+
+    val opt_name = line[pos + 1:i]
+    val full_text = line[pos:i]
+    LexResult(token: CmmToken(kind: CmmTokenKind.Option(opt_name), line: line_num, column: col, text: full_text), new_pos: i)
+
+# --- Hash token lexing ---
+
+# Lex tokens starting with #: file channels (#1, #2) or classic operators (#A#, #O#, #X#).
+fn lex_hash_token(line: text, pos: i64, line_num: i64, col: i64) -> LexResult:
+    val length = line.len()
+
+    # Check for classic operators: #A#, #O#, #X#
+    if pos + 2 < length and line[pos + 2:pos + 3] == "#":
+        val mid = line[pos + 1:pos + 2]
+        if mid == "A" or mid == "a":
+            val full_text = line[pos:pos + 3]
+            return LexResult(token: CmmToken(kind: CmmTokenKind.ClassicAnd(full_text), line: line_num, column: col, text: full_text), new_pos: pos + 3)
+        if mid == "O" or mid == "o":
+            val full_text = line[pos:pos + 3]
+            return LexResult(token: CmmToken(kind: CmmTokenKind.ClassicOr(full_text), line: line_num, column: col, text: full_text), new_pos: pos + 3)
+        if mid == "X" or mid == "x":
+            val full_text = line[pos:pos + 3]
+            return LexResult(token: CmmToken(kind: CmmTokenKind.ClassicXor(full_text), line: line_num, column: col, text: full_text), new_pos: pos + 3)
+
+    # File channel: #N (digit after #)
+    var i = pos + 1
+    if i < length and is_digit(line[i:i + 1]):
+        while i < length and is_digit(line[i:i + 1]):
+            i = i + 1
+        val channel = line[pos + 1:i]
+        val full_text = line[pos:i]
+        return LexResult(token: CmmToken(kind: CmmTokenKind.FileChannel(channel), line: line_num, column: col, text: full_text), new_pos: i)
+
+    # Standalone # — emit as error (unexpected)
+    LexResult(token: CmmToken(kind: CmmTokenKind.Error("Unexpected #"), line: line_num, column: col, text: "#"), new_pos: pos + 1)
+
+# --- Classic colon operator lexing ---
+
+# Try to lex classic operators: :A:, :O:, :X:
+# Returns nil if not a classic operator.
+fn try_lex_classic_colon_op(line: text, pos: i64, line_num: i64, col: i64) -> CmmToken?:
+    val length = line.len()
+    if pos + 2 >= length:
+        return nil
+    if line[pos + 2:pos + 3] != ":":
+        return nil
+
+    val mid = line[pos + 1:pos + 2]
+    val full_text = line[pos:pos + 3]
+
+    if mid == "A" or mid == "a":
+        return CmmToken(kind: CmmTokenKind.ClassicAnd(full_text), line: line_num, column: col, text: full_text)
+    if mid == "O" or mid == "o":
+        return CmmToken(kind: CmmTokenKind.ClassicOr(full_text), line: line_num, column: col, text: full_text)
+    if mid == "X" or mid == "x":
+        return CmmToken(kind: CmmTokenKind.ClassicXor(full_text), line: line_num, column: col, text: full_text)
+
+    nil
+
+# --- Identifier and dot-command lexing ---
+
+# Lex an identifier. If followed by dot and another identifier, coalesce into a DotCommand.
+# Also detects device selectors (e.g. B::) and classic N: / N# not operators.
+fn lex_identifier_or_command(line: text, pos: i64, line_num: i64, col: i64) -> LexResult:
+    val length = line.len()
+    var i = pos
+
+    # Consume first identifier segment
+    while i < length and is_ident_char(line[i:i + 1]):
+        i = i + 1
+
+    val first_segment = line[pos:i]
+
+    # Check for classic NOT operator: N: or N# (single uppercase N followed by : or #)
+    if first_segment == "N" or first_segment == "n":
+        if i < length:
+            val next = line[i:i + 1]
+            if next == ":":
+                val full_text = line[pos:i + 1]
+                return LexResult(token: CmmToken(kind: CmmTokenKind.ClassicNot(full_text), line: line_num, column: col, text: full_text), new_pos: i + 1)
+            if next == "#":
+                val full_text = line[pos:i + 1]
+                return LexResult(token: CmmToken(kind: CmmTokenKind.ClassicNot(full_text), line: line_num, column: col, text: full_text), new_pos: i + 1)
+
+    # Check for device selector: identifier followed by ::
+    if i + 1 < length and line[i:i + 2] == "::":
+        val full_text = line[pos:i + 2]
+        return LexResult(token: CmmToken(kind: CmmTokenKind.DeviceSelector(first_segment), line: line_num, column: col, text: full_text), new_pos: i + 2)
+
+    # Check for dot-command: identifier.identifier (possibly multi-level)
+    if i < length and line[i:i + 1] == ".":
+        # Look ahead: is there an identifier after the dot?
+        if i + 1 < length and (is_alpha(line[i + 1:i + 2]) or line[i + 1:i + 2] == "_"):
+            return lex_dot_command(line, pos, i, line_num, col)
+
+    # Plain identifier
+    val full_text = line[pos:i]
+    LexResult(token: CmmToken(kind: CmmTokenKind.Identifier(first_segment), line: line_num, column: col, text: full_text), new_pos: i)
+
+# Lex a dot-separated command (e.g. Data.dump, SYStem.CPU, FLASH.ReProgram.ALL).
+# Called when we already consumed the first segment and found a dot followed by alpha.
+fn lex_dot_command(line: text, start: i64, dot_pos: i64, line_num: i64, col: i64) -> LexResult:
+    val length = line.len()
+    var i = dot_pos
+
+    # Consume additional .identifier segments
+    while i < length and line[i:i + 1] == ".":
+        if i + 1 < length and (is_alpha(line[i + 1:i + 2]) or line[i + 1:i + 2] == "_"):
+            i = i + 1  # skip dot
+            while i < length and is_ident_char(line[i:i + 1]):
+                i = i + 1
+        else:
+            break
+
+    val full_text = line[start:i]
+    LexResult(token: CmmToken(kind: CmmTokenKind.DotCommand(full_text), line: line_num, column: col, text: full_text), new_pos: i)
+
+# --- Operator and delimiter lexing ---
+
+# Lex operators and delimiters. Handles multi-character operators first.
+fn lex_operator_or_delimiter(line: text, pos: i64, line_num: i64, col: i64) -> LexResult:
+    val length = line.len()
+    val ch = line[pos:pos + 1]
+
+    # Two-character operators
+    if pos + 1 < length:
+        val two = line[pos:pos + 2]
+
+        if two == "==":
+            return LexResult(token: CmmToken(kind: CmmTokenKind.Eq, line: line_num, column: col, text: two), new_pos: pos + 2)
+        if two == "!=":
+            return LexResult(token: CmmToken(kind: CmmTokenKind.NotEq, line: line_num, column: col, text: two), new_pos: pos + 2)
+        if two == "<=":
+            return LexResult(token: CmmToken(kind: CmmTokenKind.LtEq, line: line_num, column: col, text: two), new_pos: pos + 2)
+        if two == ">=":
+            return LexResult(token: CmmToken(kind: CmmTokenKind.GtEq, line: line_num, column: col, text: two), new_pos: pos + 2)
+        if two == "<<":
+            return LexResult(token: CmmToken(kind: CmmTokenKind.ShiftLeft, line: line_num, column: col, text: two), new_pos: pos + 2)
+        if two == ">>":
+            return LexResult(token: CmmToken(kind: CmmTokenKind.ShiftRight, line: line_num, column: col, text: two), new_pos: pos + 2)
+        if two == "&&":
+            return LexResult(token: CmmToken(kind: CmmTokenKind.LogicalAnd, line: line_num, column: col, text: two), new_pos: pos + 2)
+        if two == "||":
+            return LexResult(token: CmmToken(kind: CmmTokenKind.LogicalOr, line: line_num, column: col, text: two), new_pos: pos + 2)
+        if two == "^^":
+            return LexResult(token: CmmToken(kind: CmmTokenKind.LogicalXor, line: line_num, column: col, text: two), new_pos: pos + 2)
+        if two == "--":
+            return LexResult(token: CmmToken(kind: CmmTokenKind.RangeTo, line: line_num, column: col, text: two), new_pos: pos + 2)
+        if two == "++":
+            return LexResult(token: CmmToken(kind: CmmTokenKind.RangeOffset, line: line_num, column: col, text: two), new_pos: pos + 2)
+        if two == "..":
+            return LexResult(token: CmmToken(kind: CmmTokenKind.RangeDots, line: line_num, column: col, text: two), new_pos: pos + 2)
+
+    # Single-character operators and delimiters
+    if ch == "+":
+        return LexResult(token: CmmToken(kind: CmmTokenKind.Plus, line: line_num, column: col, text: ch), new_pos: pos + 1)
+    if ch == "-":
+        return LexResult(token: CmmToken(kind: CmmTokenKind.Minus, line: line_num, column: col, text: ch), new_pos: pos + 1)
+    if ch == "*":
+        return LexResult(token: CmmToken(kind: CmmTokenKind.Star, line: line_num, column: col, text: ch), new_pos: pos + 1)
+    if ch == "/":
+        return LexResult(token: CmmToken(kind: CmmTokenKind.Slash, line: line_num, column: col, text: ch), new_pos: pos + 1)
+    if ch == "%":
+        return LexResult(token: CmmToken(kind: CmmTokenKind.Percent, line: line_num, column: col, text: ch), new_pos: pos + 1)
+    if ch == "=":
+        return LexResult(token: CmmToken(kind: CmmTokenKind.Assign, line: line_num, column: col, text: ch), new_pos: pos + 1)
+    if ch == "<":
+        return LexResult(token: CmmToken(kind: CmmTokenKind.Lt, line: line_num, column: col, text: ch), new_pos: pos + 1)
+    if ch == ">":
+        return LexResult(token: CmmToken(kind: CmmTokenKind.Gt, line: line_num, column: col, text: ch), new_pos: pos + 1)
+    if ch == "&":
+        return LexResult(token: CmmToken(kind: CmmTokenKind.Ampersand, line: line_num, column: col, text: ch), new_pos: pos + 1)
+    if ch == "|":
+        return LexResult(token: CmmToken(kind: CmmTokenKind.Pipe, line: line_num, column: col, text: ch), new_pos: pos + 1)
+    if ch == "^":
+        return LexResult(token: CmmToken(kind: CmmTokenKind.Caret, line: line_num, column: col, text: ch), new_pos: pos + 1)
+    if ch == "~":
+        return LexResult(token: CmmToken(kind: CmmTokenKind.Tilde, line: line_num, column: col, text: ch), new_pos: pos + 1)
+    if ch == "!":
+        return LexResult(token: CmmToken(kind: CmmTokenKind.Bang, line: line_num, column: col, text: ch), new_pos: pos + 1)
+    if ch == "(":
+        return LexResult(token: CmmToken(kind: CmmTokenKind.LParen, line: line_num, column: col, text: ch), new_pos: pos + 1)
+    if ch == ")":
+        return LexResult(token: CmmToken(kind: CmmTokenKind.RParen, line: line_num, column: col, text: ch), new_pos: pos + 1)
+    if ch == "{":
+        return LexResult(token: CmmToken(kind: CmmTokenKind.LBrace, line: line_num, column: col, text: ch), new_pos: pos + 1)
+    if ch == "}":
+        return LexResult(token: CmmToken(kind: CmmTokenKind.RBrace, line: line_num, column: col, text: ch), new_pos: pos + 1)
+    if ch == ",":
+        return LexResult(token: CmmToken(kind: CmmTokenKind.Comma, line: line_num, column: col, text: ch), new_pos: pos + 1)
+    if ch == ":":
+        return LexResult(token: CmmToken(kind: CmmTokenKind.Colon, line: line_num, column: col, text: ch), new_pos: pos + 1)
+    if ch == ".":
+        # Fractional number: .digits (e.g. .1s, .5ms, .001)
+        if pos + 1 < length and is_digit(line[pos + 1:pos + 2]):
+            var i = pos + 1
+            while i < length and is_digit(line[i:i + 1]):
+                i = i + 1
+            # Check for time suffix
+            val time_result = try_lex_time_suffix(line, i, pos, line_num, col)
+            if time_result.?:
+                return time_result ?? LexResult(token: CmmToken(kind: CmmTokenKind.Error(""), line: 0, column: 0, text: ""), new_pos: 0)
+            val float_text = line[pos:i]
+            return LexResult(token: CmmToken(kind: CmmTokenKind.FloatNumber(float_text), line: line_num, column: col, text: float_text), new_pos: i)
+        return LexResult(token: CmmToken(kind: CmmTokenKind.Dot, line: line_num, column: col, text: ch), new_pos: pos + 1)
+
+    if ch == "\\":
+        return LexResult(token: CmmToken(kind: CmmTokenKind.Backslash, line: line_num, column: col, text: ch), new_pos: pos + 1)
+    if ch == "?":
+        return LexResult(token: CmmToken(kind: CmmTokenKind.Question, line: line_num, column: col, text: ch), new_pos: pos + 1)
+    if ch == "[":
+        return LexResult(token: CmmToken(kind: CmmTokenKind.LBracket, line: line_num, column: col, text: ch), new_pos: pos + 1)
+    if ch == "]":
+        return LexResult(token: CmmToken(kind: CmmTokenKind.RBracket, line: line_num, column: col, text: ch), new_pos: pos + 1)
+
+    # Backtick-delimited symbol name: `\kernel/process\out`
+    if ch == "`":
+        var i = pos + 1
+        while i < length:
+            if line[i:i + 1] == "`":
+                i = i + 1
+                break
+            i = i + 1
+        val sym_text = line[pos:i]
+        val sym_name = line[pos + 1:i - 1]
+        return LexResult(token: CmmToken(kind: CmmTokenKind.StringLit(sym_name), line: line_num, column: col, text: sym_text), new_pos: i)
+
+    # Unknown character
+    LexResult(token: CmmToken(kind: CmmTokenKind.Error("Unknown character: {ch}"), line: line_num, column: col, text: ch), new_pos: pos + 1)

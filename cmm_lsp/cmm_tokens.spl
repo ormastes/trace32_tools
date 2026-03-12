@@ -1,0 +1,91 @@
+# CMM (PRACTICE Script) Token Types
+# Token definitions for the TRACE32 PRACTICE scripting language lexer.
+# CMM is a line-oriented test language by Lauterbach GmbH for TRACE32 debugger automation.
+
+export CmmTokenKind, CmmToken
+
+# Token kinds for all CMM lexical elements
+enum CmmTokenKind:
+    # Identifiers and commands
+    Identifier(text)        # simple word: SYStem, PRINT, Step
+    DotCommand(text)        # dot-separated command: Data.dump, SYStem.CPU, FLASH.RESet
+    MacroRef(text)          # macro reference: &name
+    MacroRecRef(text)       # recursive macro reference: &&name
+
+    # Literals
+    HexNumber(text)         # hex literal: 0x1000, 0xEEEE
+    BinNumber(text)         # binary literal: 0y101, 0y100010001
+    DecNumber(text)         # explicit decimal: 100., 1234. (trailing dot)
+    FloatNumber(text)       # floating point: 1.3, 1.3e+34, 0.123
+    IntNumber(text)         # plain digits: 100, 1234 (context-dependent radix)
+    HexMask(text)           # hex with don't-care bits: 0xFX, 0xff1cxxxx
+    BinMask(text)           # binary with don't-care bits: 0yX111XXX
+    TimeLiteral(text)       # time value: 10s, 23.24ms, 75.0ns, 100us
+    StringLit(text)         # double-quoted string: "hello", "abc""def"
+    CharLiteral(text)       # single-quoted char: 'A', 'a'
+
+    # Structure
+    Label(text)             # label at column 1 followed by colon: start:, FlashSetup:
+    DeviceSelector(text)    # device prompt: B::, E::
+    Option(text)            # slash-prefixed option: /Write, /Read, /Create
+    FileChannel(text)       # file channel: #1, #2
+
+    # Operators
+    Plus                    # +
+    Minus                   # -
+    Star                    # *
+    Slash                   # /
+    Percent                 # %
+    Eq                      # ==
+    NotEq                   # !=
+    Lt                      # <
+    Gt                      # >
+    LtEq                    # <=
+    GtEq                    # >=
+    ShiftLeft               # <<
+    ShiftRight              # >>
+    Ampersand               # & (binary AND)
+    Pipe                    # | (binary OR)
+    Caret                   # ^ (binary XOR)
+    Tilde                   # ~ (binary NOT)
+    Bang                    # ! (logical NOT)
+    LogicalAnd              # &&
+    LogicalOr               # ||
+    LogicalXor              # ^^
+    Assign                  # = (single, used in macro assignment)
+    RangeTo                 # -- (range with borders)
+    RangeOffset             # ++ (range with offset)
+    RangeDots               # .. (range alternate syntax)
+
+    # Classic operators (legacy RADIX mode forms)
+    ClassicAnd(text)        # :A: or #A#
+    ClassicOr(text)         # :O: or #O#
+    ClassicXor(text)        # :X: or #X#
+    ClassicNot(text)        # N: or N#
+
+    # Delimiters
+    LParen                  # (
+    RParen                  # )
+    LBrace                  # {
+    RBrace                  # }
+    Comma                   # ,
+    Colon                   # :
+    Dot                     # .
+    Backslash               # \ (path separator in CMM address expressions)
+    LBracket                # [ (bitmap data, array access)
+    RBracket                # ] (bitmap data, array access)
+    Question                # ? (wildcard in patterns, optional chaining)
+
+    # Control
+    Newline                 # end of line
+    Comment(text)           # ; or // comment text
+    LineContinuation        # \ at end of line
+    Eof                     # end of file
+    Error(text)             # lexer error with message
+
+# Token with source location
+struct CmmToken:
+    kind: CmmTokenKind
+    line: i64
+    column: i64
+    text: text              # original source text of this token

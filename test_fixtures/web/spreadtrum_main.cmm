@@ -1,0 +1,59 @@
+; Spreadtrum Debug Script
+; Exercises: SOFTWARE.BUILD() function, DIALOG with HEADER/POS/TEXT/DEFBUTTON/BUTTON/CLOSE,
+;            ON ERROR JUMPTO, ON ERROR inherit, DIALOG.OK/DIALOG.END,
+;            CD.DO, OS.HIDDEN, Var.NEWLOCAL char[100][50], STOP in dialog flow
+
+LOCAL &project &build_type &result
+
+ON ERROR JUMPTO error_handler
+
+IF SOFTWARE.BUILD()<100000.
+(
+  DIALOG.OK "TRACE32 version too old. Please update."
+  ENDDO
+)
+
+; Complex dialog
+DIALOG
+(
+  HEADER "Spreadtrum Debug Configuration"
+
+  POS 1. 1. 30.
+  TEXT "Project Selection"
+
+  POS 1. 3. 28.
+  project.name: EDIT "" ""
+
+  POS 1. 5. 14.
+  DEFBUTTON "Start Debug" "GOTO start_debug"
+
+  POS 16. 5. 14.
+  BUTTON "Cancel" "DIALOG.END"
+
+  CLOSE "GOTO cleanup"
+)
+
+STOP
+
+start_debug:
+  &project=DIALOG.STRing(project.name)
+  DIALOG.END
+
+  IF "&project"==""
+  (
+    DIALOG.OK "No project selected"
+    ENDDO
+  )
+
+  CD.DO "&project"
+  ON ERROR inherit
+  DO setup.cmm
+  ENDDO
+
+error_handler:
+  PRINT %ERROR "An error occurred"
+  ENDDO
+
+cleanup:
+  DIALOG.END
+  ENDDO

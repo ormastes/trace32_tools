@@ -1,0 +1,89 @@
+; STM32WB55 BLE Stack Debug
+; Cortex-M4 (application) + Cortex-M0+ (BLE stack) via SWD
+
+LOCAL &elf_path &ble_mode &ble_state
+LOCAL &hci_cmd_buf &ble_gap_state &ble_gatt_state
+LOCAL &sram2a_base &bd_addr_low &bd_addr_high
+
+ENTRY &elf_path
+IF "&elf_path"==""
+  &elf_path="stm32wb_ble_app.elf"
+
+SYStem.RESet
+SYStem.CPU STM32WB55
+SYStem.CONFIG.DEBUGPORTTYPE SWD
+SYStem.CONFIG.CORE 1. 2.
+SYStem.Up
+
+; Load BLE application
+Data.LOAD.Elf "&elf_path"
+
+TOOLBAR ON
+
+; BLE mode selection dialog
+DIALOG.YESNO "Start as BLE Peripheral? (No = Central mode)"
+ENTRY &ble_mode
+IF "&ble_mode"=="TRUE"
+  &ble_mode="peripheral"
+ELSE
+  &ble_mode="central"
+
+; BLE shared memory - SRAM2A at 0x20030000
+&sram2a_base=0x20030000
+
+; BLE status window
+WinPOS 0. 0. 70. 10. 0. 0. W_BLE_STATUS
+PRINT "BLE Mode: &ble_mode"
+
+; BLE state structure view
+WinPOS 0. 11. 70. 12. 0. 0. W_BLE_STATE
+Var.View BleApplicationContext
+Var.View hci_cmd_resp_released
+
+; Set breakpoints on BLE events
+Break.Set hci_notify_asynch_evt
+Break.Set SVCCTL_App_Notification
+Break.Set aci_gap_set_discoverable
+Break.Set aci_gatt_add_service
+
+; Run to BLE init
+Go
+WAIT !STATE.RUN() 15s
+
+; Read BLE state from shared memory
+&hci_cmd_buf=Data.Long(D:&sram2a_base)
+&ble_gap_state=Data.Long(D:&sram2a_base+0x100)
+&ble_gatt_state=Data.Long(D:&sram2a_base+0x200)
+PRINT "HCI CMD buffer: " FORMAT.Hex(8., &hci_cmd_buf)
+PRINT "GAP state:      " FORMAT.Hex(8., &ble_gap_state)
+PRINT "GATT state:     " FORMAT.Hex(8., &ble_gatt_state)
+
+; Read BD address from OTP area
+&bd_addr_low=Data.Long(D:0x1FFF7580)
+&bd_addr_high=Data.Long(D:0x1FFF7584)
+PRINT "BD ADDR: " FORMAT.Hex(8., &bd_addr_high) FORMAT.Hex(8., &bd_addr_low)
+
+; Check BLE init status
+&ble_state=Var.VALUE(BleApplicationContext.BleApplicationContext_legacy.connectionStatus)
+IF &ble_state!=0
+(
+  PRINT "BLE initialized, connection status: " FORMAT.Hex(2., &ble_state)
+)
+ELSE
+(
+  PRINT %WARNING "BLE not yet initialized"
+)
+
+; Continue and watch for BLE events
+Go
+WAIT !STATE.RUN() 10s
+
+IF !STATE.RUN()
+(
+  PRINT "Stopped at BLE event handler: " FORMAT.Hex(8., Register(PC))
+  Var.Frame /Locals /Caller
+)
+
+PRINT "STM32WB BLE debug session complete"
+
+ENDDO

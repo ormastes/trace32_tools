@@ -1,0 +1,130 @@
+# T32 LSP MCP Protocol — I/O, initialize, tools list, schemas
+# Protocol: MCP 2025-06-18 (Content-Length framing + JSON-Lines auto-detect)
+
+# --- Protocol I/O ---
+
+fn lsp_read_stdin_message() -> text:
+    var line = input()
+    if line == "":
+        return ""
+    if line.ends_with("\r"):
+        line = line.substring(0, line.len() - 1)
+    if line.starts_with(lsp_LB()):
+        LSP_USE_JSON_LINES = true
+        return line
+    if line.starts_with("Content-Length:"):
+        var len_str = line.replace("Content-Length:", "")
+        len_str = len_str.trim()
+        val content_length = int(len_str)
+        if content_length == 0:
+            return ""
+        input()
+        var body = input()
+        return body
+    ""
+
+fn lsp_write_stdout_message(body: text):
+    if LSP_USE_JSON_LINES:
+        print_raw(body + LSP_NL)
+    else:
+        val byte_count = lsp_text_byte_len(body)
+        var header = "Content-Length: " + str(byte_count) + "\r" + LSP_NL + "\r" + LSP_NL
+        print_raw(header)
+        print_raw(body)
+
+# --- Initialize response ---
+
+fn lsp_make_init_response(id: text) -> text:
+    if LSP_INIT_CACHE != "":
+        return lsp_result_ok(id, LSP_INIT_CACHE)
+    var tools_cap = lsp_jo1(lsp_jp("listChanged", "true"))
+    var caps = lsp_jo1(lsp_jp("tools", tools_cap))
+    val server_info = lsp_jo3(
+        lsp_jp("name", lsp_js(LSP_SERVER_NAME)),
+        lsp_jp("version", lsp_js(LSP_SERVER_VERSION)),
+        lsp_jp("instructions", lsp_js("CMM language intelligence via MCP protocol. 6 tools for parsing, diagnostics, completions, hover, symbols, and CLI validation."))
+    )
+    val result = lsp_jo3(
+        lsp_jp("protocolVersion", lsp_js("2025-06-18")),
+        lsp_jp("capabilities", caps),
+        lsp_jp("serverInfo", server_info)
+    )
+    LSP_INIT_CACHE = result
+    lsp_result_ok(id, result)
+
+# --- Tools list (6 CMM LSP tools) ---
+
+fn lsp_make_tools_list(id: text) -> text:
+    if LSP_TOOLS_CACHE != "":
+        return lsp_result_ok(id, LSP_TOOLS_CACHE)
+
+    var tool_parts: [text] = []
+
+    tool_parts.push(lsp_make_tool_schema("cmm_parse", "Parse CMM source and return AST summary with node count and errors"))
+    tool_parts.push(lsp_make_tool_schema("cmm_diagnostics", "Run semantic diagnostics on CMM source (labels, macros, unreachable code)"))
+    tool_parts.push(lsp_make_tool_schema("cmm_complete", "Get completions at a position in CMM source"))
+    tool_parts.push(lsp_make_tool_schema("cmm_hover", "Get hover documentation for a word at a position in CMM source"))
+    tool_parts.push(lsp_make_tool_schema("cmm_symbols", "List symbols (labels, macros) in CMM source"))
+    tool_parts.push(lsp_make_tool_schema("cmm_validate_cli", "Validate CLI conversion quality of a CMM script"))
+
+    val tools = lsp_SB_L() + tool_parts.join(",") + lsp_SB_R()
+    val result = lsp_jo1(lsp_jp("tools", tools))
+    LSP_TOOLS_CACHE = result
+    lsp_result_ok(id, result)
+
+# --- Tool schema builder ---
+
+fn lsp_make_tool_schema(name: text, description: text) -> text:
+    var props = lsp_LB() + lsp_RB()
+    var req = "[]"
+
+    if name == "cmm_parse":
+        props = lsp_jo1(lsp_jp("source", lsp_jo2(lsp_jp("type", lsp_js("string")), lsp_jp("description", lsp_js("CMM source text to parse")))))
+        req = "[" + lsp_js("source") + "]"
+    elif name == "cmm_diagnostics":
+        props = lsp_jo1(lsp_jp("source", lsp_jo2(lsp_jp("type", lsp_js("string")), lsp_jp("description", lsp_js("CMM source text to analyze")))))
+        req = "[" + lsp_js("source") + "]"
+    elif name == "cmm_complete":
+        var p = lsp_LB()
+        p = p + lsp_jp("source", lsp_jo2(lsp_jp("type", lsp_js("string")), lsp_jp("description", lsp_js("CMM source text"))))
+        p = p + "," + lsp_jp("line", lsp_jo2(lsp_jp("type", lsp_js("integer")), lsp_jp("description", lsp_js("Line number (1-based)"))))
+        p = p + "," + lsp_jp("character", lsp_jo2(lsp_jp("type", lsp_js("integer")), lsp_jp("description", lsp_js("Character offset (0-based)"))))
+        p = p + lsp_RB()
+        props = p
+        req = "[" + lsp_js("source") + "," + lsp_js("line") + "," + lsp_js("character") + "]"
+    elif name == "cmm_hover":
+        var p = lsp_LB()
+        p = p + lsp_jp("source", lsp_jo2(lsp_jp("type", lsp_js("string")), lsp_jp("description", lsp_js("CMM source text"))))
+        p = p + "," + lsp_jp("line", lsp_jo2(lsp_jp("type", lsp_js("integer")), lsp_jp("description", lsp_js("Line number (1-based)"))))
+        p = p + "," + lsp_jp("character", lsp_jo2(lsp_jp("type", lsp_js("integer")), lsp_jp("description", lsp_js("Character offset (0-based)"))))
+        p = p + lsp_RB()
+        props = p
+        req = "[" + lsp_js("source") + "," + lsp_js("line") + "," + lsp_js("character") + "]"
+    elif name == "cmm_symbols":
+        props = lsp_jo1(lsp_jp("source", lsp_jo2(lsp_jp("type", lsp_js("string")), lsp_jp("description", lsp_js("CMM source text")))))
+        req = "[" + lsp_js("source") + "]"
+    elif name == "cmm_validate_cli":
+        props = lsp_jo1(lsp_jp("source", lsp_jo2(lsp_jp("type", lsp_js("string")), lsp_jp("description", lsp_js("CMM CLI-converted source to validate")))))
+        req = "[" + lsp_js("source") + "]"
+
+    var schema = lsp_LB()
+    schema = schema + lsp_jp("type", lsp_js("object"))
+    schema = schema + "," + lsp_jp("properties", props)
+    schema = schema + "," + lsp_jp("required", req)
+    schema = schema + lsp_RB()
+
+    # Annotations — all tools are read-only and idempotent
+    var annotations = lsp_LB()
+    annotations = annotations + lsp_jp("readOnlyHint", "true")
+    annotations = annotations + "," + lsp_jp("destructiveHint", "false")
+    annotations = annotations + "," + lsp_jp("idempotentHint", "true")
+    annotations = annotations + "," + lsp_jp("openWorldHint", "false")
+    annotations = annotations + lsp_RB()
+
+    var tool_obj = lsp_jo3(
+        lsp_jp("name", lsp_js(name)),
+        lsp_jp("description", lsp_js(description)),
+        lsp_jp("inputSchema", schema)
+    )
+    tool_obj = tool_obj.substring(0, tool_obj.len() - 1) + "," + lsp_jp("annotations", annotations) + lsp_RB()
+    tool_obj

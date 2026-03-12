@@ -1,0 +1,178 @@
+# T32 CLI — SDN catalog loading
+# Parses SDN catalog files for windows, actions, and fields
+
+extern fn rt_file_read_text(path: text) -> text
+
+use app.t32_cli.types.{T32Catalogs, T32WindowNode, T32Action, T32Field}
+use app.t32_cli.error_codes.{t32_err_catalog_warning}
+
+# Load all three catalog files from a base directory
+fn load_catalogs(base_path: text) -> T32Catalogs:
+    val windows = load_window_catalog("{base_path}/windows.sdn")
+    val actions = load_action_catalog("{base_path}/actions.sdn")
+    val fields = load_field_catalog("{base_path}/fields.sdn")
+    T32Catalogs(windows: windows, actions: actions, fields: fields)
+
+# Parse windows.sdn into T32WindowNode list
+fn load_window_catalog(path: text) -> [T32WindowNode]:
+    val entries = parse_sdn_entries(path, "window")
+    var windows: [T32WindowNode] = []
+
+    for entry in entries:
+        val key = entry_get(entry, "__key")
+        val title = entry_get(entry, "title")
+        val kind = entry_get(entry, "kind")
+        val capture_mode = entry_get(entry, "capture_mode")
+        val open_command = entry_get(entry, "open_command")
+        val capture_command = entry_get(entry, "capture_command")
+
+        if key != "":
+            var node = T32WindowNode.create(key, title, kind, capture_mode)
+            node.open_command = open_command
+            node.capture_command = capture_command
+            windows.push(node)
+
+    windows
+
+# Parse actions.sdn into T32Action list
+fn load_action_catalog(path: text) -> [T32Action]:
+    val entries = parse_sdn_entries(path, "action")
+    var actions: [T32Action] = []
+
+    for entry in entries:
+        val key = entry_get(entry, "__key")
+        val label = entry_get(entry, "label")
+        val action_type = entry_get(entry, "type")
+        val command = entry_get(entry, "command")
+        val target = entry_get(entry, "target")
+
+        if key != "":
+            var action = T32Action.create(key, label, action_type, command)
+            if target != "":
+                action.target_window_key = target
+            actions.push(action)
+
+    actions
+
+# Parse fields.sdn into T32Field list
+fn load_field_catalog(path: text) -> [T32Field]:
+    val entries = parse_sdn_entries(path, "field")
+    var fields: [T32Field] = []
+
+    for entry in entries:
+        val key = entry_get(entry, "__key")
+        val label = entry_get(entry, "label")
+        val value_type = entry_get(entry, "type")
+        val scope = entry_get(entry, "scope")
+
+        if key != "":
+            val field = T32Field.create(key, label, value_type, scope)
+            fields.push(field)
+
+    fields
+
+# Generic SDN block parser
+# Reads a file and parses entries of the form:
+#   <keyword> <key>
+#     prop1: value1
+#     prop2: value2
+# Returns list of dicts with "__key" for the entry key
+fn parse_sdn_entries(path: text, entry_keyword: text) -> [Dict<text, text>]:
+    val content = rt_file_read_text(path) ?? ""
+    if content == "":
+        print t32_err_catalog_warning(path)
+        return []
+
+    var entries: [Dict<text, text>] = []
+    var current: Dict<text, text> = {}
+    var in_entry = false
+
+    val lines = split_lines(content)
+    for line in lines:
+        # Skip empty lines and comments
+        val trimmed = trim(line)
+        if trimmed == "":
+            continue
+        if trimmed.starts_with("#"):
+            continue
+
+        # Check for entry header: "<keyword> <key>"
+        val prefix = "{entry_keyword} "
+        if trimmed.starts_with(prefix):
+            # Save previous entry if any
+            if in_entry:
+                entries.push(current)
+            current = {}
+            val key = trimmed.slice(prefix.len(), trimmed.len())
+            current["__key"] = trim(key)
+            in_entry = true
+            continue
+
+        # Check for indented property line: "  key: value"
+        if (in_entry and line.starts_with(" ")):
+            val colon_pos = find_char(trimmed, ':')
+            if colon_pos > 0:
+                val prop_key = trim(trimmed.slice(0, colon_pos))
+                var prop_val = ""
+                if colon_pos + 1 < trimmed.len():
+                    prop_val = trim(trimmed.slice(colon_pos + 1, trimmed.len()))
+                current[prop_key] = prop_val
+
+    # Save last entry
+    if in_entry:
+        entries.push(current)
+
+    entries
+
+# Helper: get value from dict with default ""
+fn entry_get(dict: Dict<text, text>, key: text) -> text:
+    val found = dict.get(key)
+    match found:
+        Some(v): v
+        nil: ""
+
+# Helper: split text into lines
+fn split_lines(content: text) -> [text]:
+    var lines: [text] = []
+    var start = 0
+    var i = 0
+    while i < content.len():
+        if content[i] == '\n':
+            val line = content.slice(start, i)
+            lines.push(line)
+            start = i + 1
+        i = i + 1
+    # Last line (no trailing newline)
+    if start < content.len():
+        val line = content.slice(start, content.len())
+        lines.push(line)
+    lines
+
+# Helper: find first occurrence of a character
+fn find_char(s: text, ch: text) -> i64:
+    var i = 0
+    while i < s.len():
+        if s[i] == ch:
+            return i
+        i = i + 1
+    -1
+
+# Helper: trim leading and trailing whitespace
+fn trim(s: text) -> text:
+    var start = 0
+    while start < s.len():
+        val ch = s[start]
+        if (ch != ' ' and ch != '\t' and ch != '\r'):
+            break
+        start = start + 1
+
+    var end_idx = s.len()
+    while end_idx > start:
+        val ch = s[end_idx - 1]
+        if (ch != ' ' and ch != '\t' and ch != '\r'):
+            break
+        end_idx = end_idx - 1
+
+    if start >= end_idx:
+        return ""
+    s.slice(start, end_idx)

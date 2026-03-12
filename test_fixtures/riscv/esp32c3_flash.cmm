@@ -1,0 +1,121 @@
+; ESP32-C3 RISC-V Flash Programming
+; Espressif ESP32-C3 - RV32IMC core with SPI Flash
+
+ENTRY %LINE &params
+
+LOCAL &elf_path &flash_base &flash_size
+LOCAL &result &chip_id
+
+; Parse parameters
+&elf_path=STRing.SCANAndExtract("&params"," ",&rest)
+IF "&elf_path"==""
+  &elf_path="esp32c3_app.elf"
+
+SYStem.RESet
+SYStem.CPU ESP32C3
+SYStem.CONFIG.DEBUGPORTTYPE JTAG
+SYStem.JtagClock 5MHz
+SYStem.Up
+
+; Read chip ID
+&chip_id=Data.Long(D:0x60008044)
+PRINT "ESP32-C3 Chip ID: " FORMAT.Hex(8., &chip_id)
+
+; Flash configuration
+&flash_base=0x42000000
+&flash_size=0x400000  ; 4MB
+
+FLASH.RESet
+FLASH.Create 1. &flash_base--(&flash_base+&flash_size-1) 0x1000 TARGET Long
+
+; Setup flash target
+FLASH.TARGET 0x40380000 0x40390000 0x1000 ~~/demo/riscv/flash/byte/spi_flash_esp32c3.bin
+
+; Erase and program
+FLASH.Erase ALL
+FLASH.Program ALL
+Data.LOAD.Elf "&elf_path"
+FLASH.Program off
+
+; Verify
+Data.LOAD.Elf "&elf_path" /ComPare
+IF FOUND()
+  PRINT %ERROR "Flash verify FAILED"
+ELSE
+  PRINT "Flash verify PASSED"
+
+; Reset and run
+SYStem.Down
+SYStem.Up
+Register.Set PC 0x40380000
+
+Go
+WAIT 2s
+
+; --- Additional parser exercises ---
+
+; ON ERROR GOSUB error_handler subroutine
+ON ERROR GOSUB flash_error_handler
+
+; GLOBALON ERROR fallback
+GLOBALON ERROR DO fallback_flash.cmm
+
+; DIALOG.YESNO confirmation before flash erase
+DIALOG.YESNO "Erase entire flash? This cannot be undone."
+ENTRY &confirmed
+IF "&confirmed"=="TRUE"
+(
+  FLASH.Erase ALL
+  PRINT "Flash erased"
+)
+
+; Data.Test for verification
+; Data.Test 0x42000000--0x42000FFF /Prime
+
+; WAIT with complex condition
+WAIT !STATE.RUN()&&(Register(PC)!=0x0) 10s
+
+; FORMAT.Decimal usage
+PRINT "Flash size: " FORMAT.Decimal(8., &flash_size) " bytes"
+PRINT "Flash base: " FORMAT.Hex(8., &flash_base)
+
+; Nested IF blocks
+IF &chip_id!=0
+(
+  IF (&chip_id&0xFFFF)==0x0005
+  (
+    PRINT "ESP32-C3 rev 3 detected"
+    IF (&chip_id>>16.)>0
+    (
+      PRINT "Chip has additional features"
+    )
+  )
+  ELSE
+  (
+    PRINT "Unknown ESP32-C3 revision: " FORMAT.Hex(4., &chip_id&0xFFFF)
+  )
+)
+
+; APPEND to log file
+APPEND "esp32c3_flash.log" "Flash programming completed at " FORMAT.Hex(8., Register(PC))
+
+; GOTO with label for recovery flow
+GOTO flash_done
+
+flash_retry:
+  PRINT %WARNING "Retrying flash operation..."
+  SYStem.Down
+  SYStem.Up
+  GOTO flash_done
+
+flash_done:
+  PRINT "ESP32-C3 flash script finished"
+
+ENDDO
+
+; Error handler subroutine
+flash_error_handler:
+  LOCAL &err_pc
+  &err_pc=Register(PC)
+  PRINT %ERROR "Flash error at PC=" FORMAT.Hex(8., &err_pc)
+  RETURN

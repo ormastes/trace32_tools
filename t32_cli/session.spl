@@ -1,0 +1,187 @@
+# T32 CLI — Session commands
+# Manages session registry: list, open, close, use, info
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+use app.t32_cli.error_codes.{T4010, T4011, T4012, t32_err_session_not_found, t32_err_session_duplicate, t32_err_session_closed}
+
+# Module state for CLI context
+var CLI_CURRENT_SESSION = ""
+var CLI_CURRENT_CORE = ""
+var CLI_SESSIONS: [CliSessionInfo] = []
+var CLI_NEXT_SESSION_ID = 1
+
+class CliSessionInfo:
+    id: text
+    host: text
+    port: i32
+    intercom_name: text
+    architecture: text
+    connected: bool
+    t32rem_path: text
+
+impl CliSessionInfo:
+    static fn create(id: text, host: text, port: i32, name: text, arch: text) -> CliSessionInfo:
+        CliSessionInfo(
+            id: id,
+            host: host,
+            port: port,
+            intercom_name: name,
+            architecture: arch,
+            connected: true,
+            t32rem_path: cli_find_t32rem()
+        )
+
+# Find t32rem binary for CLI sessions
+fn cli_find_t32rem() -> text:
+    # Check common paths
+    if rt_file_exists("/opt/t32/bin/pc_linux64/t32rem"):
+        return "/opt/t32/bin/pc_linux64/t32rem"
+    if rt_file_exists("/opt/t32/bin/t32rem"):
+        return "/opt/t32/bin/t32rem"
+    # Try PATH
+    var stdout = ""
+    var stderr = ""
+    var rc: i64 = 0
+    (stdout, stderr, rc) = rt_process_run("/bin/sh", ["-c", "which t32rem 2>/dev/null"])
+    if rc == 0 and stdout.trim() != "":
+        return stdout.trim()
+    ""
+
+# List all registered sessions as a text table
+fn cli_sessions_list() -> text:
+    if CLI_SESSIONS.len() == 0:
+        return "No sessions registered."
+
+    var out = "ID          Host            Port   Name              Arch        Status\n"
+    out = out + "----------  --------------  -----  ----------------  ----------  --------\n"
+    for s in CLI_SESSIONS:
+        var status = "connected"
+        if s.connected == false:
+            status = "closed"
+        var marker = "  "
+        if s.id == CLI_CURRENT_SESSION:
+            marker = "* "
+        val port_str = "{s.port}"
+        out = out + "{marker}{s.id}"
+        out = out + pad_right(s.id, 10)
+        out = out + "  {s.host}"
+        out = out + pad_right(s.host, 14)
+        out = out + "  {port_str}"
+        out = out + pad_right(port_str, 5)
+        out = out + "  {s.intercom_name}"
+        out = out + pad_right(s.intercom_name, 16)
+        out = out + "  {s.architecture}"
+        out = out + pad_right(s.architecture, 10)
+        out = out + "  {status}\n"
+    out
+
+# Pad a string to fixed width with spaces
+fn pad_right(s: text, width: i64) -> text:
+    var padding = ""
+    var needed = width - s.len()
+    while needed > 0:
+        padding = padding + " "
+        needed = needed - 1
+    padding
+
+# Open/register a new session
+fn cli_session_open(host: text, port: i32, name: text, arch: text) -> Result<text, text>:
+    # Check for duplicate name
+    for s in CLI_SESSIONS:
+        if s.intercom_name == name:
+            return Err(t32_err_session_duplicate(name, s.id))
+
+    val id = "s{CLI_NEXT_SESSION_ID}"
+    CLI_NEXT_SESSION_ID = CLI_NEXT_SESSION_ID + 1
+
+    val session = CliSessionInfo.create(id, host, port, name, arch)
+    CLI_SESSIONS.push(session)
+
+    # Auto-select if first session
+    if CLI_SESSIONS.len() == 1:
+        CLI_CURRENT_SESSION = id
+
+    Ok("Session '{name}' opened with id {id} at {host}:{port}")
+
+# Close a session by id
+fn cli_session_close(id: text) -> Result<text, text>:
+    var found = false
+    var idx = 0
+    while idx < CLI_SESSIONS.len():
+        if CLI_SESSIONS[idx].id == id:
+            found = true
+            CLI_SESSIONS[idx].connected = false
+            if CLI_CURRENT_SESSION == id:
+                CLI_CURRENT_SESSION = ""
+            return Ok("Session {id} closed.")
+        idx = idx + 1
+
+    if found == false:
+        return Err(t32_err_session_not_found(id, session_id_list()))
+    Ok("")
+
+# Set the active session
+fn cli_session_use(id: text) -> Result<text, text>:
+    for s in CLI_SESSIONS:
+        if s.id == id:
+            if s.connected == false:
+                return Err(t32_err_session_closed(id))
+            CLI_CURRENT_SESSION = id
+            return Ok("Active session: {id} ({s.intercom_name})")
+
+    Err(t32_err_session_not_found(id, session_id_list()))
+
+# Return detailed info for one session
+fn cli_session_info(id: text) -> text:
+    for s in CLI_SESSIONS:
+        if s.id == id:
+            var status = "connected"
+            if s.connected == false:
+                status = "closed"
+            var active = ""
+            if s.id == CLI_CURRENT_SESSION:
+                active = " (active)"
+            var out = "Session: {s.id}{active}\n"
+            out = out + "  Host:     {s.host}\n"
+            out = out + "  Port:     {s.port}\n"
+            out = out + "  Name:     {s.intercom_name}\n"
+            out = out + "  Arch:     {s.architecture}\n"
+            out = out + "  Status:   {status}\n"
+            return out
+
+    t32_err_session_not_found(id, session_id_list())
+
+# Get list of all session ids for suggestions
+fn session_id_list() -> [text]:
+    var ids: [text] = []
+    for s in CLI_SESSIONS:
+        ids.push(s.id)
+    ids
+
+# Get the current session id
+fn cli_current_session() -> text:
+    CLI_CURRENT_SESSION
+
+# Get the current session info, or nil
+fn cli_current_session_info() -> Option<CliSessionInfo>:
+    for s in CLI_SESSIONS:
+        if s.id == CLI_CURRENT_SESSION:
+            return Some(s)
+    nil
+
+# Execute a t32rem command against the given session
+fn cli_run_t32rem(session: CliSessionInfo, cmd: text) -> Result<text, text>:
+    val t32rem = session.t32rem_path
+    if t32rem == "":
+        return Err("t32rem not found - install TRACE32 or set T32_PATH")
+    val full_cmd = "{t32rem} {session.host} port={session.port} {cmd}"
+    var stdout = ""
+    var stderr = ""
+    var rc: i64 = 0
+    (stdout, stderr, rc) = rt_process_run("/bin/sh", ["-c", full_cmd + " < /dev/null"])
+    if rc != 0:
+        return Err("t32rem error (exit {rc}): {stderr.trim()}")
+    Ok(stdout.trim())

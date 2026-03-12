@@ -1,0 +1,371 @@
+# T32 MCP — Action and field tool handlers
+# Handles: action_invoke, field_get, field_set, screenshot, history_tail,
+#          resources_list, resource_read, dispatch_tool
+
+use app.t32_cli.error_codes.{T4050, T4082, T4090, t32_err_action_not_found, t32_err_missing_param, t32_err_no_session_mcp, t32_err_unknown_tool, t32_err_missing_tool_name, t32_err_resource_not_found}
+
+# --- Action/field state ---
+# Field state is stored per-session in a flat Dict<text, text>
+# keyed as "session_id:field_key"
+
+var MCP_T32_FIELD_STATE: [text] = []
+var MCP_T32_FIELD_VALUES: [text] = []
+
+fn t32_field_state_get(session_id: text, field_key: text) -> text:
+    val lookup = session_id + ":" + field_key
+    var idx = 0
+    for k in MCP_T32_FIELD_STATE:
+        if k == lookup:
+            return MCP_T32_FIELD_VALUES[idx]
+        idx = idx + 1
+    ""
+
+fn t32_field_state_set(session_id: text, field_key: text, value: text):
+    val lookup = session_id + ":" + field_key
+    var idx = 0
+    for k in MCP_T32_FIELD_STATE:
+        if k == lookup:
+            MCP_T32_FIELD_VALUES[idx] = value
+            return
+        idx = idx + 1
+    MCP_T32_FIELD_STATE = MCP_T32_FIELD_STATE + [lookup]
+    MCP_T32_FIELD_VALUES = MCP_T32_FIELD_VALUES + [value]
+
+# --- Helpers for error suggestions ---
+
+fn t32_key_before_pipe(entry: text) -> text:
+    var i = 0
+    while i < entry.len():
+        if entry[i] == "|":
+            return entry.slice(0, i)
+        i = i + 1
+    entry
+
+fn t32_mcp_action_keys() -> [text]:
+    val catalog = t32_get_window_catalog()
+    var keys: [text] = []
+    for entry in catalog:
+        val wkey = t32_key_before_pipe(entry)
+        val actions = t32_get_window_actions(wkey)
+        for aentry in actions:
+            keys.push(t32_key_before_pipe(aentry))
+    keys
+
+fn t32_mcp_session_ids() -> [text]:
+    var ids: [text] = []
+    for s in MCP_T32_SESSIONS:
+        ids.push(s.id)
+    ids
+
+# --- Tool handlers ---
+
+fn handle_t32_action_invoke(id: text, body: text) -> text:
+    val action_key = t32_extract_field(body, "action_key")
+    val args = t32_extract_field(body, "args")
+    if action_key == "":
+        return t32_make_tool_error(id, -32602, t32_err_missing_param("action_key", "t32_action_invoke", "t32_action_invoke(action_key: \"<key>\", args: \"<args>\")", "t32_action_invoke(action_key: \"set_break\", args: \"main\")"))
+    val session_opt = t32_find_current_session()
+    match session_opt:
+        nil: return t32_make_tool_error(id, -32602, t32_err_no_session_mcp())
+        Some(session):
+            # Search for action in all window catalogs
+            val catalog = t32_get_window_catalog()
+            var found_template = ""
+            var found_label = ""
+            var found_type = ""
+            for entry in catalog:
+                var key = ""
+                var title = ""
+                var kind = ""
+                var open_cmd = ""
+                var capture_cmd = ""
+                (key, title, kind, open_cmd, capture_cmd) = t32_parse_catalog_entry(entry)
+                val action_entries = t32_get_window_actions(key)
+                for aentry in action_entries:
+                    var aparts: [text] = []
+                    var acurrent: [text] = []
+                    for ch in aentry:
+                        if ch == "|":
+                            aparts.push(acurrent.join(""))
+                            acurrent = []
+                        else:
+                            acurrent.push(ch)
+                    aparts.push(acurrent.join(""))
+                    var akey = ""
+                    var alabel = ""
+                    var atype = ""
+                    var atemplate = ""
+                    var aidx = 0
+                    for ap in aparts:
+                        if aidx == 0:
+                            akey = ap
+                        elif aidx == 1:
+                            alabel = ap
+                        elif aidx == 2:
+                            atype = ap
+                        elif aidx == 3:
+                            atemplate = ap
+                        aidx = aidx + 1
+                    if akey == action_key:
+                        found_template = atemplate
+                        found_label = alabel
+                        found_type = atype
+            if found_template == "":
+                return t32_make_tool_error(id, -32602, t32_err_action_not_found(action_key, t32_mcp_action_keys()))
+            # Substitute args (%0, %1, ...) with provided arguments
+            var final_cmd = found_template
+            if args != "":
+                final_cmd = final_cmd.replace("%0", args)
+            var stdout = ""
+            var rc: i64 = 0
+            (stdout, rc) = t32_run_remote(session, final_cmd)
+            t32_add_history("action:" + action_key + " " + final_cmd, stdout.trim(), session.id, MCP_T32_CURRENT_CORE)
+            if rc != 0 and rc != -1:
+                return t32_make_tool_error(id, -32000, "Action failed (exit " + str(rc) + "): " + stdout.trim())
+            if rc == -1:
+                return t32_make_tool_error(id, -32000, stdout.trim())
+            var r = t32_LB()
+            r = r + t32_jp("action_key", t32_js(action_key))
+            r = r + "," + t32_jp("label", t32_js(found_label))
+            r = r + "," + t32_jp("command", t32_js(final_cmd))
+            r = r + "," + t32_jp("output", t32_js(stdout.trim()))
+            r = r + "," + t32_jp("status", t32_js("ok"))
+            r = r + t32_RB()
+            return t32_make_tool_result(id, r)
+
+fn handle_t32_field_get(id: text, body: text) -> text:
+    val field_key = t32_extract_field(body, "field_key")
+    if field_key == "":
+        return t32_make_tool_error(id, -32602, t32_err_missing_param("field_key", "t32_field_get", "t32_field_get(field_key: \"<key>\")", "t32_field_get(field_key: \"symbol\")"))
+    val session_id = MCP_T32_CURRENT_SESSION
+    if session_id == "":
+        return t32_make_tool_error(id, -32602, t32_err_no_session_mcp())
+    val value = t32_field_state_get(session_id, field_key)
+    var r = t32_LB()
+    r = r + t32_jp("field_key", t32_js(field_key))
+    r = r + "," + t32_jp("value", t32_js(value))
+    r = r + "," + t32_jp("session_id", t32_js(session_id))
+    r = r + t32_RB()
+    t32_make_tool_result(id, r)
+
+fn handle_t32_field_set(id: text, body: text) -> text:
+    val field_key = t32_extract_field(body, "field_key")
+    val value = t32_extract_field(body, "value")
+    if field_key == "" or value == "":
+        return t32_make_tool_error(id, -32602, t32_err_missing_param("field_key, value", "t32_field_set", "t32_field_set(field_key: \"<key>\", value: \"<value>\")", "t32_field_set(field_key: \"symbol\", value: \"main\")"))
+    val session_id = MCP_T32_CURRENT_SESSION
+    if session_id == "":
+        return t32_make_tool_error(id, -32602, t32_err_no_session_mcp())
+    t32_field_state_set(session_id, field_key, value)
+    var r = t32_LB()
+    r = r + t32_jp("field_key", t32_js(field_key))
+    r = r + "," + t32_jp("value", t32_js(value))
+    r = r + "," + t32_jp("session_id", t32_js(session_id))
+    r = r + "," + t32_jp("status", t32_js("ok"))
+    r = r + t32_RB()
+    t32_make_tool_result(id, r)
+
+fn handle_t32_screenshot(id: text, body: text) -> text:
+    val window_key = t32_extract_field(body, "window")
+    val output_path = t32_extract_field(body, "output_path")
+    if window_key == "":
+        return t32_make_tool_error(id, -32602, t32_err_missing_param("window", "t32_screenshot", "t32_screenshot(window: \"<key>\")", "t32_screenshot(window: \"register\")"))
+    val session_opt = t32_find_current_session()
+    match session_opt:
+        nil: return t32_make_tool_error(id, -32602, t32_err_no_session_mcp())
+        Some(session):
+            var out_file = output_path
+            if out_file == "":
+                out_file = "/tmp/t32_" + window_key + ".bmp"
+            # Use TRACE32 SCREEN.DUMP command
+            val dump_cmd = "WinPOS 0. 0. 80. 40. ,, " + window_key
+            var stdout1 = ""
+            var rc1: i64 = 0
+            (stdout1, rc1) = t32_run_remote(session, dump_cmd)
+            val screen_cmd = "SCREEN.DUMP " + out_file
+            var stdout2 = ""
+            var rc2: i64 = 0
+            (stdout2, rc2) = t32_run_remote(session, screen_cmd)
+            t32_add_history("screenshot " + window_key + " -> " + out_file, "ok", session.id, MCP_T32_CURRENT_CORE)
+            if rc2 != 0 and rc2 != -1:
+                return t32_make_tool_error(id, -32000, "Screenshot failed: " + stdout2.trim())
+            if rc2 == -1:
+                return t32_make_tool_error(id, -32000, stdout2.trim())
+            var r = t32_LB()
+            r = r + t32_jp("window", t32_js(window_key))
+            r = r + "," + t32_jp("output_path", t32_js(out_file))
+            r = r + "," + t32_jp("status", t32_js("ok"))
+            r = r + t32_RB()
+            return t32_make_tool_result(id, r)
+
+fn handle_t32_history_tail(id: text, body: text) -> text:
+    val count_str = t32_extract_field(body, "count")
+    var count: i64 = 20
+    if count_str != "":
+        count = int(count_str)
+        if count < 1:
+            count = 20
+    var total: i64 = 0
+    for _h in MCP_T32_HISTORY:
+        total = total + 1
+    var start_idx: i64 = 0
+    if total > count:
+        start_idx = total - count
+    var arr = t32_SB_L()
+    var first = true
+    var idx: i64 = 0
+    for h in MCP_T32_HISTORY:
+        if idx >= start_idx:
+            if not first:
+                arr = arr + ","
+            first = false
+            var obj = t32_LB()
+            obj = obj + t32_jp("command", t32_js(h.command))
+            obj = obj + "," + t32_jp("result", t32_js(h.result))
+            obj = obj + "," + t32_jp("session_id", t32_js(h.session_id))
+            obj = obj + "," + t32_jp("core_id", t32_js(h.core_id))
+            obj = obj + t32_RB()
+            arr = arr + obj
+        idx = idx + 1
+    arr = arr + t32_SB_R()
+    t32_make_tool_result(id, arr)
+
+# --- Resources ---
+
+fn t32_make_resources_list(id: text) -> text:
+    var r1 = t32_LB()
+    r1 = r1 + t32_jp("uri", t32_js("t32:///sessions"))
+    r1 = r1 + "," + t32_jp("name", t32_js("T32 Session Manifest"))
+    r1 = r1 + "," + t32_jp("description", t32_js("List of all TRACE32 sessions and their state"))
+    r1 = r1 + "," + t32_jp("mimeType", t32_js("application/json"))
+    r1 = r1 + t32_RB()
+    var r2 = t32_LB()
+    r2 = r2 + t32_jp("uri", t32_js("t32:///windows"))
+    r2 = r2 + "," + t32_jp("name", t32_js("T32 Window Catalog"))
+    r2 = r2 + "," + t32_jp("description", t32_js("Available TRACE32 windows and their metadata"))
+    r2 = r2 + "," + t32_jp("mimeType", t32_js("application/json"))
+    r2 = r2 + t32_RB()
+    var r3 = t32_LB()
+    r3 = r3 + t32_jp("uri", t32_js("t32:///history"))
+    r3 = r3 + "," + t32_jp("name", t32_js("T32 Command History"))
+    r3 = r3 + "," + t32_jp("description", t32_js("Recent TRACE32 command history"))
+    r3 = r3 + "," + t32_jp("mimeType", t32_js("application/json"))
+    r3 = r3 + t32_RB()
+    val resources = t32_SB_L() + r1 + "," + r2 + "," + r3 + t32_SB_R()
+    val result = t32_jo1(t32_jp("resources", resources))
+    t32_make_json_result(id, result)
+
+fn t32_handle_resource_read(id: text, body: text) -> text:
+    val uri = t32_extract_nested(body, "uri")
+    if uri == "":
+        return t32_make_error(id, -32602, "Missing required parameter: uri")
+    if uri == "t32:///sessions":
+        # Return sessions as JSON
+        var arr = t32_SB_L()
+        var first = true
+        for s in MCP_T32_SESSIONS:
+            if not first:
+                arr = arr + ","
+            first = false
+            var obj = t32_LB()
+            obj = obj + t32_jp("id", t32_js(s.id))
+            obj = obj + "," + t32_jp("host", t32_js(s.host))
+            obj = obj + "," + t32_jp("port", str(s.port))
+            obj = obj + "," + t32_jp("architecture", t32_js(s.architecture))
+            var conn_str = "false"
+            if s.connected:
+                conn_str = "true"
+            obj = obj + "," + t32_jp("connected", conn_str)
+            obj = obj + t32_RB()
+            arr = arr + obj
+        arr = arr + t32_SB_R()
+        val rc = t32_LB()
+        val content = rc + t32_jp("uri", t32_js(uri)) + "," + t32_jp("mimeType", t32_js("application/json")) + "," + t32_jp("text", t32_js(t32_escape_json(arr))) + t32_RB()
+        val result = t32_jo1(t32_jp("contents", t32_SB_L() + content + t32_SB_R()))
+        return t32_make_json_result(id, result)
+    if uri == "t32:///windows":
+        # Return window catalog as JSON
+        val catalog = t32_get_window_catalog()
+        var arr = t32_SB_L()
+        var first = true
+        for entry in catalog:
+            var key = ""
+            var title = ""
+            var kind = ""
+            var open_cmd = ""
+            var capture_cmd = ""
+            (key, title, kind, open_cmd, capture_cmd) = t32_parse_catalog_entry(entry)
+            if not first:
+                arr = arr + ","
+            first = false
+            var obj = t32_LB()
+            obj = obj + t32_jp("window_key", t32_js(key))
+            obj = obj + "," + t32_jp("title", t32_js(title))
+            obj = obj + "," + t32_jp("kind", t32_js(kind))
+            obj = obj + t32_RB()
+            arr = arr + obj
+        arr = arr + t32_SB_R()
+        val rc = t32_LB()
+        val content = rc + t32_jp("uri", t32_js(uri)) + "," + t32_jp("mimeType", t32_js("application/json")) + "," + t32_jp("text", t32_js(t32_escape_json(arr))) + t32_RB()
+        val result = t32_jo1(t32_jp("contents", t32_SB_L() + content + t32_SB_R()))
+        return t32_make_json_result(id, result)
+    if uri == "t32:///history":
+        # Reuse history_tail logic
+        return handle_t32_history_tail(id, body)
+    t32_make_error(id, -32002, t32_err_resource_not_found(uri))
+
+# --- Master dispatcher ---
+
+fn t32_dispatch_tool(id: text, body: text) -> text:
+    val tool_name = t32_extract_nested(body, "name")
+    val args_raw = t32_extract_field_raw(body, "arguments")
+    if tool_name == "":
+        return t32_make_error(id, -32602, t32_err_missing_tool_name())
+
+    # Session tools
+    if tool_name == "t32_sessions_list":
+        return handle_t32_sessions_list(id, args_raw)
+    elif tool_name == "t32_session_open":
+        return handle_t32_session_open(id, args_raw)
+    elif tool_name == "t32_session_resume":
+        return handle_t32_session_resume(id, args_raw)
+    elif tool_name == "t32_session_close":
+        return handle_t32_session_close(id, args_raw)
+    elif tool_name == "t32_core_list":
+        return handle_t32_core_list(id, args_raw)
+    elif tool_name == "t32_core_select":
+        return handle_t32_core_select(id, args_raw)
+    elif tool_name == "t32_cmd_run":
+        return handle_t32_cmd_run(id, args_raw)
+    elif tool_name == "t32_cmm_run":
+        return handle_t32_cmm_run(id, args_raw)
+    elif tool_name == "t32_eval":
+        return handle_t32_eval(id, args_raw)
+
+    # Window tools
+    elif tool_name == "t32_window_list":
+        return handle_t32_window_list(id, args_raw)
+    elif tool_name == "t32_window_open":
+        return handle_t32_window_open(id, args_raw)
+    elif tool_name == "t32_window_capture":
+        return handle_t32_window_capture(id, args_raw)
+    elif tool_name == "t32_window_describe":
+        return handle_t32_window_describe(id, args_raw)
+    elif tool_name == "t32_screenshot":
+        return handle_t32_screenshot(id, args_raw)
+
+    # Action/Field tools
+    elif tool_name == "t32_action_invoke":
+        return handle_t32_action_invoke(id, args_raw)
+    elif tool_name == "t32_field_get":
+        return handle_t32_field_get(id, args_raw)
+    elif tool_name == "t32_field_set":
+        return handle_t32_field_set(id, args_raw)
+    elif tool_name == "t32_history_tail":
+        return handle_t32_history_tail(id, args_raw)
+    elif tool_name == "t32_resources_list":
+        return t32_make_resources_list(id)
+    elif tool_name == "t32_resource_read":
+        return t32_handle_resource_read(id, body)
+
+    t32_make_error(id, -32602, t32_err_unknown_tool(tool_name))

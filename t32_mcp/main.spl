@@ -1,0 +1,106 @@
+# T32 MCP Server — TRACE32 debug session control via MCP protocol
+#
+# Tools: 20 tools for session management, window capture, action invocation
+# Protocol: MCP 2025-06-18 (Content-Length framing + JSON-Lines auto-detect)
+#
+# Architecture: Zero stdlib imports, inline JSON helpers, direct extern fn calls
+#
+# Split into multiple files:
+#   - json_helpers.spl   — JSON helpers, tool result helpers, shell helpers
+#   - protocol.spl       — Protocol I/O, initialize, tools list, schemas
+#   - session_tools.spl  — Session/core/command tool handlers
+#   - window_tools.spl   — Window tool handlers
+#   - action_tools.spl   — Action/field/history/resource handlers + dispatcher
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_env_get(name: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+
+use app.mcp_t32.json_helpers
+use app.mcp_t32.protocol
+use app.mcp_t32.session_tools
+use app.mcp_t32.window_tools
+use app.mcp_t32.action_tools
+
+val T32_SERVER_NAME = "simple-mcp-t32"
+val T32_SERVER_VERSION = "1.0.0"
+val T32_NL = "\n"
+
+# Protocol auto-detection
+var T32_USE_JSON_LINES = false
+
+# Caches
+var T32_TOOLS_CACHE = ""
+var T32_INIT_CACHE = ""
+
+# --- Module state for T32 sessions ---
+
+class McpT32Session:
+    id: text
+    host: text
+    port: i64
+    intercom_name: text
+    architecture: text
+    connected: bool
+    cores: [McpT32Core]
+
+class McpT32Core:
+    core_id: text
+    label: text
+    instance_binding: text
+
+class McpT32HistoryItem:
+    command: text
+    result: text
+    session_id: text
+    core_id: text
+
+var MCP_T32_SESSIONS: [McpT32Session] = []
+var MCP_T32_CURRENT_SESSION = ""
+var MCP_T32_CURRENT_CORE = ""
+var MCP_T32_HISTORY: [McpT32HistoryItem] = []
+
+# --- Entry point ---
+
+fn t32_mcp_main():
+    t32_start_server()
+
+fn t32_start_server():
+    var running = true
+    for _iter in range(0, 999999):
+        if not running:
+            return
+        var msg = t32_read_stdin_message()
+        if msg == "":
+            running = false
+        else:
+            var method = t32_extract_field(msg, "method")
+            var id = t32_extract_id(msg)
+            var response = ""
+            if method == "initialize":
+                response = t32_make_init_response(id)
+            elif method == "initialized" or method == "notifications/initialized":
+                response = ""
+            elif method == "shutdown":
+                response = t32_make_json_result(id, "null")
+            elif method == "tools/list":
+                response = t32_make_tools_list(id)
+            elif method == "tools/call":
+                response = t32_dispatch_tool(id, msg)
+            elif method == "resources/list":
+                response = t32_make_resources_list(id)
+            elif method == "resources/read":
+                response = t32_handle_resource_read(id, msg)
+            elif method == "ping":
+                response = t32_make_json_result(id, t32_LB() + t32_RB())
+            elif method == "notifications/cancelled" or method == "notifications/roots/list_changed":
+                response = ""
+            else:
+                if id != "" and id != "null":
+                    response = t32_make_error(id, -32601, "Method not found: " + method)
+            if response != "":
+                t32_write_stdout_message(response)
+
+t32_mcp_main()

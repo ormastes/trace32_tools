@@ -1,0 +1,229 @@
+# T32 MCP Protocol — I/O, initialize, tools list, schemas
+# Protocol: MCP 2025-06-18 (Content-Length framing + JSON-Lines auto-detect)
+
+# --- Protocol I/O ---
+
+fn t32_read_stdin_message() -> text:
+    var line = input()
+    if line == "":
+        return ""
+    if line.ends_with("\r"):
+        line = line.substring(0, line.len() - 1)
+    if line.starts_with(t32_LB()):
+        T32_USE_JSON_LINES = true
+        return line
+    if line.starts_with("Content-Length:"):
+        var len_str = line.replace("Content-Length:", "")
+        len_str = len_str.trim()
+        val content_length = int(len_str)
+        if content_length == 0:
+            return ""
+        input()
+        var body = input()
+        return body
+    ""
+
+fn t32_write_stdout_message(body: text):
+    if T32_USE_JSON_LINES:
+        print_raw(body + T32_NL)
+    else:
+        val byte_count = t32_text_byte_len(body)
+        var header = "Content-Length: " + str(byte_count) + "\r" + T32_NL + "\r" + T32_NL
+        print_raw(header)
+        print_raw(body)
+
+# --- Initialize response ---
+
+fn t32_make_init_response(id: text) -> text:
+    if T32_INIT_CACHE != "":
+        return t32_make_json_result(id, T32_INIT_CACHE)
+    var tools_cap = t32_jo1(t32_jp("listChanged", "true"))
+    var resources_cap = t32_jo2(t32_jp("subscribe", "false"), t32_jp("listChanged", "true"))
+    var caps = t32_jo2(
+        t32_jp("tools", tools_cap),
+        t32_jp("resources", resources_cap)
+    )
+    val server_info = t32_jo3(
+        t32_jp("name", t32_js(T32_SERVER_NAME)),
+        t32_jp("version", t32_js(T32_SERVER_VERSION)),
+        t32_jp("instructions", t32_js("TRACE32 debug session control via MCP protocol. 20 tools for session management, window capture, action invocation, and field manipulation."))
+    )
+    val result = t32_jo3(
+        t32_jp("protocolVersion", t32_js("2025-06-18")),
+        t32_jp("capabilities", caps),
+        t32_jp("serverInfo", server_info)
+    )
+    T32_INIT_CACHE = result
+    t32_make_json_result(id, result)
+
+# --- Tools list (20 T32 tools) ---
+
+fn t32_make_tools_list(id: text) -> text:
+    if T32_TOOLS_CACHE != "":
+        return t32_make_json_result(id, T32_TOOLS_CACHE)
+
+    var tool_parts: [text] = []
+
+    # Session tools (9)
+    tool_parts.push(t32_make_tool_schema("t32_sessions_list", "List all TRACE32 sessions"))
+    tool_parts.push(t32_make_tool_schema("t32_session_open", "Open new TRACE32 session (connect to PowerView instance)"))
+    tool_parts.push(t32_make_tool_schema("t32_session_resume", "Resume/switch to existing session"))
+    tool_parts.push(t32_make_tool_schema("t32_session_close", "Close TRACE32 session"))
+    tool_parts.push(t32_make_tool_schema("t32_core_list", "List cores in current session"))
+    tool_parts.push(t32_make_tool_schema("t32_core_select", "Select active core in multi-core session"))
+    tool_parts.push(t32_make_tool_schema("t32_cmd_run", "Run raw PRACTICE command on TRACE32"))
+    tool_parts.push(t32_make_tool_schema("t32_cmm_run", "Run CMM script on TRACE32"))
+    tool_parts.push(t32_make_tool_schema("t32_eval", "Evaluate TRACE32 expression"))
+
+    # Window tools (5)
+    tool_parts.push(t32_make_tool_schema("t32_window_list", "List available TRACE32 windows from catalog"))
+    tool_parts.push(t32_make_tool_schema("t32_window_open", "Open a TRACE32 window"))
+    tool_parts.push(t32_make_tool_schema("t32_window_capture", "Capture TRACE32 window content as text"))
+    tool_parts.push(t32_make_tool_schema("t32_window_describe", "Describe window actions and fields"))
+    tool_parts.push(t32_make_tool_schema("t32_screenshot", "Take screenshot of TRACE32 window"))
+
+    # Action/Field tools (6)
+    tool_parts.push(t32_make_tool_schema("t32_action_invoke", "Invoke a window action"))
+    tool_parts.push(t32_make_tool_schema("t32_field_get", "Get field value from session state"))
+    tool_parts.push(t32_make_tool_schema("t32_field_set", "Set field value in session state"))
+    tool_parts.push(t32_make_tool_schema("t32_history_tail", "Get recent command history"))
+    tool_parts.push(t32_make_tool_schema("t32_resources_list", "List available TRACE32 MCP resources"))
+    tool_parts.push(t32_make_tool_schema("t32_resource_read", "Read a specific TRACE32 resource by URI"))
+
+    val tools = t32_SB_L() + tool_parts.join(",") + t32_SB_R()
+    val result = t32_jo1(t32_jp("tools", tools))
+    T32_TOOLS_CACHE = result
+    t32_make_json_result(id, result)
+
+# --- Tool schema builder ---
+
+fn t32_make_tool_schema(name: text, description: text) -> text:
+    var props = t32_LB() + t32_RB()
+    var req = "[]"
+
+    # Session tools
+    if name == "t32_sessions_list":
+        props = t32_LB() + t32_RB()
+    elif name == "t32_session_open":
+        var p = t32_LB()
+        p = p + t32_jp("host", t32_jo2(t32_jp("type", t32_js("string")), t32_jp("description", t32_js("TRACE32 host (e.g. localhost)"))))
+        p = p + "," + t32_jp("port", t32_jo2(t32_jp("type", t32_js("string")), t32_jp("description", t32_js("TRACE32 API port (e.g. 20000)"))))
+        p = p + "," + t32_jp("name", t32_jo2(t32_jp("type", t32_js("string")), t32_jp("description", t32_js("INTERCOM name of the instance"))))
+        p = p + "," + t32_jp("architecture", t32_jo2(t32_jp("type", t32_js("string")), t32_jp("description", t32_js("Target architecture (e.g. ARM, RISCV, TC3xx)"))))
+        p = p + t32_RB()
+        req = "[" + t32_js("host") + "," + t32_js("port") + "]"
+    elif name == "t32_session_resume":
+        props = t32_jo1(t32_jp("session_id", t32_jo2(t32_jp("type", t32_js("string")), t32_jp("description", t32_js("Session ID to resume")))))
+        req = "[" + t32_js("session_id") + "]"
+    elif name == "t32_session_close":
+        props = t32_jo1(t32_jp("session_id", t32_jo2(t32_jp("type", t32_js("string")), t32_jp("description", t32_js("Session ID to close")))))
+        req = "[" + t32_js("session_id") + "]"
+    elif name == "t32_core_list":
+        props = t32_jo1(t32_jp("session_id", t32_jo2(t32_jp("type", t32_js("string")), t32_jp("description", t32_js("Session ID (optional, uses current)")))))
+    elif name == "t32_core_select":
+        props = t32_jo2(
+            t32_jp("session_id", t32_jo2(t32_jp("type", t32_js("string")), t32_jp("description", t32_js("Session ID (optional, uses current)")))),
+            t32_jp("core_id", t32_jo2(t32_jp("type", t32_js("string")), t32_jp("description", t32_js("Core ID to select"))))
+        )
+        req = "[" + t32_js("core_id") + "]"
+    elif name == "t32_cmd_run":
+        props = t32_jo2(
+            t32_jp("command", t32_jo2(t32_jp("type", t32_js("string")), t32_jp("description", t32_js("PRACTICE command to execute")))),
+            t32_jp("session_id", t32_jo2(t32_jp("type", t32_js("string")), t32_jp("description", t32_js("Session ID (optional, uses current)"))))
+        )
+        req = "[" + t32_js("command") + "]"
+    elif name == "t32_cmm_run":
+        var p = t32_LB()
+        p = p + t32_jp("script", t32_jo2(t32_jp("type", t32_js("string")), t32_jp("description", t32_js("CMM script path or inline script"))))
+        p = p + "," + t32_jp("wait", t32_jo2(t32_jp("type", t32_js("string")), t32_jp("description", t32_js("If 'true', poll PRACTICE.STATE() until script completes"))))
+        p = p + "," + t32_jp("timeout", t32_jo2(t32_jp("type", t32_js("string")), t32_jp("description", t32_js("Poll timeout in ms (default 30000)"))))
+        p = p + "," + t32_jp("session_id", t32_jo2(t32_jp("type", t32_js("string")), t32_jp("description", t32_js("Session ID (optional, uses current)"))))
+        p = p + t32_RB()
+        props = p
+        req = "[" + t32_js("script") + "]"
+    elif name == "t32_eval":
+        props = t32_jo2(
+            t32_jp("expression", t32_jo2(t32_jp("type", t32_js("string")), t32_jp("description", t32_js("TRACE32 expression to evaluate")))),
+            t32_jp("session_id", t32_jo2(t32_jp("type", t32_js("string")), t32_jp("description", t32_js("Session ID (optional, uses current)"))))
+        )
+        req = "[" + t32_js("expression") + "]"
+
+    # Window tools
+    elif name == "t32_window_list":
+        props = t32_LB() + t32_RB()
+    elif name == "t32_window_open":
+        props = t32_jo1(t32_jp("window", t32_jo2(t32_jp("type", t32_js("string")), t32_jp("description", t32_js("Window key to open (e.g. data_list, register)")))))
+        req = "[" + t32_js("window") + "]"
+    elif name == "t32_window_capture":
+        props = t32_jo1(t32_jp("window", t32_jo2(t32_jp("type", t32_js("string")), t32_jp("description", t32_js("Window key to capture")))))
+        req = "[" + t32_js("window") + "]"
+    elif name == "t32_window_describe":
+        props = t32_jo1(t32_jp("window", t32_jo2(t32_jp("type", t32_js("string")), t32_jp("description", t32_js("Window key to describe")))))
+        req = "[" + t32_js("window") + "]"
+    elif name == "t32_screenshot":
+        props = t32_jo2(
+            t32_jp("window", t32_jo2(t32_jp("type", t32_js("string")), t32_jp("description", t32_js("Window key to screenshot")))),
+            t32_jp("output_path", t32_jo2(t32_jp("type", t32_js("string")), t32_jp("description", t32_js("Output file path for screenshot"))))
+        )
+        req = "[" + t32_js("window") + "]"
+
+    # Action/Field tools
+    elif name == "t32_action_invoke":
+        props = t32_jo2(
+            t32_jp("action_key", t32_jo2(t32_jp("type", t32_js("string")), t32_jp("description", t32_js("Action key to invoke")))),
+            t32_jp("args", t32_jo2(t32_jp("type", t32_js("string")), t32_jp("description", t32_js("Optional arguments for action"))))
+        )
+        req = "[" + t32_js("action_key") + "]"
+    elif name == "t32_field_get":
+        props = t32_jo1(t32_jp("field_key", t32_jo2(t32_jp("type", t32_js("string")), t32_jp("description", t32_js("Field key to get")))))
+        req = "[" + t32_js("field_key") + "]"
+    elif name == "t32_field_set":
+        props = t32_jo2(
+            t32_jp("field_key", t32_jo2(t32_jp("type", t32_js("string")), t32_jp("description", t32_js("Field key to set")))),
+            t32_jp("value", t32_jo2(t32_jp("type", t32_js("string")), t32_jp("description", t32_js("New value for the field"))))
+        )
+        req = "[" + t32_js("field_key") + "," + t32_js("value") + "]"
+    elif name == "t32_history_tail":
+        props = t32_jo1(t32_jp("count", t32_jo2(t32_jp("type", t32_js("string")), t32_jp("description", t32_js("Number of history entries to return (default 20)")))))
+    elif name == "t32_resources_list":
+        props = t32_LB() + t32_RB()
+    elif name == "t32_resource_read":
+        props = t32_jo1(t32_jp("uri", t32_jo2(t32_jp("type", t32_js("string")), t32_jp("description", t32_js("Resource URI to read")))))
+        req = "[" + t32_js("uri") + "]"
+
+    var schema = t32_LB()
+    schema = schema + t32_jp("type", t32_js("object"))
+    schema = schema + "," + t32_jp("properties", props)
+    schema = schema + "," + t32_jp("required", req)
+    schema = schema + t32_RB()
+
+    # Annotations
+    var read_only = "false"
+    var destructive = "false"
+    var idempotent = "true"
+    if (name == "t32_sessions_list" or name == "t32_core_list" or
+        name == "t32_window_list" or name == "t32_window_capture" or
+        name == "t32_window_describe" or name == "t32_field_get" or
+        name == "t32_history_tail" or name == "t32_eval" or
+        name == "t32_resources_list" or name == "t32_resource_read"):
+        read_only = "true"
+    if name == "t32_session_close":
+        destructive = "true"
+    if (name == "t32_cmd_run" or name == "t32_cmm_run" or
+        name == "t32_action_invoke"):
+        idempotent = "false"
+
+    var annotations = t32_LB()
+    annotations = annotations + t32_jp("readOnlyHint", read_only)
+    annotations = annotations + "," + t32_jp("destructiveHint", destructive)
+    annotations = annotations + "," + t32_jp("idempotentHint", idempotent)
+    annotations = annotations + "," + t32_jp("openWorldHint", "false")
+    annotations = annotations + t32_RB()
+
+    var tool_obj = t32_jo3(
+        t32_jp("name", t32_js(name)),
+        t32_jp("description", t32_js(description)),
+        t32_jp("inputSchema", schema)
+    )
+    tool_obj = tool_obj.substring(0, tool_obj.len() - 1) + "," + t32_jp("annotations", annotations) + t32_RB()
+    tool_obj

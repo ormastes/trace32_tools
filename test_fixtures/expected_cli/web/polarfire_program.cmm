@@ -1,0 +1,55 @@
+; @target: PolarFire SoC
+; @arch: RISC-V
+; @purpose: FPGA programming
+; @requires: JTAG
+; @cli-mode: batch
+; PolarFire SoC FPGA Programming
+; Exercises: PARAMETERS, MKTEMP, UNZIP, JTAG.PROGRAM.JAM, RM
+
+SCREEN.OFF
+
+AREA.Create CLI_OUTPUT
+AREA.Select CLI_OUTPUT
+
+ON ERROR GOSUB error_handler
+
+PARAMETERS &design_file &action
+
+LOCAL &tmpdir &job_file &result
+
+IF "&design_file"==""
+(
+  PRINT "[STATUS] error=no_design_file"
+  ENDDO FALSE()
+)
+
+; Create temp directory and extract design
+MKTEMP &tmpdir
+UNZIP "&design_file" "&tmpdir"
+
+; Program FPGA via JTAG
+&job_file="&tmpdir/design.jam"
+IF OS.FILE("&job_file")
+(
+  JTAG.PROGRAM.JAM "&job_file" /Action=PROGRAM /Define=DO_VERIFY=1
+)
+ELSE
+(
+  PRINT %ERROR "[ERROR] msg=JAM file not found in archive"
+  RM "&tmpdir"
+  ENDDO FALSE()
+)
+
+; Verify
+JTAG.PROGRAM.JAM "&job_file" /Action=VERIFY
+&result=PRACTICE.CALLER.FILE(1)
+PRINT "[STATUS] programmed_from=&result"
+
+; Cleanup
+RM "&tmpdir"
+
+ENDDO TRUE()
+
+error_handler:
+  PRINT "[ERROR] line=" PRACTICE.CALLER.LINE()
+  ENDDO FALSE()

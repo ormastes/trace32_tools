@@ -1,0 +1,150 @@
+# Validate CMM parser on a specific directory group
+# Usage: bin/release/simple .../validate_group.spl <dir> <report_file>
+use cmm_parser.{parse_cmm_source}
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_dir_list(path: text) -> [text]
+extern fn rt_file_write_text(path: text, content: text)
+extern fn sys_get_args() -> [text]
+
+fn to_lower_char(ch: text) -> text:
+    if ch == "A": return "a"
+    if ch == "B": return "b"
+    if ch == "C": return "c"
+    if ch == "D": return "d"
+    if ch == "E": return "e"
+    if ch == "F": return "f"
+    if ch == "G": return "g"
+    if ch == "H": return "h"
+    if ch == "I": return "i"
+    if ch == "J": return "j"
+    if ch == "K": return "k"
+    if ch == "L": return "l"
+    if ch == "M": return "m"
+    if ch == "N": return "n"
+    if ch == "O": return "o"
+    if ch == "P": return "p"
+    if ch == "Q": return "q"
+    if ch == "R": return "r"
+    if ch == "S": return "s"
+    if ch == "T": return "t"
+    if ch == "U": return "u"
+    if ch == "V": return "v"
+    if ch == "W": return "w"
+    if ch == "X": return "x"
+    if ch == "Y": return "y"
+    if ch == "Z": return "z"
+    ch
+
+fn to_lower(s: text) -> text:
+    var r = ""
+    var i = 0
+    while i < s.len():
+        r = r + to_lower_char(s[i:i + 1])
+        i = i + 1
+    r
+
+fn is_cmm(name: text) -> bool:
+    if name.len() < 5:
+        return false
+    to_lower(name[name.len() - 4:name.len()]) == ".cmm"
+
+fn starts_with(s: text, prefix: text) -> bool:
+    if prefix.len() > s.len():
+        return false
+    s[0:prefix.len()] == prefix
+
+fn has_dot(name: text) -> bool:
+    var i = 1
+    while i < name.len():
+        if name[i:i + 1] == ".":
+            return true
+        i = i + 1
+    false
+
+fn collect_cmm(root: text) -> [text]:
+    var result: [text] = []
+    var dirs: [text] = [root]
+    var di = 0
+    while di < dirs.len():
+        val dir = dirs[di]
+        di = di + 1
+        val entries = rt_dir_list(dir)
+        var ei = 0
+        while ei < entries.len():
+            val e = entries[ei]
+            if e != "." and e != "..":
+                val full = dir + "/" + e
+                if is_cmm(e):
+                    result = result + [full]
+                if not is_cmm(e) and not has_dot(e):
+                    dirs = dirs + [full]
+            ei = ei + 1
+    result
+
+fn parse_file(path: text) -> text:
+    val content = rt_file_read_text(path) ?? ""
+    if content.len() > 30:
+        val header = to_lower(content[0:30])
+        if starts_with(header, "trace32 encrypted"):
+            return "SKIP"
+    val p = parse_cmm_source(content)
+    if p.errors.len() == 0:
+        return "OK"
+    p.errors[0]
+
+val args = sys_get_args()
+var target = "/opt/t32/demo"
+var report = "doc/report/cmm_validate_all.txt"
+if args.len() > 1:
+    target = args[1]
+if args.len() > 2:
+    report = args[2]
+
+print "Validating CMM files in {target}..."
+val files = collect_cmm(target)
+print "Found {files.len()} files"
+
+var ok_count = 0
+var fail_count = 0
+var skip_count = 0
+var err_lines: [text] = []
+
+var i = 0
+while i < files.len():
+    val result = parse_file(files[i])
+    if result == "OK":
+        ok_count = ok_count + 1
+    if result == "SKIP":
+        skip_count = skip_count + 1
+    if result != "OK" and result != "SKIP":
+        fail_count = fail_count + 1
+        err_lines = err_lines + [files[i] + "|" + result]
+    if i > 0 and i % 20 == 0:
+        print "  {i}/{files.len()} processed ({ok_count} ok, {fail_count} fail)"
+    i = i + 1
+
+val parseable = ok_count + fail_count
+var pct = 0
+if parseable > 0:
+    pct = ok_count * 100 / parseable
+
+# Write report
+var report_text = "# CMM Validate: {target}\n"
+report_text = report_text + "# Total: {files.len()}  OK: {ok_count}  Fail: {fail_count}  Skip: {skip_count}\n"
+report_text = report_text + "# Rate: {pct}% ({ok_count}/{parseable})\n"
+report_text = report_text + "#\n"
+
+var ei = 0
+while ei < err_lines.len():
+    report_text = report_text + err_lines[ei] + "\n"
+    ei = ei + 1
+
+rt_file_write_text(report, report_text)
+
+print ""
+print "=== {target} ==="
+print "Total: {files.len()}  OK: {ok_count}  Fail: {fail_count}  Skip: {skip_count}"
+print "Rate: {pct}% ({ok_count}/{parseable})"
+print "Report: {report}"

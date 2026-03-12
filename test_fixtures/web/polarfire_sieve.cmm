@@ -1,0 +1,81 @@
+; PolarFire SoC RISC-V Sieve Demo with Trace
+; Exercises: ENTRY %LINE, STRing.SCANAndExtract, ELSE IF chains,
+;            ON ERROR continue, Analyzer/TPIU/TRACEPORT commands,
+;            Register.Set /CORE, Data.LOAD.Elf with /Quad /PlusVM /RelPATH,
+;            ~~~~ path prefix, PRIVATE in subroutine, bitwise ops on Data.Long,
+;            PER.Set.simple
+
+ENTRY %LINE &args
+
+LOCAL &elf_file &core_id &trace_mode
+PRIVATE &temp_var
+
+; Parse arguments
+&elf_file=STRing.SCANAndExtract("&args"," ",&rest)
+IF "&elf_file"==""
+(
+  &elf_file="~~~~/../apps/sieve.elf"
+)
+
+ON ERROR continue
+
+SYStem.RESet
+SYStem.CPU MPFS250T
+SYStem.CONFIG.CORE 1. 1.
+SYStem.CONFIG.DEBUGPORTTYPE JTAG
+SYStem.JtagClock 10MHz
+SYStem.Mode Attach
+
+; Load ELF with multiple options
+Data.LOAD.Elf "&elf_file" /Quad /PlusVM /RelPATH
+
+; Set registers per core
+Register.Set /CORE 0. PC main
+Register.Set /CORE 1. PC main
+
+; Check target state
+IF STATE.RUN()
+(
+  Break.direct
+  WAIT !STATE.RUN()
+)
+
+; Configure trace
+Analyzer.RESet
+Analyzer.AutoFocus
+TPIU.PortSize 4
+TRACEPORT.Set CONTINUOUS
+Trace.Method Analyzer
+
+; Bitwise operations on memory
+&temp_var=Data.Long(D:0x10000000)
+&temp_var=&temp_var&0xFF00
+&temp_var=(&temp_var>>8.)&0xFF
+
+; PER access
+PER.Set.simple D:0x20000000 %Long 0x1234
+
+; Complex ELSE IF chain
+IF &core_id==0
+(
+  PRINT "Core 0 selected"
+)
+ELSE IF &core_id==1
+(
+  PRINT "Core 1 selected"
+)
+ELSE IF &core_id==2
+(
+  PRINT "Core 2 selected"
+)
+ELSE
+(
+  PRINT "Unknown core: &core_id"
+)
+
+Go
+WAIT 3s
+Break.direct
+WAIT !STATE.RUN()
+
+ENDDO

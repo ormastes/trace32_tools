@@ -1,0 +1,106 @@
+# CMM (PRACTICE Script) Version Configuration
+# Version-configurable parser settings for the CMM Language Server.
+#
+# CMM grammar changed across T32 releases:
+# - Pre-2012: Base PRACTICE-II command set
+# - 2012+: Added GLOBALON, PRIVATE macro scope
+# - 2013+: Added WRITEB (binary file I/O), ENCRYPTPER
+#
+# Reference: doc/research/cmm_grammar_research_2026-03-10.md (Section 6)
+
+export CmmVersion, CmmParserConfig, default_config, config_for_version
+export has_feature, version_warning, version_name
+
+# ---------------------------------------------------------------------------
+# Version enumeration
+# ---------------------------------------------------------------------------
+
+enum CmmVersion:
+    V2012           # Pre-2012: no GLOBALON, no PRIVATE
+    V2013           # 2012-2013: added GLOBALON, PRIVATE, WRITEB, ENCRYPTPER
+    Latest          # Latest known version (default)
+
+# ---------------------------------------------------------------------------
+# Parser configuration
+# ---------------------------------------------------------------------------
+
+struct CmmParserConfig:
+    version: CmmVersion
+    radix_mode: text         # "classic", "hex", "decimal" — affects number parsing
+    strict_mode: bool        # warn on deprecated features
+    t32_install_path: text   # path to T32 installation for command DB lookup
+
+# Create a default configuration targeting the latest version
+fn default_config() -> CmmParserConfig:
+    CmmParserConfig(
+        version: CmmVersion.Latest,
+        radix_mode: "hex",
+        strict_mode: false,
+        t32_install_path: "/opt/t32"
+    )
+
+# Create a configuration for a named version string
+#
+# Accepts "2012", "2013", or "latest" (anything else defaults to Latest).
+fn config_for_version(version_str: text) -> CmmParserConfig:
+    var cfg = default_config()
+    if version_str == "2012":
+        cfg.version = CmmVersion.V2012
+    else:
+        if version_str == "2013":
+            cfg.version = CmmVersion.V2013
+    # "latest" or unrecognised strings keep CmmVersion.Latest
+    cfg
+
+# ---------------------------------------------------------------------------
+# Feature availability queries
+# ---------------------------------------------------------------------------
+
+# Check if a feature keyword is available in the configured version.
+#
+# Features checked by name:
+#   "GLOBALON"    — global event handlers (2012+)
+#   "PRIVATE"     — private macro scope (2012+)
+#   "WRITEB"      — binary file write (2013+)
+#   "ENCRYPTPER"  — PER file encryption (2013+)
+fn has_feature(config: CmmParserConfig, feature: text) -> bool:
+    match config.version:
+        case CmmVersion.V2012:
+            # Pre-2012: no GLOBALON, PRIVATE, WRITEB, ENCRYPTPER
+            if (feature == "GLOBALON" or feature == "PRIVATE"
+                or feature == "WRITEB" or feature == "ENCRYPTPER"):
+                return false
+            true
+        case CmmVersion.V2013:
+            # 2013 has GLOBALON and PRIVATE but check for post-2013 features
+            true
+        case CmmVersion.Latest:
+            true
+
+# Get a warning message when a feature is used with an incompatible version.
+#
+# Returns nil if the feature is available, or a diagnostic text otherwise.
+fn version_warning(config: CmmParserConfig, feature: text, line: i64) -> text?:
+    if not has_feature(config, feature):
+        val vname = version_name(config.version)
+        return "Line {line}: '{feature}' requires T32 version 2012+ (configured: {vname})"
+    nil
+
+# Human-readable name for a CmmVersion value
+fn version_name(v: CmmVersion) -> text:
+    match v:
+        case CmmVersion.V2012: "2012"
+        case CmmVersion.V2013: "2013"
+        case CmmVersion.Latest: "latest"
+
+# ---------------------------------------------------------------------------
+# Radix mode helpers
+# ---------------------------------------------------------------------------
+
+# Check whether the current radix mode treats bare integers as hex
+fn is_hex_radix(config: CmmParserConfig) -> bool:
+    config.radix_mode == "hex" or config.radix_mode == "classic"
+
+# Check whether the current radix mode treats bare integers as decimal
+fn is_decimal_radix(config: CmmParserConfig) -> bool:
+    config.radix_mode == "decimal"

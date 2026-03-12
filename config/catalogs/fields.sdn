@@ -1,0 +1,62 @@
+# T32 CLI — Field catalog
+# Each entry defines a configurable field for TRACE32 sessions/windows
+
+field symbol
+  label: Symbol Name
+  type: string
+  scope: window
+
+field address
+  label: Memory Address
+  type: hex
+  scope: window
+
+field access_class
+  label: Access Class
+  type: enum
+  scope: session
+
+field display_format
+  label: Display Format
+  type: enum
+  scope: window
+
+field memory_width
+  label: Memory Width
+  type: enum
+  scope: window
+
+field elf_path
+  label: ELF Binary Path
+  type: string
+  scope: session
+
+field module
+  label: Module Name
+  type: string
+  scope: window
+
+field core_name
+  label: Core Name
+  type: string
+  scope: global
+
+field trace_size
+  label: Trace Buffer Size
+  type: int
+  scope: session
+
+field trace_method
+  label: Trace Method
+  type: enum
+  scope: session
+
+field gdb_port
+  label: GDB Server Port
+  type: int
+  scope: session
+
+field coverage_threshold
+  label: Coverage Threshold
+  type: int
+  scope: session

@@ -1,0 +1,424 @@
+# T32 LSP MCP — Tool implementations
+# Each handler receives the request id and raw arguments JSON, returns a JSON response.
+
+use cmm_lsp.cmm_parser.{parse_cmm_source}
+use cmm_lsp.cmm_analyzer.{analyze_program, CmmSymbolKind}
+use cmm_lsp.cmm_commands.{build_command_db, lookup_command, get_completions}
+use cmm_lsp.cmm_diagnostics.{format_diagnostic, severity_text}
+
+# --- cmm_parse: Parse CMM source, return AST summary + errors ---
+
+fn handle_cmm_parse(id: text, args: text) -> text:
+    val source = lsp_extract_field(args, "source")
+    if source == "":
+        return lsp_make_tool_error(id, -32602, "Missing required parameter: source")
+    val program = parse_cmm_source(source)
+    val node_count = program.statements.len()
+    val error_count = program.errors.len()
+
+    # Build errors array
+    var errors_arr = lsp_SB_L()
+    var ei = 0
+    while ei < program.errors.len():
+        if ei > 0:
+            errors_arr = errors_arr + ","
+        errors_arr = errors_arr + lsp_js(program.errors[ei])
+        ei = ei + 1
+    errors_arr = errors_arr + lsp_SB_R()
+
+    val result = lsp_jo3(
+        lsp_jp("node_count", str(node_count)),
+        lsp_jp("error_count", str(error_count)),
+        lsp_jp("errors", errors_arr)
+    )
+    lsp_make_tool_result(id, result)
+
+# --- cmm_diagnostics: Run analyzer, return diagnostics as JSON array ---
+
+fn handle_cmm_diagnostics(id: text, args: text) -> text:
+    val source = lsp_extract_field(args, "source")
+    if source == "":
+        return lsp_make_tool_error(id, -32602, "Missing required parameter: source")
+    val program = parse_cmm_source(source)
+    val analysis = analyze_program(program)
+    val diags = analysis.diagnostics
+
+    var arr = lsp_SB_L()
+    var di = 0
+    while di < diags.len():
+        if di > 0:
+            arr = arr + ","
+        val d = diags[di]
+        val sev = severity_text(d.kind)
+        var obj = lsp_jo4(
+            lsp_jp("severity", lsp_js(sev)),
+            lsp_jp("message", lsp_js(d.message)),
+            lsp_jp("line", str(d.line)),
+            lsp_jp("column", str(d.column))
+        )
+        arr = arr + obj
+        di = di + 1
+    arr = arr + lsp_SB_R()
+
+    val result = lsp_jo2(
+        lsp_jp("count", str(diags.len())),
+        lsp_jp("diagnostics", arr)
+    )
+    lsp_make_tool_result(id, result)
+
+# --- cmm_complete: Get completions at position ---
+
+fn handle_cmm_complete(id: text, args: text) -> text:
+    val source = lsp_extract_field(args, "source")
+    if source == "":
+        return lsp_make_tool_error(id, -32602, "Missing required parameter: source")
+    val line_str = lsp_extract_field(args, "line")
+    val char_str = lsp_extract_field(args, "character")
+    val target_line = int(line_str)
+    val target_char = int(char_str)
+
+    # Extract the word prefix at the given position
+    val lines = split_to_lines(source)
+    var prefix = ""
+    if target_line >= 1 and target_line <= lines.len():
+        val line_text = lines[target_line - 1]
+        prefix = extract_word_at(line_text, target_char)
+
+    # Get completions from the command database
+    val db = build_command_db()
+    val matches = get_completions(db, prefix)
+
+    var arr = lsp_SB_L()
+    var ci = 0
+    while ci < matches.len():
+        if ci > 0:
+            arr = arr + ","
+        val cmd = matches[ci]
+        var obj = lsp_jo3(
+            lsp_jp("label", lsp_js(cmd.full_name)),
+            lsp_jp("kind", lsp_js("command")),
+            lsp_jp("description", lsp_js(cmd.description))
+        )
+        arr = arr + obj
+        ci = ci + 1
+    arr = arr + lsp_SB_R()
+
+    val result = lsp_jo2(
+        lsp_jp("count", str(matches.len())),
+        lsp_jp("completions", arr)
+    )
+    lsp_make_tool_result(id, result)
+
+# --- cmm_hover: Get hover info at position ---
+
+fn handle_cmm_hover(id: text, args: text) -> text:
+    val source = lsp_extract_field(args, "source")
+    if source == "":
+        return lsp_make_tool_error(id, -32602, "Missing required parameter: source")
+    val line_str = lsp_extract_field(args, "line")
+    val char_str = lsp_extract_field(args, "character")
+    val target_line = int(line_str)
+    val target_char = int(char_str)
+
+    # Extract the word at the given position
+    val lines = split_to_lines(source)
+    var word = ""
+    if target_line >= 1 and target_line <= lines.len():
+        val line_text = lines[target_line - 1]
+        word = extract_word_at(line_text, target_char)
+
+    if word == "":
+        return lsp_make_tool_result(id, lsp_jo1(lsp_jp("hover", lsp_js(""))))
+
+    # Look up in command database
+    val db = build_command_db()
+    val info = lookup_command(db, word)
+    match info:
+        Some(cmd):
+            val hover_text = cmd.full_name + " (" + cmd.short_name + ") - " + cmd.description + " [" + cmd.group + "]"
+            val result = lsp_jo2(
+                lsp_jp("word", lsp_js(word)),
+                lsp_jp("hover", lsp_js(hover_text))
+            )
+            return lsp_make_tool_result(id, result)
+        nil:
+            val result = lsp_jo2(
+                lsp_jp("word", lsp_js(word)),
+                lsp_jp("hover", lsp_js("Unknown command: " + word))
+            )
+            return lsp_make_tool_result(id, result)
+
+# --- cmm_symbols: List labels and macros from parsed AST ---
+
+fn handle_cmm_symbols(id: text, args: text) -> text:
+    val source = lsp_extract_field(args, "source")
+    if source == "":
+        return lsp_make_tool_error(id, -32602, "Missing required parameter: source")
+    val program = parse_cmm_source(source)
+    val analysis = analyze_program(program)
+    val syms = analysis.symbols.symbols
+
+    var arr = lsp_SB_L()
+    var si = 0
+    while si < syms.len():
+        if si > 0:
+            arr = arr + ","
+        val sym = syms[si]
+        val kind_str = symbol_kind_str(sym.kind)
+        var obj = lsp_jo4(
+            lsp_jp("name", lsp_js(sym.name)),
+            lsp_jp("kind", lsp_js(kind_str)),
+            lsp_jp("scope", lsp_js(sym.scope)),
+            lsp_jp("line", str(sym.def_line))
+        )
+        arr = arr + obj
+        si = si + 1
+    arr = arr + lsp_SB_R()
+
+    val result = lsp_jo2(
+        lsp_jp("count", str(syms.len())),
+        lsp_jp("symbols", arr)
+    )
+    lsp_make_tool_result(id, result)
+
+# --- cmm_validate_cli: Validate CLI conversion quality ---
+
+fn handle_cmm_validate_cli(id: text, args: text) -> text:
+    val source = lsp_extract_field(args, "source")
+    if source == "":
+        return lsp_make_tool_error(id, -32602, "Missing required parameter: source")
+
+    var issues: [text] = []
+
+    # Check 1: GUI keyword absence
+    val gui_violations = check_gui_keywords(source)
+    var gi = 0
+    while gi < gui_violations.len():
+        issues.push("GUI keyword found: " + gui_violations[gi])
+        gi = gi + 1
+
+    # Check 2: SCREEN.OFF present
+    if not check_has_command(source, "screen.off"):
+        issues.push("Missing SCREEN.OFF command")
+
+    # Check 3: AREA channel setup
+    val lower_source = to_lower_cli(source)
+    val has_area_create = contains_text(lower_source, "area.create")
+    val has_area_select = contains_text(lower_source, "area.select")
+    if not has_area_create or not has_area_select:
+        issues.push("Missing AREA.Create/Select setup")
+
+    # Check 4: ON ERROR handler
+    val has_error_handler = (contains_text(lower_source, "on error") or contains_text(lower_source, "on.error") or contains_text(lower_source, "globalon error"))
+    if not has_error_handler:
+        issues.push("Missing ON ERROR handler")
+
+    # Check 5: Metadata headers
+    val has_target = contains_text(source, "@target:")
+    val has_purpose = contains_text(source, "@purpose:")
+    if not has_target:
+        issues.push("Missing @target: metadata header")
+    if not has_purpose:
+        issues.push("Missing @purpose: metadata header")
+
+    # Check 6: ENDDO with return value
+    val has_enddo_true = contains_text(source, "ENDDO TRUE()")
+    val has_enddo_false = contains_text(source, "ENDDO FALSE()")
+    if not has_enddo_true and not has_enddo_false:
+        issues.push("Missing ENDDO TRUE()/FALSE() return value")
+
+    # Check 7: Parse validation
+    val program = parse_cmm_source(source)
+    if program.errors.len() > 0:
+        issues.push("Parse error: " + program.errors[0])
+
+    # Build result
+    var valid = "true"
+    if issues.len() > 0:
+        valid = "false"
+
+    var issues_arr = lsp_SB_L()
+    var ii = 0
+    while ii < issues.len():
+        if ii > 0:
+            issues_arr = issues_arr + ","
+        issues_arr = issues_arr + lsp_js(issues[ii])
+        ii = ii + 1
+    issues_arr = issues_arr + lsp_SB_R()
+
+    val result = lsp_jo3(
+        lsp_jp("valid", valid),
+        lsp_jp("issue_count", str(issues.len())),
+        lsp_jp("issues", issues_arr)
+    )
+    lsp_make_tool_result(id, result)
+
+# --- Helper: convert text to lines ---
+
+fn split_to_lines(content: text) -> [text]:
+    var lines: [text] = []
+    var start = 0
+    var i = 0
+    while i < content.len():
+        if content[i:i + 1] == "\n":
+            lines.push(content[start:i])
+            start = i + 1
+        i = i + 1
+    if start <= content.len():
+        lines.push(content[start:content.len()])
+    lines
+
+# --- Helper: extract word at character offset ---
+
+fn extract_word_at(line: text, char_offset: i64) -> text:
+    if char_offset < 0 or char_offset > line.len():
+        return ""
+    # Find word start (scan backwards)
+    var ws = char_offset
+    while ws > 0:
+        val ch = line[ws - 1:ws]
+        if ch == " " or ch == "\t" or ch == "(" or ch == ")" or ch == "," or ch == "=":
+            break
+        ws = ws - 1
+    # Find word end (scan forwards)
+    var we = char_offset
+    while we < line.len():
+        val ch = line[we:we + 1]
+        if ch == " " or ch == "\t" or ch == "(" or ch == ")" or ch == "," or ch == "=" or ch == "\n":
+            break
+        we = we + 1
+    if ws >= we:
+        return ""
+    line[ws:we]
+
+# --- Helper: symbol kind to string ---
+
+fn symbol_kind_str(kind: CmmSymbolKind) -> text:
+    match kind:
+        case CmmSymbolKind.LabelSym: "label"
+        case CmmSymbolKind.MacroSym: "macro"
+        case CmmSymbolKind.SubroutineSym: "subroutine"
+        case CmmSymbolKind.FileRefSym: "file_ref"
+
+# --- CLI validation helpers (reused from test_cli_conversion.spl) ---
+
+fn to_lower_cli(s: text) -> text:
+    var r = ""
+    var i = 0
+    while i < s.len():
+        val ch = s[i:i + 1]
+        r = r + to_lower_char_cli(ch)
+        i = i + 1
+    r
+
+fn to_lower_char_cli(ch: text) -> text:
+    if ch == "A": return "a"
+    if ch == "B": return "b"
+    if ch == "C": return "c"
+    if ch == "D": return "d"
+    if ch == "E": return "e"
+    if ch == "F": return "f"
+    if ch == "G": return "g"
+    if ch == "H": return "h"
+    if ch == "I": return "i"
+    if ch == "J": return "j"
+    if ch == "K": return "k"
+    if ch == "L": return "l"
+    if ch == "M": return "m"
+    if ch == "N": return "n"
+    if ch == "O": return "o"
+    if ch == "P": return "p"
+    if ch == "Q": return "q"
+    if ch == "R": return "r"
+    if ch == "S": return "s"
+    if ch == "T": return "t"
+    if ch == "U": return "u"
+    if ch == "V": return "v"
+    if ch == "W": return "w"
+    if ch == "X": return "x"
+    if ch == "Y": return "y"
+    if ch == "Z": return "z"
+    ch
+
+fn contains_text(hay: text, needle: text) -> bool:
+    if needle.len() > hay.len():
+        return false
+    var i = 0
+    while i <= hay.len() - needle.len():
+        if hay[i:i + needle.len()] == needle:
+            return true
+        i = i + 1
+    false
+
+fn starts_with_text(s: text, prefix: text) -> bool:
+    if prefix.len() > s.len():
+        return false
+    s[0:prefix.len()] == prefix
+
+fn ends_with_text(s: text, suffix: text) -> bool:
+    if suffix.len() > s.len():
+        return false
+    s[s.len() - suffix.len():s.len()] == suffix
+
+fn trim_start_text(s: text) -> text:
+    var i = 0
+    while i < s.len():
+        val ch = s[i:i + 1]
+        if ch != " " and ch != "\t":
+            return s[i:s.len()]
+        i = i + 1
+    ""
+
+fn has_no_spaces_text(s: text) -> bool:
+    var i = 0
+    while i < s.len():
+        if s[i:i + 1] == " ":
+            return false
+        i = i + 1
+    true
+
+fn check_gui_keywords(content: text) -> [text]:
+    val banned: [text] = ["dialog", "winpos", "winclear", "winpage", "wintabs", "framepos", "toolbar", "statusbar", "screen.always", "screen.alw", "menu.reprogram", "area.view", "autostore", "menu.rp", "toolitem", "winresume", "winfocus"]
+    var violations: [text] = []
+    val lines = split_to_lines(content)
+    var li = 0
+    while li < lines.len():
+        val trimmed = trim_start_text(lines[li])
+        if trimmed.len() == 0:
+            li = li + 1
+            continue
+        val lowered = to_lower_cli(trimmed)
+        # Skip comments
+        if starts_with_text(lowered, ";"):
+            li = li + 1
+            continue
+        # Skip labels (e.g. dialog_closed:)
+        if ends_with_text(trimmed, ":") and has_no_spaces_text(trimmed):
+            li = li + 1
+            continue
+        # Check each banned keyword
+        var bi = 0
+        while bi < banned.len():
+            val kw = banned[bi]
+            if starts_with_text(lowered, kw):
+                if lowered.len() == kw.len():
+                    violations.push(kw)
+                else:
+                    val next_ch = lowered[kw.len():kw.len() + 1]
+                    if next_ch == " " or next_ch == "." or next_ch == "\t" or next_ch == "(":
+                        violations.push(kw)
+            bi = bi + 1
+        li = li + 1
+    violations
+
+fn check_has_command(content: text, cmd: text) -> bool:
+    val lines = split_to_lines(content)
+    var li = 0
+    while li < lines.len():
+        val trimmed = trim_start_text(lines[li])
+        if trimmed.len() > 0 and not starts_with_text(trimmed, ";"):
+            val lowered = to_lower_cli(trimmed)
+            if starts_with_text(lowered, cmd):
+                return true
+        li = li + 1
+    false

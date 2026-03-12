@@ -1,0 +1,218 @@
+# CMM Parser Bulk Validator — Standalone Script
+#
+# Parses all CMM files under a directory tree and reports success/failure
+# statistics with error categorization.
+#
+# Usage:
+#   simple examples/10_tooling/cmm_lsp/bulk_validate.spl [dir]
+#   (default dir: /opt/t32/demo)
+
+use cmm_parser.{parse_cmm_source}
+use cmm_analyzer.{analyze_program}
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_dir_list(path: text) -> [text]
+extern fn sys_get_args() -> [text]
+
+# ---------------------------------------------------------------------------
+# Error categorization
+# ---------------------------------------------------------------------------
+
+fn categorize_error(msg: text) -> text:
+    if contains(msg, "Unterminated block"):
+        return "Unterminated block"
+    if contains(msg, "Expected expression"):
+        return "Expected expression"
+    if contains(msg, "Expected command"):
+        return "Expected command"
+    if contains(msg, "Unterminated string"):
+        return "Unterminated string"
+    if contains(msg, "Unexpected token"):
+        return "Unexpected token"
+    if contains(msg, "Expected"):
+        return "Expected (other)"
+    "Other"
+
+fn contains(haystack: text, needle: text) -> bool:
+    if needle.len() > haystack.len():
+        return false
+    var i = 0
+    while i <= haystack.len() - needle.len():
+        if haystack[i:i + needle.len()] == needle:
+            return true
+        i = i + 1
+    false
+
+# ---------------------------------------------------------------------------
+# File collection
+# ---------------------------------------------------------------------------
+
+fn collect_cmm_files(dir: text, results: [text]):
+    val entries = rt_dir_list(dir)
+    var i = 0
+    while i < entries.len():
+        val entry = entries[i]
+        if entry == "." or entry == "..":
+            i = i + 1
+            continue
+
+        val full_path = dir + "/" + entry
+
+        if is_cmm_file(entry):
+            results.push(full_path)
+        else if not has_extension(entry):
+            collect_cmm_files(full_path, results)
+
+        i = i + 1
+
+fn is_cmm_file(name: text) -> bool:
+    if name.len() < 5:
+        return false
+    val ext = name[name.len() - 4:name.len()]
+    val lower_ext = to_lower_simple(ext)
+    lower_ext == ".cmm"
+
+fn has_extension(name: text) -> bool:
+    var i = 1
+    while i < name.len():
+        if name[i:i + 1] == ".":
+            return true
+        i = i + 1
+    false
+
+fn to_lower_simple(s: text) -> text:
+    var result = ""
+    var i = 0
+    while i < s.len():
+        val ch = s[i:i + 1]
+        if ch >= "A" and ch <= "Z":
+            result = result + ch.to_lower()
+        else:
+            result = result + ch
+        i = i + 1
+    result
+
+fn starts_with(s: text, prefix: text) -> bool:
+    if prefix.len() > s.len():
+        return false
+    s[0:prefix.len()] == prefix
+
+# ---------------------------------------------------------------------------
+# Error category tracking
+# ---------------------------------------------------------------------------
+
+struct ErrorCategory:
+    name: text
+    count: i64
+
+fn find_or_add_category(categories: [ErrorCategory], name: text) -> i64:
+    var i = 0
+    while i < categories.len():
+        if categories[i].name == name:
+            return i
+        i = i + 1
+    categories.push(ErrorCategory(name: name, count: 0))
+    categories.len() - 1
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+val args = sys_get_args()
+var target_dir = "/opt/t32/demo"
+if args.len() > 1:
+    target_dir = args[1]
+
+print "CMM Parser Bulk Validator"
+print "========================"
+print "Directory: {target_dir}"
+print ""
+
+if not rt_file_exists(target_dir):
+    print "Error: directory not found: {target_dir}"
+else:
+    # Collect files
+    var cmm_files: [text] = []
+    collect_cmm_files(target_dir, cmm_files)
+    print "Found {cmm_files.len()} CMM files"
+    print ""
+
+    var total = 0
+    var ok = 0
+    var errors = 0
+    var skipped = 0
+    var total_stmts = 0
+    var total_diags = 0
+    var error_categories: [ErrorCategory] = []
+    var sample_errors: [text] = []
+
+    var i = 0
+    while i < cmm_files.len():
+        val path = cmm_files[i]
+        total = total + 1
+
+        val content = rt_file_read_text(path) ?? ""
+        if starts_with(content, "trace32 encrypted cmm file"):
+            skipped = skipped + 1
+            i = i + 1
+            continue
+
+        val program = parse_cmm_source(content)
+        total_stmts = total_stmts + program.statements.len()
+
+        if program.errors.len() > 0:
+            errors = errors + 1
+            # Categorize first error
+            val category = categorize_error(program.errors[0])
+            val idx = find_or_add_category(error_categories, category)
+            error_categories[idx] = ErrorCategory(name: error_categories[idx].name, count: error_categories[idx].count + 1)
+            # Sample up to 30 errors
+            if sample_errors.len() < 30:
+                sample_errors.push(path + ": " + program.errors[0])
+        else:
+            ok = ok + 1
+
+        # Analyze for diagnostics
+        val result = analyze_program(program)
+        total_diags = total_diags + result.diagnostics.len()
+
+        # Progress
+        if total % 100 == 0:
+            print "  ... {total} files processed"
+
+        i = i + 1
+
+    # Summary
+    print ""
+    print "=== Results ==="
+    print "Total files:         {total}"
+    print "Parsed OK:           {ok}"
+    print "Parse errors:        {errors}"
+    print "Skipped (encrypted): {skipped}"
+    print "Total statements:    {total_stmts}"
+    print "Total diagnostics:   {total_diags}"
+    print ""
+
+    # Error categories
+    if error_categories.len() > 0:
+        print "=== Error Categories ==="
+        var ci = 0
+        while ci < error_categories.len():
+            print "  {error_categories[ci].name}: {error_categories[ci].count}"
+            ci = ci + 1
+        print ""
+
+    # Sample errors
+    if sample_errors.len() > 0:
+        print "=== Sample Errors (max 30) ==="
+        var si = 0
+        while si < sample_errors.len():
+            print "  {sample_errors[si]}"
+            si = si + 1
+        print ""
+
+    # Success rate
+    if total > 0:
+        val pct = ok * 100 / total
+        print "Success rate: {pct}% ({ok}/{total})"

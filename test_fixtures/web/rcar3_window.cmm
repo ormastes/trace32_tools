@@ -1,0 +1,43 @@
+; R-Car Gen3 Debug Window Layout
+; Exercises: FramePOS, WinPAGE.*, WinPOS with floats,
+;            WinTABS, wl.* prefixed commands, VAR.ADDWATCH,
+;            TOOLBAR/STATUSBAR ON
+
+; Reset window layout
+WinPAGE.RESet
+WinCLEAR
+
+; Set frame position
+FramePOS 0. 0. 80. 50.
+
+; Open windows with positions
+WinPOS 0. 0. 80. 10. 0. 0. W000
+Data.List
+WinPOS 0. 11. 40. 15. 0. 0. W001
+Register.view /SpotLight
+WinPOS 41. 11. 39. 15. 0. 0. W002
+Var.Frame /Locals /Caller
+
+WinTABS 10. 20. 30.
+
+; Add watch expressions
+Var.AddWatch &variable
+Var.AddWatch struct_ptr->field
+Var.AddWatch array[0]
+
+; Show toolbar and statusbar
+TOOLBAR ON
+STATUSBAR ON
+
+; WinPAGE operations
+WinPAGE.Create P001
+WinPAGE.select P001
+WinPOS 0. 0. 80. 25.
+Data.dump D:0x0--0xFFF
+
+WinPAGE.Create P002
+WinPAGE.select P002
+WinPOS 0. 0. 80. 25.
+Trace.List
+
+ENDDO

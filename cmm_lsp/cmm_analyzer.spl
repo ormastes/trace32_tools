@@ -1,0 +1,676 @@
+# CMM (PRACTICE Script) Semantic Analyzer
+# Multi-pass analysis over the CMM AST for error detection and symbol collection.
+#
+# Passes:
+#   1. Symbol collection — labels, macro declarations, subroutine targets, file refs
+#   2. Label reference checking — verify GOTO/GOSUB/JUMPTO targets exist
+#   3. Macro scope analysis — unused macros, redeclarations
+#   4. Unreachable code detection — code after ENDDO/END/GOTO
+#   5. DO target validation stub — file existence check (when t32 path configured)
+#   6. Command validation stub — placeholder for command database checking
+#
+# IMPORTANT: Simple runtime limitation — function parameters are pass-by-value,
+# and enum variant pattern matching only binds the first position (as a tuple
+# for multi-field variants). This module uses:
+#   - Module-level vars for mutable state (symbols, diagnostics, macro refs)
+#   - Tuple indexing d[0], d[1] for multi-field enum destructuring
+#
+# Reference: doc/research/cmm_grammar_research_2026-03-10.md
+
+use cmm_ast.{CmmProgram, CmmStmt, CmmExpr, CmmLiteral, CmmSpan}
+use cmm_diagnostics.{CmmDiagnostic, CmmDiagnosticKind, DiagnosticCollector, make_diagnostic}
+use cmm_version.{CmmParserConfig, default_config}
+
+export CmmSymbol, CmmSymbolKind, CmmSymbolTable
+export CmmAnalysisResult, analyze_program, analyze_program_with_config
+
+# Default span for fallback values.
+val _default_sp = CmmSpan(start_line: 0, start_col: 0, end_line: 0, end_col: 0)
+
+# ---------------------------------------------------------------------------
+# Symbol types
+# ---------------------------------------------------------------------------
+
+enum CmmSymbolKind:
+    LabelSym           # label definition (start:)
+    MacroSym           # macro (&variable)
+    SubroutineSym      # GOSUB target label
+    FileRefSym         # DO/RUN target file
+
+struct CmmSymbol:
+    name: text
+    kind: CmmSymbolKind
+    scope: text         # "local", "global", "private"
+    def_line: i64
+    def_column: i64
+
+class CmmSymbolTable:
+    symbols: [CmmSymbol]
+
+    me add(sym: CmmSymbol):
+        self.symbols.push(sym)
+
+    fn find_by_name(name: text) -> [CmmSymbol]:
+        var result: [CmmSymbol] = []
+        var i = 0
+        while i < self.symbols.len():
+            if self.symbols[i].name == name:
+                result.push(self.symbols[i])
+            i = i + 1
+        result
+
+    fn has_label(name: text) -> bool:
+        var i = 0
+        while i < self.symbols.len():
+            val sym = self.symbols[i]
+            match sym.kind:
+                case CmmSymbolKind.LabelSym:
+                    if sym.name == name:
+                        return true
+                case _: ()
+            i = i + 1
+        false
+
+    fn has_macro(name: text) -> bool:
+        var i = 0
+        while i < self.symbols.len():
+            val sym = self.symbols[i]
+            match sym.kind:
+                case CmmSymbolKind.MacroSym:
+                    if sym.name == name:
+                        return true
+                case _: ()
+            i = i + 1
+        false
+
+    fn labels() -> [CmmSymbol]:
+        var result: [CmmSymbol] = []
+        var i = 0
+        while i < self.symbols.len():
+            match self.symbols[i].kind:
+                case CmmSymbolKind.LabelSym:
+                    result.push(self.symbols[i])
+                case _: ()
+            i = i + 1
+        result
+
+    fn macros() -> [CmmSymbol]:
+        var result: [CmmSymbol] = []
+        var i = 0
+        while i < self.symbols.len():
+            match self.symbols[i].kind:
+                case CmmSymbolKind.MacroSym:
+                    result.push(self.symbols[i])
+                case _: ()
+            i = i + 1
+        result
+
+# ---------------------------------------------------------------------------
+# Analysis result
+# ---------------------------------------------------------------------------
+
+struct CmmAnalysisResult:
+    diagnostics: [CmmDiagnostic]
+    symbols: CmmSymbolTable
+
+# ---------------------------------------------------------------------------
+# Module-level mutable state (workaround for pass-by-value parameters)
+# ---------------------------------------------------------------------------
+
+var _syms: [CmmSymbol] = []
+var _diags: [CmmDiagnostic] = []
+var _macro_refs: [text] = []
+var _config: CmmParserConfig = default_config()
+
+fn _add_sym(sym: CmmSymbol):
+    _syms.push(sym)
+
+fn _add_error(msg: text, line: i64, col: i64):
+    _diags.push(make_diagnostic(CmmDiagnosticKind.Error, msg, line, col))
+
+fn _add_warning(msg: text, line: i64, col: i64):
+    _diags.push(make_diagnostic(CmmDiagnosticKind.Warning, msg, line, col))
+
+fn _add_info(msg: text, line: i64, col: i64):
+    _diags.push(make_diagnostic(CmmDiagnosticKind.Info, msg, line, col))
+
+fn _add_macro_ref(name: text):
+    _macro_refs.push(name)
+
+fn _has_label(name: text) -> bool:
+    var i = 0
+    while i < _syms.len():
+        val sym = _syms[i]
+        match sym.kind:
+            case CmmSymbolKind.LabelSym:
+                if sym.name == name:
+                    return true
+            case _: ()
+        i = i + 1
+    false
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+fn analyze_program(program: CmmProgram) -> CmmAnalysisResult:
+    analyze_program_with_config(program, default_config())
+
+fn analyze_program_with_config(program: CmmProgram, config: CmmParserConfig) -> CmmAnalysisResult:
+    # Reset module-level state
+    _syms = []
+    _diags = []
+    _macro_refs = []
+    _config = config
+
+    # Pass 1: collect labels and macro declarations
+    collect_symbols(program.statements)
+
+    # Pass 2: check label references
+    check_label_refs(program.statements)
+
+    # Pass 3: macro scope analysis
+    collect_macro_refs(program.statements)
+    check_macro_scopes()
+
+    # Pass 4: unreachable code detection
+    check_unreachable(program.statements)
+
+    # Pass 5: DO target validation stub
+    check_do_targets(program.statements)
+
+    # Build result from module-level state
+    var sym_table = CmmSymbolTable(symbols: [])
+    var si = 0
+    while si < _syms.len():
+        sym_table.add(_syms[si])
+        si = si + 1
+
+    CmmAnalysisResult(diagnostics: _diags, symbols: sym_table)
+
+# ---------------------------------------------------------------------------
+# Pass 1: Symbol collection
+# ---------------------------------------------------------------------------
+
+fn collect_symbols(stmts: [CmmStmt]):
+    var i = 0
+    while i < stmts.len():
+        collect_symbols_from_stmt(stmts[i])
+        i = i + 1
+
+fn collect_symbols_from_stmt(stmt: CmmStmt):
+    match stmt:
+        case CmmStmt.LabelDef(d, _):
+            val name = d[0]
+            val sp = d[1]
+            _add_sym(CmmSymbol(name: name, kind: CmmSymbolKind.LabelSym, scope: "local", def_line: sp.start_line, def_column: sp.start_col))
+
+        case CmmStmt.LocalDecl(d, _):
+            val names = d[0]
+            val sp = d[1]
+            var ni = 0
+            while ni < names.len():
+                _add_sym(CmmSymbol(name: names[ni], kind: CmmSymbolKind.MacroSym, scope: "local", def_line: sp.start_line, def_column: sp.start_col))
+                ni = ni + 1
+
+        case CmmStmt.GlobalDecl(d, _):
+            val names = d[0]
+            val sp = d[1]
+            var ni = 0
+            while ni < names.len():
+                _add_sym(CmmSymbol(name: names[ni], kind: CmmSymbolKind.MacroSym, scope: "global", def_line: sp.start_line, def_column: sp.start_col))
+                ni = ni + 1
+
+        case CmmStmt.PrivateDecl(d, _):
+            val names = d[0]
+            val sp = d[1]
+            var ni = 0
+            while ni < names.len():
+                _add_sym(CmmSymbol(name: names[ni], kind: CmmSymbolKind.MacroSym, scope: "private", def_line: sp.start_line, def_column: sp.start_col))
+                ni = ni + 1
+
+        case CmmStmt.Gosub(d, _):
+            val label = d[0]
+            val sp = d[2]
+            _add_sym(CmmSymbol(name: label, kind: CmmSymbolKind.SubroutineSym, scope: "local", def_line: sp.start_line, def_column: sp.start_col))
+
+        case CmmStmt.DoCall(d, _):
+            val file_expr = d[0]
+            val sp = d[2]
+            val file_name = extract_file_name(file_expr)
+            if file_name != "":
+                _add_sym(CmmSymbol(name: file_name, kind: CmmSymbolKind.FileRefSym, scope: "local", def_line: sp.start_line, def_column: sp.start_col))
+
+        case CmmStmt.RunCall(d, _):
+            val file_expr = d[0]
+            val sp = d[2]
+            val file_name = extract_file_name(file_expr)
+            if file_name != "":
+                _add_sym(CmmSymbol(name: file_name, kind: CmmSymbolKind.FileRefSym, scope: "local", def_line: sp.start_line, def_column: sp.start_col))
+
+        case CmmStmt.Block(d, _):
+            collect_symbols(d[0])
+
+        case CmmStmt.IfElse(d, _):
+            collect_symbols_from_stmt(d[1])
+            val else_body = d[2]
+            if else_body.?:
+                val eb = else_body ?? CmmStmt.EmptyLine(_default_sp)
+                collect_symbols_from_stmt(eb)
+
+        case CmmStmt.WhileLoop(d, _):
+            collect_symbols_from_stmt(d[1])
+
+        case CmmStmt.RepeatLoop(d, _):
+            collect_symbols_from_stmt(d[1])
+
+        case CmmStmt.OnEvent(d, _):
+            collect_symbols_from_stmt(d[1])
+
+        case CmmStmt.GlobalOnEvent(d, _):
+            collect_symbols_from_stmt(d[1])
+
+        case _: ()
+
+# Extract a file name from an expression (Ident or string literal).
+fn extract_file_name(expr: CmmExpr) -> text:
+    match expr:
+        case CmmExpr.Ident(name): return name
+        case CmmExpr.Lit(lit):
+            match lit:
+                case CmmLiteral.Str(s): return s
+                case _: return ""
+        case CmmExpr.DotPath(path): return path
+        case _: return ""
+
+# ---------------------------------------------------------------------------
+# Pass 2: Label reference checking
+# ---------------------------------------------------------------------------
+
+fn check_label_refs(stmts: [CmmStmt]):
+    var i = 0
+    while i < stmts.len():
+        check_label_refs_stmt(stmts[i])
+        i = i + 1
+
+fn check_label_refs_stmt(stmt: CmmStmt):
+    match stmt:
+        case CmmStmt.Goto(d, _):
+            val target = d[0]
+            val sp = d[1]
+            if not _has_label(target):
+                _add_error("Undefined label '{target}' in GOTO", sp.start_line, sp.start_col)
+
+        case CmmStmt.Gosub(d, _):
+            val target = d[0]
+            val sp = d[2]
+            if not _has_label(target):
+                _add_error("Undefined label '{target}' in GOSUB", sp.start_line, sp.start_col)
+
+        case CmmStmt.JumpTo(d, _):
+            val target = d[0]
+            val sp = d[1]
+            if not _has_label(target):
+                _add_warning("Label '{target}' in JUMPTO not found in this file (may be cross-module)", sp.start_line, sp.start_col)
+
+        case CmmStmt.Block(d, _):
+            check_label_refs(d[0])
+
+        case CmmStmt.IfElse(d, _):
+            check_label_refs_stmt(d[1])
+            val else_body = d[2]
+            if else_body.?:
+                val eb = else_body ?? CmmStmt.EmptyLine(_default_sp)
+                check_label_refs_stmt(eb)
+
+        case CmmStmt.WhileLoop(d, _):
+            check_label_refs_stmt(d[1])
+
+        case CmmStmt.RepeatLoop(d, _):
+            check_label_refs_stmt(d[1])
+
+        case CmmStmt.OnEvent(d, _):
+            check_label_refs_stmt(d[1])
+
+        case CmmStmt.GlobalOnEvent(d, _):
+            check_label_refs_stmt(d[1])
+
+        case _: ()
+
+# ---------------------------------------------------------------------------
+# Pass 3: Macro scope analysis
+# ---------------------------------------------------------------------------
+
+fn collect_macro_refs(stmts: [CmmStmt]):
+    var i = 0
+    while i < stmts.len():
+        collect_macro_refs_stmt(stmts[i])
+        i = i + 1
+
+fn collect_macro_refs_stmt(stmt: CmmStmt):
+    match stmt:
+        case CmmStmt.MacroAssign(d, _):
+            _add_macro_ref(d[0])
+            collect_macro_refs_expr(d[1])
+
+        case CmmStmt.MacroRecAssign(d, _):
+            _add_macro_ref(d[0])
+            collect_macro_refs_expr(d[1])
+
+        case CmmStmt.Command(d, _):
+            collect_macro_refs_exprs(d[1])
+
+        case CmmStmt.DeviceCommand(d, _):
+            collect_macro_refs_exprs(d[2])
+
+        case CmmStmt.EntryDecl(d, _):
+            val names = d[0]
+            var ni = 0
+            while ni < names.len():
+                val n = names[ni]
+                if n != "%LINE":
+                    _add_macro_ref(n)
+                ni = ni + 1
+
+        case CmmStmt.IfElse(d, _):
+            collect_macro_refs_expr(d[0])
+            collect_macro_refs_stmt(d[1])
+            val else_body = d[2]
+            if else_body.?:
+                val eb = else_body ?? CmmStmt.EmptyLine(_default_sp)
+                collect_macro_refs_stmt(eb)
+
+        case CmmStmt.WhileLoop(d, _):
+            collect_macro_refs_expr(d[0])
+            collect_macro_refs_stmt(d[1])
+
+        case CmmStmt.RepeatLoop(d, _):
+            val count = d[0]
+            if count.?:
+                val c = count ?? CmmExpr.ExprEmpty
+                collect_macro_refs_expr(c)
+            collect_macro_refs_stmt(d[1])
+
+        case CmmStmt.Block(d, _):
+            collect_macro_refs(d[0])
+
+        case CmmStmt.Gosub(d, _):
+            collect_macro_refs_exprs(d[1])
+
+        case CmmStmt.DoCall(d, _):
+            collect_macro_refs_expr(d[0])
+            collect_macro_refs_exprs(d[1])
+
+        case CmmStmt.RunCall(d, _):
+            collect_macro_refs_expr(d[0])
+            collect_macro_refs_exprs(d[1])
+
+        case CmmStmt.ReturnStmt(d, _):
+            collect_macro_refs_exprs(d[0])
+
+        case CmmStmt.Enddo(d, _):
+            collect_macro_refs_exprs(d[0])
+
+        case CmmStmt.PrintStmt(d, _):
+            collect_macro_refs_exprs(d[0])
+
+        case CmmStmt.WriteFile(d, _):
+            collect_macro_refs_expr(d[0])
+            collect_macro_refs_exprs(d[1])
+
+        case CmmStmt.WriteBFile(d, _):
+            collect_macro_refs_expr(d[0])
+            collect_macro_refs_exprs(d[1])
+
+        case CmmStmt.AppendFile(d, _):
+            collect_macro_refs_expr(d[0])
+            collect_macro_refs_exprs(d[1])
+
+        case CmmStmt.ReadFile(d, _):
+            collect_macro_refs_expr(d[0])
+            val names = d[1]
+            var ni = 0
+            while ni < names.len():
+                _add_macro_ref(names[ni])
+                ni = ni + 1
+
+        case CmmStmt.OpenFile(d, _):
+            collect_macro_refs_expr(d[0])
+            collect_macro_refs_expr(d[1])
+
+        case CmmStmt.CloseFile(d, _):
+            collect_macro_refs_expr(d[0])
+
+        case CmmStmt.WaitStmt(d, _):
+            collect_macro_refs_expr(d[0])
+
+        case CmmStmt.OnEvent(d, _):
+            collect_macro_refs_stmt(d[1])
+
+        case CmmStmt.GlobalOnEvent(d, _):
+            collect_macro_refs_stmt(d[1])
+
+        case _: ()
+
+fn collect_macro_refs_exprs(exprs: [CmmExpr]):
+    var i = 0
+    while i < exprs.len():
+        collect_macro_refs_expr(exprs[i])
+        i = i + 1
+
+fn collect_macro_refs_expr(expr: CmmExpr):
+    match expr:
+        case CmmExpr.MacroRef(name):
+            _add_macro_ref(name)
+        case CmmExpr.MacroRecRef(name):
+            _add_macro_ref(name)
+        case CmmExpr.MacroExpand(d, _):
+            _add_macro_ref(d[0])
+            collect_macro_refs_expr(d[1])
+        case CmmExpr.Binary(d, _):
+            collect_macro_refs_expr(d[1])
+            collect_macro_refs_expr(d[2])
+        case CmmExpr.Unary(d, _):
+            collect_macro_refs_expr(d[1])
+        case CmmExpr.FunctionCall(d, _):
+            collect_macro_refs_exprs(d[1])
+        case CmmExpr.Parenthesized(inner):
+            collect_macro_refs_expr(inner)
+        case CmmExpr.Braced(inner):
+            collect_macro_refs_expr(inner)
+        case CmmExpr.Address(d, _):
+            collect_macro_refs_expr(d[1])
+        case _: ()
+
+fn check_macro_scopes():
+    # Collect just the macro symbols
+    var macros: [CmmSymbol] = []
+    var mi = 0
+    while mi < _syms.len():
+        match _syms[mi].kind:
+            case CmmSymbolKind.MacroSym:
+                macros.push(_syms[mi])
+            case _: ()
+        mi = mi + 1
+
+    # Check for unused macros
+    mi = 0
+    while mi < macros.len():
+        val m = macros[mi]
+        if not list_contains(_macro_refs, m.name):
+            _add_warning("Macro '&{m.name}' declared but never referenced", m.def_line, m.def_column)
+        mi = mi + 1
+
+    # Check for redeclared macros in the same scope
+    var ai = 0
+    while ai < macros.len():
+        var bi = ai + 1
+        while bi < macros.len():
+            if (macros[ai].name == macros[bi].name
+                and macros[ai].scope == macros[bi].scope):
+                _add_warning(
+                    "Macro '&{macros[bi].name}' redeclared in '{macros[bi].scope}' scope (first declared at line {macros[ai].def_line})",
+                    macros[bi].def_line, macros[bi].def_column
+                )
+            bi = bi + 1
+        ai = ai + 1
+
+# ---------------------------------------------------------------------------
+# Pass 4: Unreachable code detection
+# ---------------------------------------------------------------------------
+
+fn check_unreachable(stmts: [CmmStmt]):
+    var after_exit = false
+    var i = 0
+    while i < stmts.len():
+        val stmt = stmts[i]
+
+        if after_exit:
+            match stmt:
+                case CmmStmt.LabelDef(_, _):
+                    after_exit = false
+                case CmmStmt.CommentLine(_, _):
+                    ()
+                case CmmStmt.EmptyLine(_):
+                    ()
+                case _:
+                    val warn_sp = stmt_span(stmt)
+                    _add_warning("Unreachable code after unconditional exit", warn_sp.start_line, warn_sp.start_col)
+
+        match stmt:
+            case CmmStmt.Goto(_, _):
+                after_exit = true
+            case CmmStmt.EndStmt(_):
+                after_exit = true
+            case CmmStmt.Enddo(_, _):
+                after_exit = true
+            case CmmStmt.StopStmt(_):
+                after_exit = true
+            case CmmStmt.ReturnStmt(_, _):
+                after_exit = true
+            case CmmStmt.Block(d, _):
+                check_unreachable(d[0])
+            case CmmStmt.IfElse(d, _):
+                check_unreachable_in_body(d[1])
+                val else_body = d[2]
+                if else_body.?:
+                    val eb = else_body ?? CmmStmt.EmptyLine(_default_sp)
+                    check_unreachable_in_body(eb)
+            case CmmStmt.WhileLoop(d, _):
+                check_unreachable_in_body(d[1])
+            case CmmStmt.RepeatLoop(d, _):
+                check_unreachable_in_body(d[1])
+            case _:
+                ()
+
+        i = i + 1
+
+fn check_unreachable_in_body(body: CmmStmt):
+    match body:
+        case CmmStmt.Block(d, _):
+            check_unreachable(d[0])
+        case _: ()
+
+# ---------------------------------------------------------------------------
+# Pass 5: DO target validation (stub)
+# ---------------------------------------------------------------------------
+
+fn check_do_targets(stmts: [CmmStmt]):
+    var i = 0
+    while i < stmts.len():
+        check_do_targets_stmt(stmts[i])
+        i = i + 1
+
+fn check_do_targets_stmt(stmt: CmmStmt):
+    match stmt:
+        case CmmStmt.DoCall(d, _):
+            val file_expr = d[0]
+            val sp = d[2]
+            val file_name = extract_file_name(file_expr)
+            if file_name == "":
+                _add_info("DO target is a dynamic expression; cannot validate statically", sp.start_line, sp.start_col)
+
+        case CmmStmt.RunCall(d, _):
+            val file_expr = d[0]
+            val sp = d[2]
+            val file_name = extract_file_name(file_expr)
+            if file_name == "":
+                _add_info("RUN target is a dynamic expression; cannot validate statically", sp.start_line, sp.start_col)
+
+        case CmmStmt.Block(d, _):
+            check_do_targets(d[0])
+
+        case CmmStmt.IfElse(d, _):
+            check_do_targets_stmt(d[1])
+            val else_body = d[2]
+            if else_body.?:
+                val eb = else_body ?? CmmStmt.EmptyLine(_default_sp)
+                check_do_targets_stmt(eb)
+
+        case CmmStmt.WhileLoop(d, _):
+            check_do_targets_stmt(d[1])
+
+        case CmmStmt.RepeatLoop(d, _):
+            check_do_targets_stmt(d[1])
+
+        case CmmStmt.OnEvent(d, _):
+            check_do_targets_stmt(d[1])
+
+        case CmmStmt.GlobalOnEvent(d, _):
+            check_do_targets_stmt(d[1])
+
+        case _: ()
+
+# ---------------------------------------------------------------------------
+# Utility helpers
+# ---------------------------------------------------------------------------
+
+fn list_contains(items: [text], value: text) -> bool:
+    var i = 0
+    while i < items.len():
+        if items[i] == value:
+            return true
+        i = i + 1
+    false
+
+# Extract the span from any CmmStmt variant.
+fn stmt_span(stmt: CmmStmt) -> CmmSpan:
+    match stmt:
+        case CmmStmt.EndStmt(sp): return sp
+        case CmmStmt.StopStmt(sp): return sp
+        case CmmStmt.ContinueCmd(sp): return sp
+        case CmmStmt.EmptyLine(sp): return sp
+        case CmmStmt.LabelDef(d, _): return d[1]
+        case CmmStmt.CommentLine(d, _): return d[1]
+        case CmmStmt.Goto(d, _): return d[1]
+        case CmmStmt.JumpTo(d, _): return d[1]
+        case CmmStmt.ReturnStmt(d, _): return d[1]
+        case CmmStmt.Enddo(d, _): return d[1]
+        case CmmStmt.LocalDecl(d, _): return d[1]
+        case CmmStmt.GlobalDecl(d, _): return d[1]
+        case CmmStmt.PrivateDecl(d, _): return d[1]
+        case CmmStmt.EntryDecl(d, _): return d[1]
+        case CmmStmt.CloseFile(d, _): return d[1]
+        case CmmStmt.PrintStmt(d, _): return d[1]
+        case CmmStmt.WaitStmt(d, _): return d[1]
+        case CmmStmt.DialogBlock(d, _): return d[1]
+        case CmmStmt.Block(d, _): return d[1]
+        case CmmStmt.ErrorNode(d, _): return d[1]
+        case CmmStmt.Command(d, _): return d[2]
+        case CmmStmt.MacroAssign(d, _): return d[2]
+        case CmmStmt.MacroRecAssign(d, _): return d[2]
+        case CmmStmt.WhileLoop(d, _): return d[2]
+        case CmmStmt.RepeatLoop(d, _): return d[2]
+        case CmmStmt.Gosub(d, _): return d[2]
+        case CmmStmt.DoCall(d, _): return d[2]
+        case CmmStmt.RunCall(d, _): return d[2]
+        case CmmStmt.OnEvent(d, _): return d[2]
+        case CmmStmt.GlobalOnEvent(d, _): return d[2]
+        case CmmStmt.ReadFile(d, _): return d[2]
+        case CmmStmt.WriteFile(d, _): return d[2]
+        case CmmStmt.WriteBFile(d, _): return d[2]
+        case CmmStmt.AppendFile(d, _): return d[2]
+        case CmmStmt.DeviceCommand(d, _): return d[3]
+        case CmmStmt.IfElse(d, _): return d[3]
+        case CmmStmt.OpenFile(d, _): return d[3]
+        case _: return _default_sp

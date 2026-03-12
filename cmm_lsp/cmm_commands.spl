@@ -1,0 +1,361 @@
+# CMM (PRACTICE Script) Command Database
+# Command group database for validation and completion in the CMM Language Server.
+#
+# T32 commands are dot-separated hierarchical tokens with case-insensitive
+# matching.  UPPER case letters in a name indicate the minimum abbreviation
+# (short form).  Example: SYStem.CPU -> short form SYS.CPU.
+#
+# Reference: doc/research/cmm_grammar_research_2026-03-10.md (Section 5)
+
+export CmmCommandInfo, CmmCommandDB
+export build_command_db, lookup_command, get_completions, get_group_commands
+
+# ---------------------------------------------------------------------------
+# Types
+# ---------------------------------------------------------------------------
+
+struct CmmCommandInfo:
+    full_name: text          # e.g. "Data.dump"
+    short_name: text         # e.g. "D.D"
+    group: text              # e.g. "Data"
+    description: text        # brief description
+    min_version: text        # "2012", "2013", "all"
+
+struct CmmCommandDB:
+    commands: [CmmCommandInfo]
+
+# ---------------------------------------------------------------------------
+# Database builder
+# ---------------------------------------------------------------------------
+
+# Build the built-in command database covering the major T32 command groups.
+fn build_command_db() -> CmmCommandDB:
+    var cmds: [CmmCommandInfo] = []
+
+    # --- Data commands ---
+    cmds.push(CmmCommandInfo(full_name: "Data.dump", short_name: "D.D", group: "Data", description: "Display hex dump of memory", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "Data.List", short_name: "D.L", group: "Data", description: "Display disassembly listing", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "Data.LOAD", short_name: "D.LOAD", group: "Data", description: "Load program file", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "Data.LOAD.auto", short_name: "D.LOAD.auto", group: "Data", description: "Auto-detect format and load", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "Data.SAVE.Binary", short_name: "D.SAVE.B", group: "Data", description: "Save memory as binary file", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "Data.Set", short_name: "D.S", group: "Data", description: "Set memory values", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "Data.Test", short_name: "D.Test", group: "Data", description: "Test memory range", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "Data.Print", short_name: "D.Print", group: "Data", description: "Print memory to file", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "Data.DRAWFFT", short_name: "D.DRAWFFT", group: "Data", description: "Display memory as FFT graph", min_version: "all"))
+
+    # --- SYStem commands ---
+    cmds.push(CmmCommandInfo(full_name: "SYStem.CPU", short_name: "SYS.CPU", group: "SYStem", description: "Set CPU type", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "SYStem.Mode", short_name: "SYS.Mode", group: "SYStem", description: "Set system mode", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "SYStem.Up", short_name: "SYS.Up", group: "SYStem", description: "Start debug session", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "SYStem.Down", short_name: "SYS.Down", group: "SYStem", description: "Stop debug session", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "SYStem.RESet", short_name: "SYS.RESet", group: "SYStem", description: "Reset system", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "SYStem.state", short_name: "SYS", group: "SYStem", description: "Show system state window", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "SYStem.Option", short_name: "SYS.Option", group: "SYStem", description: "Set system option", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "SYStem.MemAccess", short_name: "SYS.MA", group: "SYStem", description: "Set memory access mode", min_version: "all"))
+
+    # --- FLASH commands ---
+    cmds.push(CmmCommandInfo(full_name: "FLASH.RESet", short_name: "FLASH.RESet", group: "FLASH", description: "Reset flash configuration", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "FLASH.Create", short_name: "FLASH.Create", group: "FLASH", description: "Declare flash area", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "FLASH.AUTO", short_name: "FLASH.AUTO", group: "FLASH", description: "Auto program flash", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "FLASH.Erase", short_name: "FLASH.Erase", group: "FLASH", description: "Erase flash area", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "FLASH.Program", short_name: "FLASH.Program", group: "FLASH", description: "Program flash", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "FLASH.ReProgram", short_name: "FLASH.ReProgram", group: "FLASH", description: "Reprogram flash", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "FLASH.CLocK", short_name: "FLASH.CLocK", group: "FLASH", description: "Set flash clock", min_version: "all"))
+
+    # --- Break commands ---
+    cmds.push(CmmCommandInfo(full_name: "Break.Set", short_name: "B.S", group: "Break", description: "Set breakpoint", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "Break.Delete", short_name: "B.D", group: "Break", description: "Delete breakpoint", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "Break.List", short_name: "B.L", group: "Break", description: "List breakpoints", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "Break.RESet", short_name: "B.RESet", group: "Break", description: "Reset all breakpoints", min_version: "all"))
+
+    # --- Register commands ---
+    cmds.push(CmmCommandInfo(full_name: "Register.Set", short_name: "R.S", group: "Register", description: "Set register value", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "Register.view", short_name: "R", group: "Register", description: "View registers", min_version: "all"))
+
+    # --- Var commands (HLL) ---
+    cmds.push(CmmCommandInfo(full_name: "Var.View", short_name: "V.V", group: "Var", description: "View variable", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "Var.AddWatch", short_name: "V.AddWatch", group: "Var", description: "Add watch expression", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "Var.WRITE", short_name: "V.WRITE", group: "Var", description: "Write variable to file", min_version: "all"))
+
+    # --- Trace commands ---
+    cmds.push(CmmCommandInfo(full_name: "Trace.LOAD", short_name: "T.LOAD", group: "Trace", description: "Load trace data", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "Trace.List", short_name: "T.L", group: "Trace", description: "List trace records", min_version: "all"))
+
+    # --- Window commands ---
+    cmds.push(CmmCommandInfo(full_name: "WINPOS", short_name: "WINPOS", group: "Window", description: "Set window position", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "WinPAGE.RESET", short_name: "WinPAGE.RESET", group: "Window", description: "Reset window pages", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "WinCLEAR", short_name: "WinCLEAR", group: "Window", description: "Clear window", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "WINTABS", short_name: "WINTABS", group: "Window", description: "Set window tab stops", min_version: "all"))
+
+    # --- Mode commands ---
+    cmds.push(CmmCommandInfo(full_name: "Mode.Hll", short_name: "Mode.Hll", group: "Mode", description: "Set HLL display mode", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "Mode.Asm", short_name: "Mode.Asm", group: "Mode", description: "Set assembly display mode", min_version: "all"))
+
+    # --- Execution commands ---
+    cmds.push(CmmCommandInfo(full_name: "Go", short_name: "Go", group: "Execution", description: "Start target execution", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "Step", short_name: "Step", group: "Execution", description: "Single step", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "Step.Over", short_name: "Step.Over", group: "Execution", description: "Step over function call", min_version: "all"))
+
+    # --- AREA commands ---
+    cmds.push(CmmCommandInfo(full_name: "AREA.Create", short_name: "AREA.Create", group: "AREA", description: "Create AREA window", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "AREA.Select", short_name: "AREA.Select", group: "AREA", description: "Select AREA for I/O", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "AREA.view", short_name: "AREA.view", group: "AREA", description: "Open AREA window", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "AREA.RESet", short_name: "AREA.RESet", group: "AREA", description: "Reset AREA system", min_version: "all"))
+
+    # --- SETUP commands ---
+    cmds.push(CmmCommandInfo(full_name: "SETUP.EXT", short_name: "SETUP.EXT", group: "SETUP", description: "Set file extension", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "SETUP.SOUND", short_name: "SETUP.SOUND", group: "SETUP", description: "Configure sound", min_version: "all"))
+
+    # --- DIALOG commands ---
+    cmds.push(CmmCommandInfo(full_name: "DIALOG.OK", short_name: "DIALOG.OK", group: "DIALOG", description: "Show OK dialog", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "DIALOG.YESNO", short_name: "DIALOG.YESNO", group: "DIALOG", description: "Show Yes/No dialog", min_version: "all"))
+
+    # --- Misc commands ---
+    cmds.push(CmmCommandInfo(full_name: "TOOLBAR", short_name: "TOOLBAR", group: "Misc", description: "Show/hide toolbar", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "STATUSBAR", short_name: "STATUSBAR", group: "Misc", description: "Show/hide status bar", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "FRAMEPOS", short_name: "FRAMEPOS", group: "Misc", description: "Set frame position", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "TYPE", short_name: "TYPE", group: "Misc", description: "Display file content", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "ChDir.DO", short_name: "CD.DO", group: "Misc", description: "Change dir and run script", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "STOre", short_name: "STOre", group: "Misc", description: "Store settings", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "EVAL", short_name: "EVAL", group: "Misc", description: "Evaluate expression", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "HELP.Index", short_name: "HELP.Index", group: "Misc", description: "Open help index", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "RADIX.Classic", short_name: "RADIX.Classic", group: "Misc", description: "Set classic radix mode", min_version: "all"))
+
+    # --- Control flow keywords (treated as commands) ---
+    cmds.push(CmmCommandInfo(full_name: "IF", short_name: "IF", group: "Control", description: "Conditional branch", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "ELSE", short_name: "ELSE", group: "Control", description: "Else branch", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "WHILE", short_name: "WHILE", group: "Control", description: "While loop", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "RePeaT", short_name: "RPT", group: "Control", description: "Repeat loop", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "GOTO", short_name: "GOTO", group: "Control", description: "Jump to label", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "GOSUB", short_name: "GOSUB", group: "Control", description: "Call subroutine", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "RETURN", short_name: "RETURN", group: "Control", description: "Return from subroutine", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "JUMPTO", short_name: "JUMPTO", group: "Control", description: "Cross-module jump", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "DO", short_name: "DO", group: "Control", description: "Call CMM script", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "ENDDO", short_name: "ENDDO", group: "Control", description: "End script / return value", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "RUN", short_name: "RUN", group: "Control", description: "Run script (clear stack)", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "END", short_name: "END", group: "Control", description: "Terminate script", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "STOP", short_name: "STOP", group: "Control", description: "Halt execution", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "CONTinue", short_name: "CONT", group: "Control", description: "Resume target", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "WAIT", short_name: "WAIT", group: "Control", description: "Wait for condition or time", min_version: "all"))
+
+    # --- Declaration keywords ---
+    cmds.push(CmmCommandInfo(full_name: "LOCAL", short_name: "LOCAL", group: "Declaration", description: "Declare local macro", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "GLOBAL", short_name: "GLOBAL", group: "Declaration", description: "Declare global macro", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "PRIVATE", short_name: "PRIVATE", group: "Declaration", description: "Declare private macro", min_version: "2012"))
+    cmds.push(CmmCommandInfo(full_name: "ENTRY", short_name: "ENTRY", group: "Declaration", description: "Bind subroutine parameters", min_version: "all"))
+
+    # --- Event commands ---
+    cmds.push(CmmCommandInfo(full_name: "ON", short_name: "ON", group: "Event", description: "Set event handler", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "GLOBALON", short_name: "GLOBALON", group: "Event", description: "Set global event handler", min_version: "2012"))
+
+    # --- I/O commands ---
+    cmds.push(CmmCommandInfo(full_name: "OPEN", short_name: "OPEN", group: "IO", description: "Open file channel", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "CLOSE", short_name: "CLOSE", group: "IO", description: "Close file channel", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "READ", short_name: "READ", group: "IO", description: "Read from file channel", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "WRITE", short_name: "WRITE", group: "IO", description: "Write to file channel", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "WRITEB", short_name: "WRITEB", group: "IO", description: "Write binary to file channel", min_version: "2013"))
+    cmds.push(CmmCommandInfo(full_name: "APPEND", short_name: "APPEND", group: "IO", description: "Append to file", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "PRINT", short_name: "PRINT", group: "IO", description: "Print to output area", min_version: "all"))
+
+    # --- Encryption commands ---
+    cmds.push(CmmCommandInfo(full_name: "ENCRYPTPER", short_name: "ENCRYPTPER", group: "Misc", description: "Encrypt PER file", min_version: "2013"))
+
+    # --- Screen commands ---
+    cmds.push(CmmCommandInfo(full_name: "SCREEN.display", short_name: "SCREEN", group: "Screen", description: "Control screen update", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "SCREEN.ON", short_name: "SCREEN.ON", group: "Screen", description: "Enable screen updates", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "SCREEN.OFF", short_name: "SCREEN.OFF", group: "Screen", description: "Disable screen updates", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "SCREEN.ALways", short_name: "SCREEN.ALways", group: "Screen", description: "Always update screen", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "SCREEN.WAIT", short_name: "SCREEN.WAIT", group: "Screen", description: "Wait for screen update", min_version: "all"))
+
+    # --- AREA extended commands ---
+    cmds.push(CmmCommandInfo(full_name: "AREA.CLEAR", short_name: "AREA.CLEAR", group: "AREA", description: "Clear AREA window contents", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "AREA.CLOSE", short_name: "AREA.CLOSE", group: "AREA", description: "Close AREA window", min_version: "all"))
+
+    # --- FLASH extended commands ---
+    cmds.push(CmmCommandInfo(full_name: "FLASH.ReProgram.ALL", short_name: "FLASH.ReProgram.ALL", group: "FLASH", description: "Reprogram all flash areas", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "FLASH.ReProgram.off", short_name: "FLASH.ReProgram.off", group: "FLASH", description: "End flash reprogram mode", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "FLASH.Program.ALL", short_name: "FLASH.Program.ALL", group: "FLASH", description: "Program all flash areas", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "FLASH.Program.off", short_name: "FLASH.Program.off", group: "FLASH", description: "End flash program mode", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "FLASH.TARGET", short_name: "FLASH.TARGET", group: "FLASH", description: "Set flash target program", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "FLASH.UNSECUREerase", short_name: "FLASH.UNSECUREerase", group: "FLASH", description: "Unsecure and erase flash", min_version: "all"))
+
+    # --- FLASHFILE commands ---
+    cmds.push(CmmCommandInfo(full_name: "FLASHFILE.RESet", short_name: "FLASHFILE.RESet", group: "FLASHFILE", description: "Reset FLASHFILE config", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "FLASHFILE.CONFIG", short_name: "FLASHFILE.CONFIG", group: "FLASHFILE", description: "Configure FLASHFILE", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "FLASHFILE.TARGET", short_name: "FLASHFILE.TARGET", group: "FLASHFILE", description: "Set FLASHFILE target program", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "FLASHFILE.GETID", short_name: "FLASHFILE.GETID", group: "FLASHFILE", description: "Read flash device ID", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "FLASHFILE.UNLOCK", short_name: "FLASHFILE.UNLOCK", group: "FLASHFILE", description: "Unlock flash device", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "FLASHFILE.DUMP", short_name: "FLASHFILE.DUMP", group: "FLASHFILE", description: "Dump flash contents", min_version: "all"))
+
+    # --- Execution extended commands ---
+    cmds.push(CmmCommandInfo(full_name: "Go.direct", short_name: "Go.direct", group: "Execution", description: "Start execution (hardware only)", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "Break.direct", short_name: "Break.direct", group: "Break", description: "Force target break", min_version: "all"))
+
+    # --- PARAMETERS and RETURNVALUES ---
+    cmds.push(CmmCommandInfo(full_name: "PARAMETERS", short_name: "PARAMETERS", group: "Declaration", description: "Declare subroutine parameters (alias for ENTRY+PRIVATE)", min_version: "2013"))
+    cmds.push(CmmCommandInfo(full_name: "RETURNVALUES", short_name: "RETURNVALUES", group: "Declaration", description: "Declare subroutine return values", min_version: "2013"))
+
+    # --- Print-like commands ---
+    cmds.push(CmmCommandInfo(full_name: "PRINTF", short_name: "PRINTF", group: "IO", description: "Formatted print output", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "ECHO", short_name: "ECHO", group: "IO", description: "Echo text to output", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "BEEP", short_name: "BEEP", group: "IO", description: "Emit beep sound", min_version: "all"))
+
+    # --- Trace extended commands ---
+    cmds.push(CmmCommandInfo(full_name: "Trace.METHOD", short_name: "Trace.METHOD", group: "Trace", description: "Set trace method", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "Trace.SIZE", short_name: "Trace.SIZE", group: "Trace", description: "Set trace buffer size", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "Trace.CLOCK", short_name: "Trace.CLOCK", group: "Trace", description: "Set trace clock", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "Trace.Init", short_name: "Trace.Init", group: "Trace", description: "Initialize trace", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "Trace.STATistic.Func", short_name: "Trace.STATistic.Func", group: "Trace", description: "Show function statistics", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "Trace.Chart.Func", short_name: "Trace.Chart.Func", group: "Trace", description: "Show function chart", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "Trace.FILTER.Address", short_name: "Trace.FILTER.Address", group: "Trace", description: "Filter trace by address", min_version: "all"))
+
+    # --- Analyzer commands ---
+    cmds.push(CmmCommandInfo(full_name: "Analyzer.RESet", short_name: "Analyzer.RESet", group: "Analyzer", description: "Reset analyzer", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "Analyzer.AutoFocus", short_name: "Analyzer.AutoFocus", group: "Analyzer", description: "Auto focus analyzer", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "Analyzer.TriggerSet", short_name: "Analyzer.TriggerSet", group: "Analyzer", description: "Set analyzer trigger", min_version: "all"))
+
+    # --- TPIU / Trace port ---
+    cmds.push(CmmCommandInfo(full_name: "TPIU.PortSize", short_name: "TPIU.PortSize", group: "TPIU", description: "Set TPIU port size", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "TPIU.PortMode", short_name: "TPIU.PortMode", group: "TPIU", description: "Set TPIU port mode", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "TRACEPORT.Set", short_name: "TRACEPORT.Set", group: "TPIU", description: "Set trace port mode", min_version: "all"))
+
+    # --- MMU / Translation commands ---
+    cmds.push(CmmCommandInfo(full_name: "MMU.FORMAT", short_name: "MMU.FORMAT", group: "MMU", description: "Set MMU page table format", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "MMU.SCAN", short_name: "MMU.SCAN", group: "MMU", description: "Scan MMU page table", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "TRANSlation.Create", short_name: "TRANSlation.Create", group: "MMU", description: "Create address translation", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "TRANSlation.COMMON", short_name: "TRANSlation.COMMON", group: "MMU", description: "Set common translation range", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "TRANSlation.ON", short_name: "TRANSlation.ON", group: "MMU", description: "Enable address translation", min_version: "all"))
+
+    # --- TASK / RTOS commands ---
+    cmds.push(CmmCommandInfo(full_name: "TASK.CONFIG", short_name: "TASK.CONFIG", group: "TASK", description: "Configure RTOS awareness", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "TASK.List", short_name: "TASK.List", group: "TASK", description: "List RTOS tasks/threads", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "TASK.DTask", short_name: "TASK.DTask", group: "TASK", description: "Display task details", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "TASK.ORTI", short_name: "TASK.ORTI", group: "TASK", description: "Load ORTI RTOS description", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "MENU.ReProgram", short_name: "MENU.ReProgram", group: "TASK", description: "Load RTOS menu extension", min_version: "all"))
+
+    # --- Symbol extended commands ---
+    cmds.push(CmmCommandInfo(full_name: "sYmbol.AutoLOAD.CHECK", short_name: "sYmbol.AutoLOAD.CHECK", group: "Symbol", description: "Check and auto-load symbols", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "sYmbol.AutoLOAD.CHECKLINUX", short_name: "sYmbol.AutoLOAD.CHECKLINUX", group: "Symbol", description: "Auto-load Linux kernel symbols", min_version: "all"))
+
+    # --- PER commands ---
+    cmds.push(CmmCommandInfo(full_name: "PER.Set.simple", short_name: "PER.Set.simple", group: "PER", description: "Set peripheral register (simple mode)", min_version: "all"))
+
+    # --- Data extended commands ---
+    cmds.push(CmmCommandInfo(full_name: "Data.Compare", short_name: "D.Compare", group: "Data", description: "Compare memory ranges", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "Data.Assemble", short_name: "D.A", group: "Data", description: "Assemble instruction at address", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "Data.LOAD.Elf", short_name: "D.LOAD.Elf", group: "Data", description: "Load ELF format file", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "Data.LOAD.Binary", short_name: "D.LOAD.B", group: "Data", description: "Load binary file", min_version: "all"))
+
+    # --- CORE commands ---
+    cmds.push(CmmCommandInfo(full_name: "CORE.ASSIGN", short_name: "CORE.ASSIGN", group: "Core", description: "Assign cores for multi-core debug", min_version: "all"))
+
+    # --- Group commands ---
+    cmds.push(CmmCommandInfo(full_name: "GROUP.Create", short_name: "GROUP.Create", group: "Misc", description: "Create symbol group", min_version: "all"))
+
+    # --- TERM commands ---
+    cmds.push(CmmCommandInfo(full_name: "TERM.METHOD", short_name: "TERM.METHOD", group: "Terminal", description: "Set terminal method", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "TERM.Out", short_name: "TERM.Out", group: "Terminal", description: "Write to terminal output", min_version: "all"))
+
+    # --- HELP commands ---
+    cmds.push(CmmCommandInfo(full_name: "HELP.FILTER.Add", short_name: "HELP.FILTER.Add", group: "Misc", description: "Add help filter keyword", min_version: "all"))
+
+    # --- Window extended commands ---
+    cmds.push(CmmCommandInfo(full_name: "WinPAGE.Create", short_name: "WinPAGE.Create", group: "Window", description: "Create window page", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "WinPAGE.select", short_name: "WinPAGE.select", group: "Window", description: "Select window page", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "WinPOS", short_name: "WinPOS", group: "Window", description: "Set window position and size", min_version: "all"))
+
+    # --- Misc extended commands ---
+    cmds.push(CmmCommandInfo(full_name: "MKTEMP", short_name: "MKTEMP", group: "Misc", description: "Create temporary directory", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "UNZIP", short_name: "UNZIP", group: "Misc", description: "Extract ZIP archive", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "RM", short_name: "RM", group: "Misc", description: "Remove file or directory", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "ChDir", short_name: "CD", group: "Misc", description: "Change directory", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "autostore", short_name: "autostore", group: "Misc", description: "Auto-store window positions", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "menu.rp", short_name: "menu.rp", group: "Misc", description: "Reprogram menu", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "DIALOG.END", short_name: "DIALOG.END", group: "DIALOG", description: "Close/end dialog", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "DIALOG.OK", short_name: "DIALOG.OK", group: "DIALOG", description: "Show OK dialog box", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "Var.Frame", short_name: "V.Frame", group: "Var", description: "Show variable frame", min_version: "all"))
+
+    # --- JTAG commands ---
+    cmds.push(CmmCommandInfo(full_name: "JTAG.PROGRAM.JAM", short_name: "JTAG.PROGRAM.JAM", group: "JTAG", description: "Program via JTAG JAM file", min_version: "all"))
+
+    # --- MCDS commands ---
+    cmds.push(CmmCommandInfo(full_name: "MCDS.RESet", short_name: "MCDS.RESet", group: "Trace", description: "Reset MCDS trace", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "MCDS.ON", short_name: "MCDS.ON", group: "Trace", description: "Enable MCDS trace", min_version: "all"))
+
+    # --- tronchip / CoreSight commands ---
+    cmds.push(CmmCommandInfo(full_name: "tronchip.set", short_name: "tronchip.set", group: "Trace", description: "Configure on-chip trace", min_version: "all"))
+
+    # --- RADIX ---
+    cmds.push(CmmCommandInfo(full_name: "RADIX.hex", short_name: "RADIX.hex", group: "Misc", description: "Set hexadecimal radix", min_version: "all"))
+
+    CmmCommandDB(commands: cmds)
+
+# ---------------------------------------------------------------------------
+# Lookup helpers
+# ---------------------------------------------------------------------------
+
+# Convert text to lower case for case-insensitive comparison.
+# Simple implementation covering ASCII A-Z.
+fn to_lower(s: text) -> text:
+    var result = ""
+    var i = 0
+    while i < s.len():
+        val ch = s[i:i + 1]
+        if ch >= "A" and ch <= "Z":
+            result = result + ch.to_lower()
+        else:
+            result = result + ch
+        i = i + 1
+    result
+
+# Look up a command by full_name or short_name (case-insensitive).
+#
+# Returns the first matching CmmCommandInfo, or nil if not found.
+fn lookup_command(db: CmmCommandDB, name: text) -> CmmCommandInfo?:
+    val lower_name = to_lower(name)
+    var i = 0
+    while i < db.commands.len():
+        val cmd = db.commands[i]
+        if to_lower(cmd.full_name) == lower_name:
+            return cmd
+        if to_lower(cmd.short_name) == lower_name:
+            return cmd
+        i = i + 1
+    nil
+
+# Return all commands whose full_name or short_name starts with prefix
+# (case-insensitive).  Used for auto-completion.
+fn get_completions(db: CmmCommandDB, prefix: text) -> [CmmCommandInfo]:
+    val lower_prefix = to_lower(prefix)
+    var results: [CmmCommandInfo] = []
+    var i = 0
+    while i < db.commands.len():
+        val cmd = db.commands[i]
+        val lower_full = to_lower(cmd.full_name)
+        val lower_short = to_lower(cmd.short_name)
+        if starts_with(lower_full, lower_prefix) or starts_with(lower_short, lower_prefix):
+            results.push(cmd)
+        i = i + 1
+    results
+
+# Return all commands belonging to a given group (case-insensitive).
+fn get_group_commands(db: CmmCommandDB, group: text) -> [CmmCommandInfo]:
+    val lower_group = to_lower(group)
+    var results: [CmmCommandInfo] = []
+    var i = 0
+    while i < db.commands.len():
+        val cmd = db.commands[i]
+        if to_lower(cmd.group) == lower_group:
+            results.push(cmd)
+        i = i + 1
+    results
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+# Check if text starts with a given prefix
+fn starts_with(haystack: text, prefix: text) -> bool:
+    if prefix.len() > haystack.len():
+        return false
+    haystack.slice(0, prefix.len()) == prefix

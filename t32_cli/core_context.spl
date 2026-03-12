@@ -1,0 +1,106 @@
+# T32 CLI — Core context commands
+# Manages multi-core context: list cores, select active core
+
+use app.t32_cli.session.{CLI_CURRENT_SESSION, CLI_CURRENT_CORE, CLI_SESSIONS}
+use app.t32_cli.error_codes.{t32_err_no_session, t32_err_core_not_found}
+
+# Module-level core registry
+# Each session can have multiple cores; we track them here
+var CLI_CORES: [CliCoreInfo] = []
+
+class CliCoreInfo:
+    core_id: text
+    session_id: text
+    label: text
+    instance_binding: text
+    active: bool
+
+impl CliCoreInfo:
+    static fn create(core_id: text, session_id: text, label: text, binding: text) -> CliCoreInfo:
+        CliCoreInfo(
+            core_id: core_id,
+            session_id: session_id,
+            label: label,
+            instance_binding: binding,
+            active: false
+        )
+
+# List cores for a given session (or the current session if empty)
+fn cli_cores_list(session_id: text) -> text:
+    var sid = session_id
+    if sid == "":
+        sid = CLI_CURRENT_SESSION
+
+    if sid == "":
+        return t32_err_no_session()
+
+    var found_any = false
+    var out = "Cores for session {sid}:\n"
+    out = out + "  ID            Label                  Binding\n"
+    out = out + "  ------------  ---------------------  --------------------\n"
+
+    for c in CLI_CORES:
+        if c.session_id == sid:
+            found_any = true
+            var marker = "  "
+            if c.core_id == CLI_CURRENT_CORE:
+                marker = "* "
+            out = out + "{marker}{c.core_id}"
+            var pad1 = pad_to(c.core_id, 14)
+            out = out + pad1
+            out = out + "  {c.label}"
+            var pad2 = pad_to(c.label, 21)
+            out = out + pad2
+            out = out + "  {c.instance_binding}\n"
+
+    if found_any == false:
+        out = out + "  (no cores registered)\n"
+        out = out + "\n"
+        out = out + "Add cores with the session configuration or CMM scripts.\n"
+
+    out
+
+# Pad helper for alignment
+fn pad_to(s: text, width: i64) -> text:
+    var padding = ""
+    var needed = width - s.len()
+    while needed > 0:
+        padding = padding + " "
+        needed = needed - 1
+    padding
+
+# Switch active core
+fn cli_core_select(core_id: text) -> Result<text, text>:
+    var found = false
+    for c in CLI_CORES:
+        if c.core_id == core_id:
+            found = true
+            CLI_CURRENT_CORE = core_id
+            return Ok("Active core: {core_id} ({c.label})")
+
+    if found == false:
+        return Err(t32_err_core_not_found(core_id, core_id_list()))
+    Ok("")
+
+# Return current core id
+fn cli_current_core() -> text:
+    CLI_CURRENT_CORE
+
+# Register a core (used during session setup)
+fn cli_core_register(core_id: text, session_id: text, label: text, binding: text):
+    val core = CliCoreInfo.create(core_id, session_id, label, binding)
+    CLI_CORES.push(core)
+    # Auto-select if first core in session
+    var count = 0
+    for c in CLI_CORES:
+        if c.session_id == session_id:
+            count = count + 1
+    if count == 1:
+        CLI_CURRENT_CORE = core_id
+
+# Get list of all core ids for suggestions
+fn core_id_list() -> [text]:
+    var ids: [text] = []
+    for c in CLI_CORES:
+        ids.push(c.core_id)
+    ids

@@ -1,0 +1,718 @@
+# CMM Language Server — LSP Method Handlers
+# Implements the LSP protocol methods for the CMM language.
+#
+# Handlers:
+#   initialize          — server capabilities
+#   textDocument/didOpen, didChange, didClose — document sync
+#   textDocument/completion   — command/function/macro completions
+#   textDocument/hover        — command/function documentation
+#   textDocument/definition   — goto label/macro definition
+#   textDocument/documentSymbol — labels and macros as symbols
+#   publishDiagnostics  — diagnostic notification builder
+
+export handle_initialize, handle_did_open, handle_did_change, handle_did_close
+export handle_completion, handle_hover, handle_definition, handle_document_symbol
+export build_diagnostics_notification
+
+use lsp_document.{DocumentStore, CmmDocument}
+use cmm_ast.{CmmProgram}
+use cmm_commands.{CmmCommandDB, CmmCommandInfo, lookup_command, get_completions}
+use cmm_functions.{CmmFuncDB, CmmFuncInfo, lookup_function, get_function_completions}
+use cmm_diagnostics.{CmmDiagnostic, CmmDiagnosticKind}
+use cmm_analyzer.{CmmAnalysisResult, CmmSymbolTable, CmmSymbol, CmmSymbolKind}
+use lsp_json.{JsonPair, json_object, json_array, json_string, json_number, json_bool, json_null}
+use lsp_json.{json_get_string, json_get_int, json_get_object, escape_json}
+
+# ---------------------------------------------------------------------------
+# initialize
+# ---------------------------------------------------------------------------
+
+# Handle the "initialize" request. Returns the server capabilities JSON.
+fn handle_initialize(params: text) -> text:
+    # Build trigger characters array
+    var triggers: [text] = []
+    triggers.push(json_string("."))
+    triggers.push(json_string("&"))
+    triggers.push(json_string("/"))
+
+    # completionProvider
+    var comp_pairs: [JsonPair] = []
+    comp_pairs.push(JsonPair(key: "triggerCharacters", value: json_array(triggers)))
+    val completion_provider = json_object(comp_pairs)
+
+    # textDocumentSync = 1 (full sync)
+    # Build capabilities object
+    var cap_pairs: [JsonPair] = []
+    cap_pairs.push(JsonPair(key: "textDocumentSync", value: json_number(1)))
+    cap_pairs.push(JsonPair(key: "completionProvider", value: completion_provider))
+    cap_pairs.push(JsonPair(key: "hoverProvider", value: json_bool(true)))
+    cap_pairs.push(JsonPair(key: "definitionProvider", value: json_bool(true)))
+    cap_pairs.push(JsonPair(key: "documentSymbolProvider", value: json_bool(true)))
+    val capabilities = json_object(cap_pairs)
+
+    # Server info
+    var info_pairs: [JsonPair] = []
+    info_pairs.push(JsonPair(key: "name", value: json_string("cmm-lsp")))
+    info_pairs.push(JsonPair(key: "version", value: json_string("0.1.0")))
+    val server_info = json_object(info_pairs)
+
+    # Result object
+    var result_pairs: [JsonPair] = []
+    result_pairs.push(JsonPair(key: "capabilities", value: capabilities))
+    result_pairs.push(JsonPair(key: "serverInfo", value: server_info))
+    json_object(result_pairs)
+
+# ---------------------------------------------------------------------------
+# textDocument/didOpen
+# ---------------------------------------------------------------------------
+
+fn handle_did_open(params: text, store: DocumentStore):
+    val td = json_get_object(params, "textDocument") ?? "{}"
+    val uri = json_get_string(td, "uri") ?? ""
+    val content = json_get_string(td, "text") ?? ""
+    val version = json_get_int(td, "version") ?? 0
+    store.open_document(uri, content, version)
+
+# ---------------------------------------------------------------------------
+# textDocument/didChange
+# ---------------------------------------------------------------------------
+
+fn handle_did_change(params: text, store: DocumentStore):
+    val td = json_get_object(params, "textDocument") ?? "{}"
+    val uri = json_get_string(td, "uri") ?? ""
+    val version = json_get_int(td, "version") ?? 0
+
+    # With full sync (textDocumentSync=1), the full text is in
+    # contentChanges[0].text. We extract it from the JSON.
+    val changes_text = extract_first_change_text(params)
+    store.update_document(uri, changes_text, version)
+
+# Extract the text from the first contentChanges entry.
+# contentChanges is an array: [{"text": "..."}]
+fn extract_first_change_text(params: text) -> text:
+    # Find "contentChanges" in the JSON
+    val key = "contentChanges"
+    var pos = 0
+    val search = "\"contentChanges\""
+    while pos < params.len():
+        val remaining = params.len() - pos
+        if remaining < search.len():
+            return ""
+        if params[pos:pos + search.len()] == search:
+            break
+        pos = pos + 1
+    if pos >= params.len():
+        return ""
+    # Find the opening bracket [
+    var bracket_pos = pos + search.len()
+    while bracket_pos < params.len():
+        val c = params[bracket_pos:bracket_pos + 1]
+        if c == "[":
+            break
+        bracket_pos = bracket_pos + 1
+    if bracket_pos >= params.len():
+        return ""
+    # Find the first object in the array
+    var obj_start = bracket_pos + 1
+    while obj_start < params.len():
+        val c = params[obj_start:obj_start + 1]
+        if c == "{":
+            break
+        obj_start = obj_start + 1
+    if obj_start >= params.len():
+        return ""
+    # Find matching close brace
+    var depth = 0
+    var in_str = false
+    var obj_end = obj_start
+    while obj_end < params.len():
+        val ch = params[obj_end:obj_end + 1]
+        if in_str:
+            if ch == "\\":
+                obj_end = obj_end + 2
+            else if ch == "\"":
+                in_str = false
+                obj_end = obj_end + 1
+            else:
+                obj_end = obj_end + 1
+        else:
+            if ch == "\"":
+                in_str = true
+                obj_end = obj_end + 1
+            else if ch == "{":
+                depth = depth + 1
+                obj_end = obj_end + 1
+            else if ch == "}":
+                depth = depth - 1
+                if depth == 0:
+                    val obj_json = params[obj_start:obj_end + 1]
+                    val result = json_get_string(obj_json, "text")
+                    return result ?? ""
+                obj_end = obj_end + 1
+            else:
+                obj_end = obj_end + 1
+    ""
+
+# ---------------------------------------------------------------------------
+# textDocument/didClose
+# ---------------------------------------------------------------------------
+
+fn handle_did_close(params: text, store: DocumentStore):
+    val td = json_get_object(params, "textDocument") ?? "{}"
+    val uri = json_get_string(td, "uri") ?? ""
+    store.close_document(uri)
+
+# ---------------------------------------------------------------------------
+# textDocument/completion
+# ---------------------------------------------------------------------------
+
+# Handle completion requests. Returns a CompletionList JSON.
+fn handle_completion(params: text, store: DocumentStore, cmd_db: CmmCommandDB, func_db: CmmFuncDB) -> text:
+    val td = json_get_object(params, "textDocument") ?? "{}"
+    val uri = json_get_string(td, "uri") ?? ""
+    val position = json_get_object(params, "position") ?? "{}"
+    val line = json_get_int(position, "line") ?? 0
+    val character = json_get_int(position, "character") ?? 0
+
+    val doc = store.get_document(uri)
+    if not doc.?:
+        return empty_completion_list()
+
+    val document = doc ?? CmmDocument(uri: "", content: "", version: 0, program: parse_empty_program(), analysis: empty_analysis())
+
+    # Determine the trigger context from the character before the cursor
+    val trigger_char = get_char_before_cursor(document.content, line, character)
+    var items: [text] = []
+
+    if trigger_char == ".":
+        # Complete sub-commands: get the prefix before the dot
+        val prefix = get_word_before_dot(document.content, line, character)
+        val matches = get_completions(cmd_db, prefix + ".")
+        var i = 0
+        while i < matches.len():
+            items.push(make_completion_item(matches[i].full_name, 6, matches[i].description))
+            i = i + 1
+        # Also try function completions
+        val func_matches = get_function_completions(func_db, prefix + ".")
+        i = 0
+        while i < func_matches.len():
+            items.push(make_completion_item(func_matches[i].name, 3, func_matches[i].description))
+            i = i + 1
+    else if trigger_char == "&":
+        # Complete known macros from the symbol table
+        val macros = document.analysis.symbols.macros()
+        var i = 0
+        while i < macros.len():
+            val label = "&" + macros[i].name
+            items.push(make_completion_item(label, 6, "Macro variable"))
+            i = i + 1
+    else if trigger_char == "/":
+        # Option completions — common options
+        items.push(make_completion_item("/Read", 6, "Read access mode"))
+        items.push(make_completion_item("/Write", 6, "Write access mode"))
+        items.push(make_completion_item("/Create", 6, "Create file"))
+        items.push(make_completion_item("/Append", 6, "Append mode"))
+        items.push(make_completion_item("/Binary", 6, "Binary mode"))
+        items.push(make_completion_item("/Long", 6, "Long data size"))
+        items.push(make_completion_item("/Word", 6, "Word data size"))
+        items.push(make_completion_item("/Byte", 6, "Byte data size"))
+    else:
+        # Default: complete commands and keywords
+        val prefix = get_word_at_cursor(document.content, line, character)
+        if prefix != "":
+            val matches = get_completions(cmd_db, prefix)
+            var i = 0
+            while i < matches.len():
+                items.push(make_completion_item(matches[i].full_name, 14, matches[i].description))
+                i = i + 1
+            # Function completions
+            val func_matches = get_function_completions(func_db, prefix)
+            i = 0
+            while i < func_matches.len():
+                items.push(make_completion_item(func_matches[i].name, 3, func_matches[i].description))
+                i = i + 1
+        else:
+            # No prefix — offer top-level command groups
+            add_keyword_completions(items)
+
+    # Build the CompletionList
+    var list_pairs: [JsonPair] = []
+    list_pairs.push(JsonPair(key: "isIncomplete", value: json_bool(false)))
+    list_pairs.push(JsonPair(key: "items", value: json_array(items)))
+    json_object(list_pairs)
+
+# Build a single CompletionItem JSON object.
+# kind: 1=Text, 3=Function, 6=Variable, 14=Keyword
+fn make_completion_item(label: text, kind: i64, detail: text) -> text:
+    var pairs: [JsonPair] = []
+    pairs.push(JsonPair(key: "label", value: json_string(label)))
+    pairs.push(JsonPair(key: "kind", value: json_number(kind)))
+    pairs.push(JsonPair(key: "detail", value: json_string(detail)))
+    json_object(pairs)
+
+fn empty_completion_list() -> text:
+    var list_pairs: [JsonPair] = []
+    list_pairs.push(JsonPair(key: "isIncomplete", value: json_bool(false)))
+    list_pairs.push(JsonPair(key: "items", value: json_array([])))
+    json_object(list_pairs)
+
+# Add common CMM keyword completions to the items list.
+fn add_keyword_completions(items: [text]):
+    items.push(make_completion_item("IF", 14, "Conditional branch"))
+    items.push(make_completion_item("ELSE", 14, "Else branch"))
+    items.push(make_completion_item("WHILE", 14, "While loop"))
+    items.push(make_completion_item("RePeaT", 14, "Repeat loop"))
+    items.push(make_completion_item("GOTO", 14, "Jump to label"))
+    items.push(make_completion_item("GOSUB", 14, "Call subroutine"))
+    items.push(make_completion_item("RETURN", 14, "Return from subroutine"))
+    items.push(make_completion_item("LOCAL", 14, "Declare local macro"))
+    items.push(make_completion_item("GLOBAL", 14, "Declare global macro"))
+    items.push(make_completion_item("PRIVATE", 14, "Declare private macro"))
+    items.push(make_completion_item("ENTRY", 14, "Bind subroutine parameters"))
+    items.push(make_completion_item("DO", 14, "Call CMM script"))
+    items.push(make_completion_item("ENDDO", 14, "End script / return value"))
+    items.push(make_completion_item("PRINT", 14, "Print to output area"))
+    items.push(make_completion_item("WAIT", 14, "Wait for condition or time"))
+    items.push(make_completion_item("ON", 14, "Set event handler"))
+    items.push(make_completion_item("OPEN", 14, "Open file channel"))
+    items.push(make_completion_item("CLOSE", 14, "Close file channel"))
+    items.push(make_completion_item("READ", 14, "Read from file channel"))
+    items.push(make_completion_item("WRITE", 14, "Write to file channel"))
+
+# ---------------------------------------------------------------------------
+# textDocument/hover
+# ---------------------------------------------------------------------------
+
+# Handle hover requests. Returns Hover JSON or null.
+fn handle_hover(params: text, store: DocumentStore, cmd_db: CmmCommandDB, func_db: CmmFuncDB) -> text:
+    val td = json_get_object(params, "textDocument") ?? "{}"
+    val uri = json_get_string(td, "uri") ?? ""
+    val position = json_get_object(params, "position") ?? "{}"
+    val line = json_get_int(position, "line") ?? 0
+    val character = json_get_int(position, "character") ?? 0
+
+    val doc = store.get_document(uri)
+    if not doc.?:
+        return json_null()
+
+    val document = doc ?? CmmDocument(uri: "", content: "", version: 0, program: parse_empty_program(), analysis: empty_analysis())
+
+    # Get the word under the cursor
+    val word = get_word_at_position(document.content, line, character)
+    if word == "":
+        return json_null()
+
+    # Try command lookup
+    val cmd = lookup_command(cmd_db, word)
+    if cmd.?:
+        val cmd_info = cmd ?? CmmCommandInfo(full_name: "", short_name: "", group: "", description: "", min_version: "")
+        val hover_text = "**" + cmd_info.full_name + "** (" + cmd_info.short_name + ")\n\n" + cmd_info.description + "\n\nGroup: " + cmd_info.group
+        return make_hover_result(hover_text)
+
+    # Try function lookup
+    val func = lookup_function(func_db, word)
+    if func.?:
+        val func_info = func ?? CmmFuncInfo(name: "", signature: "", return_type: "", description: "", group: "")
+        val hover_text = "**" + func_info.name + "**\n\n`" + func_info.signature + "`\n\nReturns: " + func_info.return_type + "\n\n" + func_info.description
+        return make_hover_result(hover_text)
+
+    # Try macro lookup in the symbol table
+    val word_no_amp = strip_leading_ampersand(word)
+    if document.analysis.symbols.has_macro(word_no_amp):
+        val syms = document.analysis.symbols.find_by_name(word_no_amp)
+        if syms.len() > 0:
+            val sym = syms[0]
+            val hover_text = "**&" + sym.name + "** (" + sym.scope + " macro)\n\nDeclared at line " + json_number(sym.def_line)
+            return make_hover_result(hover_text)
+
+    # Try label lookup
+    if document.analysis.symbols.has_label(word):
+        val syms = document.analysis.symbols.find_by_name(word)
+        if syms.len() > 0:
+            val sym = syms[0]
+            val hover_text = "**" + sym.name + ":** (label)\n\nDefined at line " + json_number(sym.def_line)
+            return make_hover_result(hover_text)
+
+    json_null()
+
+# Build a Hover result with markdown content.
+fn make_hover_result(markdown: text) -> text:
+    var content_pairs: [JsonPair] = []
+    content_pairs.push(JsonPair(key: "kind", value: json_string("markdown")))
+    content_pairs.push(JsonPair(key: "value", value: json_string(markdown)))
+    val contents = json_object(content_pairs)
+
+    var hover_pairs: [JsonPair] = []
+    hover_pairs.push(JsonPair(key: "contents", value: contents))
+    json_object(hover_pairs)
+
+# ---------------------------------------------------------------------------
+# textDocument/definition
+# ---------------------------------------------------------------------------
+
+# Handle go-to-definition requests.
+# Supports: GOTO/GOSUB targets -> label definition, &macro -> declaration.
+fn handle_definition(params: text, store: DocumentStore) -> text:
+    val td = json_get_object(params, "textDocument") ?? "{}"
+    val uri = json_get_string(td, "uri") ?? ""
+    val position = json_get_object(params, "position") ?? "{}"
+    val line = json_get_int(position, "line") ?? 0
+    val character = json_get_int(position, "character") ?? 0
+
+    val doc = store.get_document(uri)
+    if not doc.?:
+        return json_null()
+
+    val document = doc ?? CmmDocument(uri: "", content: "", version: 0, program: parse_empty_program(), analysis: empty_analysis())
+
+    val word = get_word_at_position(document.content, line, character)
+    if word == "":
+        return json_null()
+
+    # Check for macro reference (strip leading &)
+    val word_no_amp = strip_leading_ampersand(word)
+
+    # Search for label definition
+    val labels = document.analysis.symbols.labels()
+    var i = 0
+    while i < labels.len():
+        if labels[i].name == word or labels[i].name == word_no_amp:
+            return make_location(uri, labels[i].def_line - 1, labels[i].def_column)
+        i = i + 1
+
+    # Search for macro declaration
+    val macros = document.analysis.symbols.macros()
+    i = 0
+    while i < macros.len():
+        if macros[i].name == word_no_amp:
+            return make_location(uri, macros[i].def_line - 1, macros[i].def_column)
+        i = i + 1
+
+    json_null()
+
+# Build a Location JSON object.
+fn make_location(uri: text, line: i64, col: i64) -> text:
+    var start_pairs: [JsonPair] = []
+    start_pairs.push(JsonPair(key: "line", value: json_number(line)))
+    start_pairs.push(JsonPair(key: "character", value: json_number(col)))
+    val start_pos = json_object(start_pairs)
+
+    var end_pairs: [JsonPair] = []
+    end_pairs.push(JsonPair(key: "line", value: json_number(line)))
+    end_pairs.push(JsonPair(key: "character", value: json_number(col)))
+    val end_pos = json_object(end_pairs)
+
+    var range_pairs: [JsonPair] = []
+    range_pairs.push(JsonPair(key: "start", value: start_pos))
+    range_pairs.push(JsonPair(key: "end", value: end_pos))
+    val range = json_object(range_pairs)
+
+    var loc_pairs: [JsonPair] = []
+    loc_pairs.push(JsonPair(key: "uri", value: json_string(uri)))
+    loc_pairs.push(JsonPair(key: "range", value: range))
+    json_object(loc_pairs)
+
+# ---------------------------------------------------------------------------
+# textDocument/documentSymbol
+# ---------------------------------------------------------------------------
+
+# Handle documentSymbol requests. Returns labels and macros as DocumentSymbols.
+fn handle_document_symbol(params: text, store: DocumentStore) -> text:
+    val td = json_get_object(params, "textDocument") ?? "{}"
+    val uri = json_get_string(td, "uri") ?? ""
+
+    val doc = store.get_document(uri)
+    if not doc.?:
+        return json_array([])
+
+    val document = doc ?? CmmDocument(uri: "", content: "", version: 0, program: parse_empty_program(), analysis: empty_analysis())
+
+    var symbols: [text] = []
+
+    # Add labels as symbols (SymbolKind.Key = 20 is not great;
+    # use SymbolKind.Function = 12 for subroutine labels, String = 15 for plain labels)
+    val labels = document.analysis.symbols.labels()
+    var i = 0
+    while i < labels.len():
+        val sym = labels[i]
+        # LSP line numbers are 0-based, CMM spans are 1-based
+        val sym_line = sym.def_line - 1
+        val sym_col = sym.def_column
+        # Use SymbolKind = 12 (Function) for labels
+        symbols.push(make_document_symbol(sym.name + ":", 12, sym_line, sym_col))
+        i = i + 1
+
+    # Add macros as symbols (SymbolKind.Variable = 13)
+    val macros = document.analysis.symbols.macros()
+    i = 0
+    while i < macros.len():
+        val sym = macros[i]
+        val sym_line = sym.def_line - 1
+        val sym_col = sym.def_column
+        val label = "&" + sym.name + " (" + sym.scope + ")"
+        symbols.push(make_document_symbol(label, 13, sym_line, sym_col))
+        i = i + 1
+
+    json_array(symbols)
+
+# Build a SymbolInformation JSON object (simpler than DocumentSymbol).
+fn make_document_symbol(name: text, kind: i64, line: i64, col: i64) -> text:
+    # Build range
+    var start_pairs: [JsonPair] = []
+    start_pairs.push(JsonPair(key: "line", value: json_number(line)))
+    start_pairs.push(JsonPair(key: "character", value: json_number(col)))
+    val start_pos = json_object(start_pairs)
+
+    var end_pairs: [JsonPair] = []
+    end_pairs.push(JsonPair(key: "line", value: json_number(line)))
+    end_pairs.push(JsonPair(key: "character", value: json_number(col + name.len())))
+    val end_pos = json_object(end_pairs)
+
+    var range_pairs: [JsonPair] = []
+    range_pairs.push(JsonPair(key: "start", value: start_pos))
+    range_pairs.push(JsonPair(key: "end", value: end_pos))
+    val range = json_object(range_pairs)
+
+    # Build the DocumentSymbol
+    var pairs: [JsonPair] = []
+    pairs.push(JsonPair(key: "name", value: json_string(name)))
+    pairs.push(JsonPair(key: "kind", value: json_number(kind)))
+    pairs.push(JsonPair(key: "range", value: range))
+    pairs.push(JsonPair(key: "selectionRange", value: range))
+    json_object(pairs)
+
+# ---------------------------------------------------------------------------
+# publishDiagnostics notification builder
+# ---------------------------------------------------------------------------
+
+# Build a textDocument/publishDiagnostics notification for a document.
+# Returns the full JSON-RPC notification text, or nil if no document found.
+fn build_diagnostics_notification(uri: text, store: DocumentStore) -> text?:
+    val doc = store.get_document(uri)
+    if not doc.?:
+        return nil
+
+    val document = doc ?? CmmDocument(uri: "", content: "", version: 0, program: parse_empty_program(), analysis: empty_analysis())
+
+    var diag_items: [text] = []
+    val diagnostics = document.analysis.diagnostics
+    var i = 0
+    while i < diagnostics.len():
+        val d = diagnostics[i]
+        diag_items.push(make_lsp_diagnostic(d))
+        i = i + 1
+
+    # Also include parse errors from the program
+    val parse_errors = document.program.errors
+    i = 0
+    while i < parse_errors.len():
+        # Parse errors are just text; create a diagnostic at line 0
+        var err_pairs: [JsonPair] = []
+        val err_range = make_range(0, 0, 0, 1)
+        err_pairs.push(JsonPair(key: "range", value: err_range))
+        err_pairs.push(JsonPair(key: "severity", value: json_number(1)))
+        err_pairs.push(JsonPair(key: "source", value: json_string("cmm")))
+        err_pairs.push(JsonPair(key: "message", value: json_string(parse_errors[i])))
+        diag_items.push(json_object(err_pairs))
+        i = i + 1
+
+    # Build notification params
+    var params_pairs: [JsonPair] = []
+    params_pairs.push(JsonPair(key: "uri", value: json_string(uri)))
+    params_pairs.push(JsonPair(key: "diagnostics", value: json_array(diag_items)))
+    val notif_params = json_object(params_pairs)
+
+    # Build JSON-RPC notification (no id)
+    var notif_pairs: [JsonPair] = []
+    notif_pairs.push(JsonPair(key: "jsonrpc", value: json_string("2.0")))
+    notif_pairs.push(JsonPair(key: "method", value: json_string("textDocument/publishDiagnostics")))
+    notif_pairs.push(JsonPair(key: "params", value: notif_params))
+    json_object(notif_pairs)
+
+# Convert a CmmDiagnostic to an LSP Diagnostic JSON object.
+fn make_lsp_diagnostic(d: CmmDiagnostic) -> text:
+    # LSP lines are 0-based; CMM diagnostics are 1-based
+    val start_line = d.line - 1
+    val end_line = d.end_line - 1
+    val diag_range = make_range(start_line, d.column, end_line, d.end_column)
+
+    # Severity: 1=Error, 2=Warning, 3=Information, 4=Hint
+    val severity = diagnostic_kind_to_severity(d.kind)
+
+    var pairs: [JsonPair] = []
+    pairs.push(JsonPair(key: "range", value: diag_range))
+    pairs.push(JsonPair(key: "severity", value: json_number(severity)))
+    pairs.push(JsonPair(key: "source", value: json_string("cmm")))
+    pairs.push(JsonPair(key: "message", value: json_string(d.message)))
+    json_object(pairs)
+
+# Convert diagnostic kind to LSP severity number.
+fn diagnostic_kind_to_severity(kind: CmmDiagnosticKind) -> i64:
+    match kind:
+        case CmmDiagnosticKind.Error: 1
+        case CmmDiagnosticKind.Warning: 2
+        case CmmDiagnosticKind.Info: 3
+        case CmmDiagnosticKind.Hint: 4
+
+# Build an LSP Range JSON object.
+fn make_range(start_line: i64, start_char: i64, end_line: i64, end_char: i64) -> text:
+    var start_pairs: [JsonPair] = []
+    start_pairs.push(JsonPair(key: "line", value: json_number(start_line)))
+    start_pairs.push(JsonPair(key: "character", value: json_number(start_char)))
+    val start_pos = json_object(start_pairs)
+
+    var end_pairs: [JsonPair] = []
+    end_pairs.push(JsonPair(key: "line", value: json_number(end_line)))
+    end_pairs.push(JsonPair(key: "character", value: json_number(end_char)))
+    val end_pos = json_object(end_pairs)
+
+    var range_pairs: [JsonPair] = []
+    range_pairs.push(JsonPair(key: "start", value: start_pos))
+    range_pairs.push(JsonPair(key: "end", value: end_pos))
+    json_object(range_pairs)
+
+# ---------------------------------------------------------------------------
+# Text position helpers
+# ---------------------------------------------------------------------------
+
+# Get the content of a specific line from the source text.
+# Returns "" if line is out of range.
+fn get_line_content(content: text, line_number: i64) -> text:
+    var current_line = 0
+    var line_start = 0
+    var i = 0
+    while i < content.len():
+        if current_line == line_number:
+            # Found the line start — read until newline or end
+            var line_end = i
+            while line_end < content.len():
+                val ch = content[line_end:line_end + 1]
+                if ch == "\n" or ch == "\r":
+                    break
+                line_end = line_end + 1
+            return content[i:line_end]
+        if content[i:i + 1] == "\n":
+            current_line = current_line + 1
+        i = i + 1
+    ""
+
+# Get the character just before the cursor position.
+fn get_char_before_cursor(content: text, line: i64, character: i64) -> text:
+    if character <= 0:
+        return ""
+    val line_text = get_line_content(content, line)
+    if character > line_text.len():
+        return ""
+    if character - 1 < 0:
+        return ""
+    line_text[character - 1:character]
+
+# Get the word at a cursor position (the identifier or command under the cursor).
+fn get_word_at_position(content: text, line: i64, character: i64) -> text:
+    val line_text = get_line_content(content, line)
+    if line_text == "":
+        return ""
+
+    # Find start of word (letters, digits, dots, underscores, ampersand)
+    var start = character
+    if start > line_text.len():
+        start = line_text.len()
+    while start > 0:
+        val ch = line_text[start - 1:start]
+        if is_word_char(ch):
+            start = start - 1
+        else:
+            break
+
+    # Find end of word
+    var end_pos = character
+    while end_pos < line_text.len():
+        val ch = line_text[end_pos:end_pos + 1]
+        if is_word_char(ch):
+            end_pos = end_pos + 1
+        else:
+            break
+
+    if start >= end_pos:
+        return ""
+    line_text[start:end_pos]
+
+# Get the word at cursor position (for completion prefix — only before cursor).
+fn get_word_at_cursor(content: text, line: i64, character: i64) -> text:
+    val line_text = get_line_content(content, line)
+    if line_text == "":
+        return ""
+
+    var start = character
+    if start > line_text.len():
+        start = line_text.len()
+    while start > 0:
+        val ch = line_text[start - 1:start]
+        if is_word_char(ch):
+            start = start - 1
+        else:
+            break
+
+    var end_pos = character
+    if end_pos > line_text.len():
+        end_pos = line_text.len()
+    if start >= end_pos:
+        return ""
+    line_text[start:end_pos]
+
+# Get the word before a dot at the cursor position.
+# E.g., for "Data.|" returns "Data".
+fn get_word_before_dot(content: text, line: i64, character: i64) -> text:
+    val line_text = get_line_content(content, line)
+    if line_text == "":
+        return ""
+    # The dot is at character-1
+    val dot_pos = character - 1
+    if dot_pos < 0:
+        return ""
+    # Walk backward from dot_pos to find the start of the prefix
+    var start = dot_pos
+    while start > 0:
+        val ch = line_text[start - 1:start]
+        if is_word_char(ch):
+            start = start - 1
+        else:
+            break
+    if start >= dot_pos:
+        return ""
+    line_text[start:dot_pos]
+
+# Check if a character is part of a word (letters, digits, dot, underscore, ampersand).
+fn is_word_char(ch: text) -> bool:
+    if ch.len() != 1:
+        return false
+    # A-Z
+    if ch >= "A" and ch <= "Z":
+        return true
+    # a-z
+    if ch >= "a" and ch <= "z":
+        return true
+    # 0-9
+    if ch >= "0" and ch <= "9":
+        return true
+    # dot, underscore, ampersand
+    if ch == "." or ch == "_" or ch == "&":
+        return true
+    false
+
+# Strip a leading '&' from a word if present.
+fn strip_leading_ampersand(word: text) -> text:
+    if word.len() > 0:
+        if word[0:1] == "&":
+            return word[1:word.len()]
+    word
+
+# ---------------------------------------------------------------------------
+# Placeholder constructors for default values
+# ---------------------------------------------------------------------------
+
+fn parse_empty_program() -> CmmProgram:
+    CmmProgram(statements: [], file_path: "", errors: [])
+
+fn empty_analysis() -> CmmAnalysisResult:
+    CmmAnalysisResult(diagnostics: [], symbols: CmmSymbolTable(symbols: []))

@@ -1,0 +1,83 @@
+; @target: STM32H743
+; @arch: Cortex-M7
+; @purpose: SWD debug session
+; @requires: SWD, Power Debug II USB
+; @cli-mode: batch
+
+; STM32H743 SWD Debug Session
+
+SCREEN.OFF
+AREA.Create CLI_OUTPUT
+AREA.Select CLI_OUTPUT
+ON ERROR GOSUB error_handler
+
+LOCAL &elf_path &pc_val &sp_val &lr_val
+LOCAL &break_addr &run_state
+
+ENTRY &elf_path
+IF "&elf_path"==""
+  &elf_path="stm32h7_app.elf"
+
+SYStem.RESet
+SYStem.CPU STM32H743
+SYStem.CONFIG.DEBUGPORTTYPE SWD
+SYStem.JtagClock 10MHz
+SYStem.Option DUALPORT ON
+SYStem.Up
+
+; Load application
+Data.LOAD.Elf "&elf_path"
+
+; Set breakpoints
+Break.Set main
+Break.Set HardFault_Handler
+Break.Set SysTick_Handler
+
+; Print register and code views
+WinPrint.Register.view
+WinPrint.Data.List
+WinPrint.Frame.view /Locals /Caller
+
+; Run to main
+Go main
+WAIT !STATE.RUN() 10s
+
+; Read core registers
+&pc_val=Register(PC)
+&sp_val=Register(SP)
+&lr_val=Register(LR)
+PRINT "[REG] pc=" FORMAT.Hex(8., &pc_val)
+PRINT "[REG] sp=" FORMAT.Hex(8., &sp_val)
+PRINT "[REG] lr=" FORMAT.Hex(8., &lr_val)
+
+; Step through code
+Step
+Step
+Step
+
+; Read updated PC
+&pc_val=Register(PC)
+PRINT "[REG] pc_after_step=" FORMAT.Hex(8., &pc_val)
+
+; Continue execution
+Go
+WAIT !STATE.RUN() 5s
+
+IF !STATE.RUN()
+(
+  PRINT "[DEBUG] state=STOPPED pc=" FORMAT.Hex(8., Register(PC))
+  WinPrint.Frame.view /Locals /Caller
+)
+ELSE
+(
+  Break.direct
+  PRINT "[DEBUG] state=HALTED reason=user_break"
+)
+
+PRINT "[STATUS] operation=SUCCESS"
+
+ENDDO TRUE()
+
+error_handler:
+  PRINT "[ERROR] line=" PRACTICE.CALLER.LINE()
+  ENDDO FALSE()

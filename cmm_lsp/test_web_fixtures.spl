@@ -1,0 +1,206 @@
+# CMM LSP Parser — Web & RISC-V Fixture Test Runner
+#
+# Parses all .cmm files from test_fixtures/web/ and test_fixtures/riscv/,
+# runs the analyzer, and reports OK/FAIL per file with error details.
+#
+# Usage:
+#   bin/release/simple examples/10_tooling/cmm_lsp/test_web_fixtures.spl
+
+use cmm_parser.{parse_cmm_source, parse_cmm_file}
+use cmm_analyzer.{analyze_program}
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_dir_list(path: text) -> [text]
+extern fn sys_get_args() -> [text]
+
+# ---------------------------------------------------------------------------
+# Test result tracking
+# ---------------------------------------------------------------------------
+
+struct FileResult:
+    path: text
+    ok: bool
+    parse_error_count: i64
+    diag_count: i64
+    first_error: text
+
+# ---------------------------------------------------------------------------
+# Main test runner
+# ---------------------------------------------------------------------------
+
+fn run_fixture_tests():
+    # Derive base_dir from the script path (first arg is the .spl file)
+    val all_args = sys_get_args()
+    var script_dir = ""
+    if all_args.len() > 0:
+        script_dir = dir_of(all_args[0])
+    var base_dir = script_dir + "/test_fixtures"
+    if script_dir == "":
+        base_dir = "examples/10_tooling/cmm_lsp/test_fixtures"
+
+    print "=== CMM LSP Parser — Web & RISC-V Fixture Tests ==="
+    print "Base dir: {base_dir}"
+    print ""
+
+    var all_results: [FileResult] = []
+    var total = 0
+    var passed = 0
+    var failed = 0
+
+    # Collect fixture files from both subdirectories
+    var cmm_files = collect_cmm_files_recursive(base_dir)
+
+    if cmm_files.len() == 0:
+        print "ERROR: No .cmm fixture files found in {base_dir}"
+        print "Make sure test_fixtures/web/ and test_fixtures/riscv/ contain .cmm files."
+        return
+
+    print "Found {cmm_files.len()} fixture files"
+    print ""
+
+    # Parse and analyze each file
+    var i = 0
+    while i < cmm_files.len():
+        val path = cmm_files[i]
+        val content = rt_file_read_text(path) ?? ""
+        if content == "":
+            print "  SKIP (empty): {path}"
+            i = i + 1
+            continue
+
+        total = total + 1
+
+        # Parse and analyze
+        val program = parse_cmm_source(content)
+        val analysis = analyze_program(program)
+
+        val err_count = program.errors.len()
+        val diag_count = analysis.diagnostics.len()
+
+        var first_err = ""
+        if err_count > 0:
+            first_err = program.errors[0]
+
+        val file_ok = err_count == 0
+        if file_ok:
+            passed = passed + 1
+            var diag_note = ""
+            if diag_count > 0:
+                diag_note = "  ({diag_count} diagnostics)"
+            print "  OK   {short_name(path, base_dir)}{diag_note}"
+        else:
+            failed = failed + 1
+            print "  FAIL {short_name(path, base_dir)}  ({err_count} parse errors)"
+            var ei = 0
+            while ei < err_count and ei < 3:
+                print "       -> {program.errors[ei]}"
+                ei = ei + 1
+
+        all_results.push(FileResult(path: path, ok: file_ok, parse_error_count: err_count, diag_count: diag_count, first_error: first_err))
+        i = i + 1
+
+    # Summary
+    print ""
+    print "=== Summary ==="
+    print "Total:  {total}"
+    print "Passed: {passed}"
+    print "Failed: {failed}"
+
+    if total > 0:
+        val pct = passed * 100 / total
+        print "Rate:   {pct}%"
+
+    # Error category summary
+    if failed > 0:
+        print ""
+        print "=== Failed Files ==="
+        var fi = 0
+        while fi < all_results.len():
+            val fr = all_results[fi]
+            if not fr.ok:
+                print "  {short_name(fr.path, base_dir)}: {fr.first_error}"
+            fi = fi + 1
+
+    print ""
+    if failed == 0:
+        print "ALL FIXTURES PASSED"
+    else:
+        print "{failed} FIXTURE(S) FAILED"
+
+# ---------------------------------------------------------------------------
+# File collection
+# ---------------------------------------------------------------------------
+
+fn collect_cmm_files_recursive(dir: text) -> [text]:
+    var results: [text] = []
+    val entries = rt_dir_list(dir)
+    var i = 0
+    while i < entries.len():
+        val entry = entries[i]
+        if entry != "." and entry != "..":
+            val full_path = dir + "/" + entry
+            if is_cmm(entry):
+                results.push(full_path)
+            else if not has_dot(entry):
+                # Likely a directory — recurse
+                val sub = collect_cmm_files_recursive(full_path)
+                var si = 0
+                while si < sub.len():
+                    results.push(sub[si])
+                    si = si + 1
+        i = i + 1
+    results
+
+fn is_cmm(name: text) -> bool:
+    if name.len() < 5:
+        return false
+    val ext = name[name.len() - 4:name.len()]
+    to_lower_ext(ext) == ".cmm"
+
+fn has_dot(name: text) -> bool:
+    var i = 1
+    while i < name.len():
+        if name[i:i + 1] == ".":
+            return true
+        i = i + 1
+    false
+
+fn to_lower_ext(s: text) -> text:
+    var result = ""
+    var i = 0
+    while i < s.len():
+        val ch = s[i:i + 1]
+        if ch >= "A" and ch <= "Z":
+            result = result + ch.to_lower()
+        else:
+            result = result + ch
+        i = i + 1
+    result
+
+# Extract directory part from a file path
+fn dir_of(path: text) -> text:
+    var last_slash = -1
+    var i = 0
+    while i < path.len():
+        if path[i:i + 1] == "/":
+            last_slash = i
+        i = i + 1
+    if last_slash >= 0:
+        return path[0:last_slash]
+    ""
+
+# Shorten path for display by removing base_dir prefix
+fn short_name(path: text, base: text) -> text:
+    val prefix = base + "/"
+    if path.len() > prefix.len():
+        val maybe_prefix = path[0:prefix.len()]
+        if maybe_prefix == prefix:
+            return path[prefix.len():path.len()]
+    path
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+run_fixture_tests()

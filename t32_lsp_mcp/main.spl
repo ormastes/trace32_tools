@@ -1,0 +1,88 @@
+# T32 LSP MCP Server — CMM language intelligence via MCP protocol
+#
+# Tools: 6 tools for parsing, diagnostics, completions, hover, symbols, CLI validation
+# Protocol: MCP 2025-06-18 (Content-Length framing + JSON-Lines auto-detect)
+#
+# Architecture: Imports CMM parser/analyzer from cmm_lsp module, inline JSON helpers
+#
+# Files:
+#   - json_helpers.spl — JSON helpers, tool result helpers
+#   - protocol.spl     — Protocol I/O, initialize, tools list, schemas
+#   - tools.spl        — Tool handler implementations
+
+use t32_lsp_mcp.json_helpers
+use t32_lsp_mcp.protocol
+use t32_lsp_mcp.tools
+
+val LSP_SERVER_NAME = "simple-mcp-t32-lsp"
+val LSP_SERVER_VERSION = "1.0.0"
+val LSP_NL = "\n"
+
+# Protocol auto-detection
+var LSP_USE_JSON_LINES = false
+
+# Caches
+var LSP_TOOLS_CACHE = ""
+var LSP_INIT_CACHE = ""
+
+# --- Entry point ---
+
+fn lsp_mcp_main():
+    lsp_start_server()
+
+fn lsp_start_server():
+    var running = true
+    for _iter in range(0, 999999):
+        if not running:
+            return
+        var msg = lsp_read_stdin_message()
+        if msg == "":
+            running = false
+        else:
+            var method = lsp_extract_field(msg, "method")
+            var id = lsp_extract_id(msg)
+            var response = ""
+            if method == "initialize":
+                response = lsp_make_init_response(id)
+            elif method == "initialized" or method == "notifications/initialized":
+                response = ""
+            elif method == "shutdown":
+                response = lsp_result_ok(id, "null")
+            elif method == "tools/list":
+                response = lsp_make_tools_list(id)
+            elif method == "tools/call":
+                response = lsp_dispatch_tool(id, msg)
+            elif method == "ping":
+                response = lsp_result_ok(id, lsp_LB() + lsp_RB())
+            elif method == "notifications/cancelled" or method == "notifications/roots/list_changed":
+                response = ""
+            else:
+                if id != "" and id != "null":
+                    response = lsp_result_error(id, -32601, "Method not found: " + method)
+            if response != "":
+                lsp_write_stdout_message(response)
+
+# --- Tool dispatcher ---
+
+fn lsp_dispatch_tool(id: text, body: text) -> text:
+    val tool_name = lsp_extract_nested(body, "name")
+    val args_raw = lsp_extract_field_raw(body, "arguments")
+    if tool_name == "":
+        return lsp_result_error(id, -32602, "Missing tool name in tools/call request")
+
+    if tool_name == "cmm_parse":
+        return handle_cmm_parse(id, args_raw)
+    elif tool_name == "cmm_diagnostics":
+        return handle_cmm_diagnostics(id, args_raw)
+    elif tool_name == "cmm_complete":
+        return handle_cmm_complete(id, args_raw)
+    elif tool_name == "cmm_hover":
+        return handle_cmm_hover(id, args_raw)
+    elif tool_name == "cmm_symbols":
+        return handle_cmm_symbols(id, args_raw)
+    elif tool_name == "cmm_validate_cli":
+        return handle_cmm_validate_cli(id, args_raw)
+
+    lsp_result_error(id, -32602, "Unknown tool: " + tool_name)
+
+lsp_mcp_main()

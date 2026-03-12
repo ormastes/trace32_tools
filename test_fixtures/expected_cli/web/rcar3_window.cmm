@@ -1,0 +1,32 @@
+; @target: R-Car Gen3
+; @arch: AArch64
+; @purpose: Debug data views
+; @requires: JTAG
+; @cli-mode: batch
+; R-Car Gen3 Debug Data Views
+; Exercises: VAR.ADDWATCH
+
+SCREEN.OFF
+
+AREA.Create CLI_OUTPUT
+AREA.Select CLI_OUTPUT
+
+ON ERROR GOSUB error_handler
+
+WinPrint.Data.List
+WinPrint.Register.view
+WinPrint.Frame.view
+
+; Add watch expressions
+Var.AddWatch &variable
+Var.AddWatch struct_ptr->field
+Var.AddWatch array[0]
+
+WinPrint.Data.dump D:0x0--0xFFF
+WinPrint.Trace.List
+
+ENDDO TRUE()
+
+error_handler:
+  PRINT "[ERROR] line=" PRACTICE.CALLER.LINE()
+  ENDDO FALSE()

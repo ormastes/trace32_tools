@@ -1,0 +1,170 @@
+; RISC-V Multi-Hart SMP Debug
+; Generic RV32IMAC with 4 harts
+
+LOCAL &num_harts &hart_idx &elf_file
+LOCAL &boot_addr &stack_size &hart_status
+
+&num_harts=4
+&stack_size=0x4000
+
+SYStem.RESet
+SYStem.CPU RV32IMAC
+SYStem.CONFIG.DEBUGPORTTYPE JTAG
+SYStem.JtagClock 20MHz
+
+; Configure all harts
+CORE.ASSIGN 1. 2. 3. 4.
+SYStem.Up
+
+; Load shared ELF
+&elf_file="riscv_smp_test.elf"
+Data.LOAD.Elf "&elf_file"
+
+; Set up per-hart stack pointers
+&boot_addr=ADDRESS.OFFSET(_start)
+&hart_idx=0
+WHILE &hart_idx<&num_harts
+(
+  Register.Set /CORE &hart_idx SP (&boot_addr+0x80000000+(&hart_idx+1)*&stack_size)
+  Register.Set /CORE &hart_idx PC &boot_addr
+  &hart_idx=&hart_idx+1
+)
+
+; Set breakpoints
+Break.Set main /CORE 0.
+Break.Set secondary_hart_entry /CORE 1. /CORE 2. /CORE 3.
+
+; Start all harts
+Go
+WAIT !STATE.RUN() 10s
+
+; Check status per hart
+&hart_idx=0
+WHILE &hart_idx<&num_harts
+(
+  &hart_status=Register(/CORE &hart_idx PC)
+  PRINT "Hart " FORMAT.Decimal(1., &hart_idx) " PC: " FORMAT.Hex(8., &hart_status)
+  &hart_idx=&hart_idx+1
+)
+
+; View multi-core state
+Register.view /SpotLight
+Var.Frame /Locals
+
+; --- Additional parser exercises ---
+
+; ON.ERROR DEFAULT
+ON.ERROR DEFAULT
+
+; PARAMETERS (alias for ENTRY)
+PARAMETERS &num_cores
+
+; PRINTF for formatted output
+PRINT "Configured harts: " FORMAT.Decimal(1., &num_harts)
+PRINT "Stack size per hart: " FORMAT.Hex(8., &stack_size)
+ECHO "Multi-hart debug session active"
+
+; Per-hart interrupt enable/disable via CSR writes
+LOCAL &mie_val &mip_val
+&hart_idx=0
+WHILE &hart_idx<&num_harts
+(
+  ; Enable machine timer interrupt (bit 7) and external interrupt (bit 11)
+  &mie_val=Data.Long(SPR:0x304)
+  &mie_val=&mie_val|(1<<7.)|(1<<11.)
+  PRINT "Hart " FORMAT.Decimal(1., &hart_idx) " MIE: " FORMAT.Hex(8., &mie_val)
+  ; Read pending interrupts
+  &mip_val=Data.Long(SPR:0x344)
+  PRINT "Hart " FORMAT.Decimal(1., &hart_idx) " MIP: " FORMAT.Hex(8., &mip_val)
+  &hart_idx=&hart_idx+1
+)
+
+; OPEN/READ/CLOSE for reading hart config from file
+LOCAL &config_line &hart_config
+OPEN #1 "hart_config.txt" /Read
+READ #1 %LINE &hart_config
+CLOSE #1
+PRINT "Hart config: &hart_config"
+
+; STRing.ComPare and STRing.UPpeR for string matching
+LOCAL &mode_str &cmp_result
+&mode_str="SMP"
+IF "&mode_str"=="SMP"
+(
+  PRINT "Symmetric multiprocessing mode"
+)
+ELSE IF "&mode_str"=="AMP"
+(
+  PRINT "Asymmetric multiprocessing mode"
+)
+
+; Nested WHILE loops (hart iteration within test iteration)
+LOCAL &test_iter &max_tests &all_stopped
+&max_tests=5.
+&test_iter=0
+WHILE &test_iter<&max_tests
+(
+  Go
+  WAIT 1s
+  Break.direct
+  WAIT !STATE.RUN() 5s
+  &hart_idx=0
+  &all_stopped=1
+  WHILE &hart_idx<&num_harts
+  (
+    &hart_status=Register(/CORE &hart_idx PC)
+    IF &hart_status==0
+    (
+      &all_stopped=0
+      PRINT %WARNING "Hart " FORMAT.Decimal(1., &hart_idx) " has PC=0 in test " FORMAT.Decimal(1., &test_iter)
+    )
+    &hart_idx=&hart_idx+1
+  )
+  IF &all_stopped==1
+    PRINT "Test " FORMAT.Decimal(1., &test_iter) " - all harts stopped correctly"
+  &test_iter=&test_iter+1
+)
+
+; GOSUB with RETURN values
+GOSUB validate_hart_pcs &num_harts
+GOSUB dump_ipi_status
+
+; Write report
+OPEN #2 "multihart_report.log" /Create
+WRITE #2 "Multi-Hart Debug Report"
+WRITE #2 "Harts: " FORMAT.Decimal(1., &num_harts)
+WRITE #2 "Test iterations: " FORMAT.Decimal(2., &test_iter)
+CLOSE #2
+
+PRINT "Multi-hart debug session complete"
+
+ENDDO
+
+; Subroutine: validate all hart PCs
+validate_hart_pcs:
+  ENTRY &count
+  LOCAL &idx &pc
+  &idx=0
+  WHILE &idx<&count
+  (
+    &pc=Register(/CORE &idx PC)
+    IF &pc==0
+      PRINT %ERROR "Hart " FORMAT.Decimal(1., &idx) " has invalid PC"
+    ELSE
+      PRINT "Hart " FORMAT.Decimal(1., &idx) " PC: " FORMAT.Hex(8., &pc)
+    &idx=&idx+1
+  )
+  RETURN
+
+; Subroutine: dump IPI status registers
+dump_ipi_status:
+  LOCAL &ipi_base &i &val
+  &ipi_base=0x02000000
+  &i=0
+  WHILE &i<4.
+  (
+    &val=Data.Long(D:&ipi_base+&i*4)
+    PRINT "IPI[" FORMAT.Decimal(1., &i) "]: " FORMAT.Hex(8., &val)
+    &i=&i+1
+  )
+  RETURN

@@ -1,0 +1,74 @@
+; S32K3xx Flash Programming
+; Exercises: ENTRY %LINE, STRing.SCAN/SCANAndExtract, ON.ERROR GOSUB,
+;            DIALOG.YESNO, CPUIS() wildcards, Data.Assemble,
+;            FLASH.ReProgram.ALL /Erase, FLASH.UNSECUREerase,
+;            SYStem.MODE() as function, EDBG: access class
+
+ENTRY %LINE &args
+
+LOCAL &elf_path &chip_type &secured
+PRIVATE &flash_result
+
+; Parse args
+&elf_path=STRing.SCANAndExtract("&args"," ",&rest)
+&chip_type=STRing.SCAN("&elf_path","s32k3",0)
+
+ON ERROR GOSUB
+(
+  PRINT %ERROR "Flash error occurred at line " PRACTICE.CALLER.LINE()
+  ENDDO
+)
+
+SYStem.RESet
+SYStem.CPU S32K344
+
+IF CPUIS(S32K3*)
+(
+  SYStem.CONFIG.DEBUGPORTTYPE SWD
+  SYStem.Option DUALPORT ON
+)
+
+SYStem.Up
+
+; Check if device is secured
+&secured=Data.Long(EDBG:0x40000100)
+IF (&secured&0x1)==1
+(
+  DIALOG.YESNO "Device is secured. Unsecure and erase?"
+  ENTRY &confirm
+  IF "&confirm"=="TRUE"
+  (
+    FLASH.UNSECUREerase
+  )
+  ELSE
+  (
+    ENDDO
+  )
+)
+
+; Setup flash
+FLASH.RESet
+FLASH.Create 1. 0x00400000--0x005FFFFF 0x2000 TARGET Long
+FLASH.Create 2. 0x10000000--0x1003FFFF 0x1000 TARGET Long
+
+; Program with erase
+FLASH.ReProgram.ALL /Erase
+Data.LOAD.Elf "&elf_path"
+FLASH.ReProgram.off
+
+; Verify
+Data.LOAD.Elf "&elf_path" /ComPare
+
+IF FOUND()
+(
+  PRINT "Flash verification PASSED"
+)
+ELSE
+(
+  PRINT %ERROR "Flash verification FAILED"
+)
+
+IF SYStem.MODE()==0x05
+  PRINT "System is in debug mode"
+
+ENDDO

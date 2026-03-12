@@ -1,0 +1,79 @@
+# CMM Language Server — Document Management
+# Tracks open files and their parsed + analyzed state.
+#
+# Each open document is re-parsed and re-analyzed on every change,
+# providing incremental diagnostics to the editor.
+
+export CmmDocument, DocumentStore
+
+use cmm_parser.{parse_cmm_source}
+use cmm_ast.{CmmProgram}
+use cmm_analyzer.{analyze_program, CmmAnalysisResult}
+
+# ---------------------------------------------------------------------------
+# Document — a single open file with its parsed and analyzed state
+# ---------------------------------------------------------------------------
+
+struct CmmDocument:
+    uri: text
+    content: text
+    version: i64
+    program: CmmProgram
+    analysis: CmmAnalysisResult
+
+# ---------------------------------------------------------------------------
+# DocumentStore — manages the set of open documents
+# ---------------------------------------------------------------------------
+
+class DocumentStore:
+    documents: [CmmDocument]
+
+    # Open a new document — parse, analyze, and store.
+    me open_document(uri: text, content: text, version: i64):
+        val program = parse_cmm_source(content)
+        val analysis = analyze_program(program)
+        self.documents.push(CmmDocument(
+            uri: uri,
+            content: content,
+            version: version,
+            program: program,
+            analysis: analysis
+        ))
+
+    # Update an existing document — re-parse and re-analyze.
+    me update_document(uri: text, content: text, version: i64):
+        var i = 0
+        while i < self.documents.len():
+            if self.documents[i].uri == uri:
+                val program = parse_cmm_source(content)
+                val analysis = analyze_program(program)
+                self.documents[i] = CmmDocument(
+                    uri: uri,
+                    content: content,
+                    version: version,
+                    program: program,
+                    analysis: analysis
+                )
+                return
+            i = i + 1
+        # If not found, treat as a new open
+        self.open_document(uri, content, version)
+
+    # Close a document — remove from store.
+    me close_document(uri: text):
+        var new_docs: [CmmDocument] = []
+        var i = 0
+        while i < self.documents.len():
+            if self.documents[i].uri != uri:
+                new_docs.push(self.documents[i])
+            i = i + 1
+        self.documents = new_docs
+
+    # Look up a document by URI. Returns nil if not found.
+    fn get_document(uri: text) -> CmmDocument?:
+        var i = 0
+        while i < self.documents.len():
+            if self.documents[i].uri == uri:
+                return self.documents[i]
+            i = i + 1
+        nil

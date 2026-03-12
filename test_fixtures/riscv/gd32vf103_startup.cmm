@@ -1,0 +1,129 @@
+; GD32VF103 RISC-V MCU Startup Script
+; GigaDevice GD32VF103 - RV32IMAC core
+
+LOCAL &elf_file
+
+SYStem.RESet
+SYStem.CPU GD32VF103
+SYStem.CONFIG.DEBUGPORTTYPE JTAG
+SYStem.JtagClock 10MHz
+
+; RISC-V specific configuration
+SYStem.Option.EnReset OFF
+SYStem.Up
+
+; Load application
+&elf_file="gd32vf103_blink.elf"
+Data.LOAD.Elf "&elf_file"
+
+; Set initial PC to reset vector
+Register.Set PC Reset_Handler
+
+; View registers
+Register.view
+
+; Set breakpoints
+Break.Set main
+Break.Set SystemInit
+
+Go
+WAIT !STATE.RUN() 5s
+
+IF STATE.RUN()
+(
+  Break.direct
+  PRINT "Target still running - force break"
+)
+
+PRINT "GD32VF103 debug session ready"
+
+; --- Additional parser exercises ---
+
+; ENTRY with %LINE and multiple macros
+ENTRY %LINE &params
+LOCAL &logfile &upper_name &mid_result &counter &limit
+
+; PRIVATE macro declaration
+PRIVATE &internal_state
+
+; ON ERROR with GOTO handler
+ON ERROR GOTO error_handler
+
+; IF / ELSE IF / ELSE chain
+IF &counter==0
+(
+  PRINT "Counter is zero"
+)
+ELSE IF &counter<10.
+(
+  PRINT "Counter is small"
+)
+ELSE IF &counter<100.
+(
+  PRINT "Counter is medium"
+)
+ELSE
+(
+  PRINT "Counter is large: " FORMAT.Decimal(4., &counter)
+)
+
+; STRing functions
+&upper_name=STRing.UPpeR("gd32vf103")
+&mid_result=STRing.MID("Hello World", 3., 5.)
+PRINT "Upper: &upper_name  Mid: &mid_result"
+
+; Data.Set with access classes D: and E:
+Data.Set D:0x40000000 %Long 0x12345678
+Data.Set E:0x40000004 %Long 0xDEADBEEF
+Data.Set D:0x40000008 %Word 0xABCD
+
+; WHILE loop with counter
+&counter=0
+&limit=8.
+WHILE &counter<&limit
+(
+  Data.Set D:0x40010000+&counter*4 %Long &counter
+  &counter=&counter+1
+)
+
+; File I/O: OPEN, WRITE, CLOSE for logging
+&logfile="gd32_debug.log"
+OPEN #1 "&logfile" /Create
+WRITE #1 "GD32VF103 Debug Log"
+WRITE #1 "PC: " Register(PC)
+WRITE #1 "SP: " Register(SP)
+WRITE #1 "MSTATUS: " FORMAT.Hex(8., Data.Long(SPR:0x300))
+CLOSE #1
+
+; GOSUB subroutine call with arguments
+GOSUB dump_csr_regs
+
+; RePeaT with count
+RePeaT 5.
+(
+  PRINT "Repeat iteration"
+)
+
+PRINT "GD32VF103 extended tests done"
+
+ENDDO
+
+; Subroutine: dump CSR registers
+dump_csr_regs:
+  ENTRY &hart
+  LOCAL &misa_val &mtvec_val &mcause_val
+  &misa_val=Data.Long(SPR:0x301)
+  &mtvec_val=Data.Long(SPR:0x305)
+  &mcause_val=Data.Long(SPR:0x342)
+  PRINT "MISA:   " FORMAT.Hex(8., &misa_val)
+  PRINT "MTVEC:  " FORMAT.Hex(8., &mtvec_val)
+  PRINT "MCAUSE: " FORMAT.Hex(8., &mcause_val)
+  RETURN
+
+; Error handler subroutine
+error_handler:
+  PRINT %ERROR "An error occurred during GD32VF103 debug"
+  PRINT "Attempting recovery..."
+  SYStem.Down
+  SYStem.Up
+  RETURN

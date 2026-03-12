@@ -1,0 +1,47 @@
+; EDK2 UEFI Debug with TRACE32
+; Exercises: menu.rp nested blocks, language() function,
+;            os.file(), autostore, chdir, radix hex
+
+LOCAL &uefi_root &build_dir &fv_path
+
+; Check language for localization
+IF language()=="GERMAN"
+  PRINT "Deutsche Ausgabe"
+ELSE
+  PRINT "English output"
+
+RADIX.hex
+
+; Setup paths
+&uefi_root=OS.ENV("EDK2_ROOT")
+IF "&uefi_root"==""
+  &uefi_root="c:\edk2"
+&build_dir="&uefi_root\Build\OvmfX64\DEBUG_VS2019\FV"
+
+IF OS.DIR("&build_dir")
+  ChDir "&build_dir"
+
+; Load UEFI firmware volume
+&fv_path="&build_dir\OVMF.fd"
+IF os.file("&fv_path")
+(
+  Data.LOAD.Binary "&fv_path" 0xFF000000
+  PRINT "Loaded UEFI firmware"
+)
+
+; Custom toolbar menu
+menu.rp
+(
+  add
+  toolbar
+  (
+    toolitem "Load FV" "D.LOAD.B &fv_path 0xFF000000"
+    toolitem "Symbols" "DO load_symbols.cmm"
+    toolitem "Reset" "SYStem.RESet"
+  )
+)
+
+; Auto-store window positions
+autostore , W000 W001 W002
+
+ENDDO

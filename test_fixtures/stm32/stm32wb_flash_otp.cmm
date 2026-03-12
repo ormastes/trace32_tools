@@ -1,0 +1,99 @@
+; STM32WB55 Flash and OTP Programming
+; Cortex-M4 + Cortex-M0+ via SWD, Power Debug II
+
+LOCAL &elf_path &confirm &otp_confirm
+LOCAL &otp_val &flash_result &verify_ok
+
+ENTRY &elf_path
+IF "&elf_path"==""
+  &elf_path="stm32wb_app.elf"
+
+SYStem.RESet
+SYStem.CPU STM32WB55
+SYStem.CONFIG.DEBUGPORTTYPE SWD
+SYStem.Up
+
+TOOLBAR ON
+
+; Confirm flash erase
+DIALOG.YESNO "Erase STM32WB flash before programming?"
+ENTRY &confirm
+IF "&confirm"!="TRUE"
+(
+  PRINT "Flash programming cancelled"
+  ENDDO
+)
+
+; Progress window
+WinPOS 0. 0. 80. 5. 0. 0. W_PROGRESS
+PRINT "Programming STM32WB flash..."
+
+; Flash configuration - STM32WB55
+; Main flash: 0x08000000--0x080FFFFF (1MB, 4KB pages)
+FLASH.RESet
+FLASH.Create 1. 0x08000000--0x080FFFFF 0x1000 TARGET Long
+
+; Program main flash
+FLASH.Program ALL /Erase
+Data.LOAD.Elf "&elf_path"
+FLASH.Program off
+
+; Show loaded code
+WinPOS 0. 6. 80. 15. 0. 0. W_CODE
+Data.List
+
+; Verify main flash
+Data.LOAD.Elf "&elf_path" /ComPare
+IF FOUND()
+(
+  PRINT %ERROR "Flash verification FAILED"
+  &verify_ok=FALSE()
+)
+ELSE
+(
+  PRINT "Flash verification PASSED"
+  &verify_ok=TRUE()
+)
+
+; OTP area access - 0x1FFF7000 (one-time programmable, IRREVERSIBLE)
+PRINT ""
+PRINT "=== OTP AREA ==="
+PRINT "WARNING: OTP writes are IRREVERSIBLE!"
+
+; Read current OTP values
+&otp_val=Data.Long(D:0x1FFF7000)
+PRINT "Current OTP[0]: " FORMAT.Hex(8., &otp_val)
+
+; Confirm OTP write - extra caution
+DIALOG.YESNO "Write OTP area? THIS CANNOT BE UNDONE!"
+ENTRY &otp_confirm
+IF "&otp_confirm"=="TRUE"
+(
+  ; Unlock OTP
+  Data.Set D:0x58004008 %Long 0x45670123  ; FLASH_KEYR
+  Data.Set D:0x58004008 %Long 0xCDEF89AB  ; FLASH_KEYR
+  Data.Set D:0x5800400C %Long 0x08192A3B  ; FLASH_OPTKEYR
+  Data.Set D:0x5800400C %Long 0x4C5D6E7F  ; FLASH_OPTKEYR
+
+  ; Write OTP data
+  Data.Set D:0x1FFF7000 %Long 0xDEADBEEF
+
+  ; Verify OTP write
+  &otp_val=Data.Long(D:0x1FFF7000)
+  IF &otp_val==0xDEADBEEF
+    PRINT "OTP write verified"
+  ELSE
+    PRINT %ERROR "OTP write verification FAILED"
+)
+ELSE
+(
+  PRINT "OTP write skipped"
+)
+
+; Reset target
+SYStem.Down
+SYStem.Up
+
+PRINT "STM32WB flash and OTP programming complete"
+
+ENDDO

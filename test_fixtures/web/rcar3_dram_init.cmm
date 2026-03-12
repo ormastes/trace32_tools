@@ -1,0 +1,44 @@
+; R-Car Gen3 DRAM Initialization
+; Exercises: APPEND, Break.Set /CMD /RESUME with VAR.VALUE(),
+;            Go.direct, WAIT !STATE.RUN(), AD: access class,
+;            B:: device selector
+
+LOCAL &ddr_base &status &expected
+
+; DRAM controller base
+&ddr_base=0xE6790000
+
+SYStem.RESet
+SYStem.CPU R8A77951
+SYStem.Up
+
+; Set breakpoint with CMD callback
+Break.Set main /CMD "Var.View %Hex %Open main_struct" /RESUME
+
+; Use Go.direct for hardware-only start
+Go.direct
+WAIT !STATE.RUN() 10s
+
+; Check DRAM status
+&status=Data.Long(AD:&ddr_base+0x00)
+&expected=0xA5A5A5A5
+
+IF &status!=&expected
+(
+  PRINT %ERROR "DRAM init failed: got " FORMAT.Hex(8., &status)
+  ENDDO
+)
+
+; Log success
+APPEND "dram_log.txt" "DRAM init OK: status=0x" FORMAT.Hex(8., &status)
+
+; Access via device selector (dual-core)
+B::Data.dump D:0x40000000
+
+; Write test pattern
+Data.Set D:0x40000000--0x400003FF %Long 0xDEADBEEF
+Data.Test D:0x40000000--0x400003FF /Prime
+
+PRINT "R-Car3 DRAM initialization complete"
+
+ENDDO

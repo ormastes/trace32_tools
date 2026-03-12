@@ -1,0 +1,44 @@
+; @target: Spreadtrum
+; @arch: ARM
+; @purpose: Debug entry script
+; @requires: JTAG
+; @cli-mode: batch
+; Spreadtrum Debug Script
+; Exercises: SOFTWARE.BUILD() function, ON ERROR JUMPTO,
+;            ON ERROR inherit, CD.DO, OS.HIDDEN,
+;            Var.NEWLOCAL char[100][50]
+
+SCREEN.OFF
+
+AREA.Create CLI_OUTPUT
+AREA.Select CLI_OUTPUT
+
+LOCAL &project &build_type &result
+ENTRY &project
+
+ON ERROR JUMPTO error_handler
+
+IF SOFTWARE.BUILD()<100000.
+(
+  PRINT "[STATUS] error=TRACE32_version_too_old"
+  ENDDO FALSE()
+)
+
+start_debug:
+  IF "&project"==""
+  (
+    PRINT "[STATUS] error=no_project_selected"
+    ENDDO FALSE()
+  )
+
+  CD.DO "&project"
+  ON ERROR inherit
+  DO setup.cmm
+  ENDDO TRUE()
+
+error_handler:
+  PRINT %ERROR "[ERROR] msg=an_error_occurred"
+  ENDDO FALSE()
+
+cleanup:
+  ENDDO FALSE()

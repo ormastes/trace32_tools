@@ -1,0 +1,279 @@
+# CMM Language Server — Auto-Completion Provider
+# Provides context-sensitive completions for PRACTICE CMM scripts.
+#
+# Trigger characters:
+#   &   — macro completions from the symbol table
+#   .   — sub-command completions (e.g. Data.<cursor>)
+#   /   — option completions (e.g. /Write, /Read)
+#   (other) — general: commands + functions + keywords
+#
+# Each completion item maps to an LSP CompletionItemKind integer.
+
+export CompletionItem, get_completions_at, completion_to_json
+
+use cmm_commands.{CmmCommandDB, CmmCommandInfo, build_command_db, get_completions, get_group_commands}
+use cmm_functions.{CmmFuncDB, CmmFuncInfo, build_function_db, get_function_completions}
+use cmm_analyzer.{CmmSymbolTable, CmmSymbol, CmmSymbolKind}
+use cmm_ast.{CmmProgram}
+
+# ---------------------------------------------------------------------------
+# CompletionItem — mirrors LSP CompletionItem (simplified)
+# ---------------------------------------------------------------------------
+
+struct CompletionItem:
+    label: text           # display text
+    kind: i64             # LSP CompletionItemKind: 1=Text, 2=Method, 3=Function, 6=Variable, 14=Keyword, 21=Constant
+    detail: text          # type/signature info
+    documentation: text   # description
+
+# ---------------------------------------------------------------------------
+# Main entry point
+# ---------------------------------------------------------------------------
+
+# Return completion items at a given cursor position.
+#
+# The trigger parameter indicates which character triggered completion:
+#   "&"  — complete macros from symbol table
+#   "."  — complete sub-commands
+#   "/"  — complete options
+#   ""   — general completion (commands + functions + keywords)
+fn get_completions_at(program: CmmProgram, symbols: CmmSymbolTable, line: i64, col: i64, trigger: text, cmd_db: CmmCommandDB, func_db: CmmFuncDB) -> [CompletionItem]:
+    var items: [CompletionItem] = []
+
+    if trigger == "&":
+        # Complete macros from symbol table
+        add_macro_completions(symbols, items)
+    else if trigger == ".":
+        # Complete sub-commands (context-dependent)
+        add_subcommand_completions(cmd_db, items)
+    else if trigger == "/":
+        # Complete options
+        add_option_completions(items)
+    else:
+        # General: commands + keywords + functions
+        add_command_completions(cmd_db, items)
+        add_function_completions(func_db, items)
+        add_keyword_completions(items)
+
+    items
+
+# ---------------------------------------------------------------------------
+# Macro completions — from symbol table (kind=6, Variable)
+# ---------------------------------------------------------------------------
+
+fn add_macro_completions(symbols: CmmSymbolTable, items: [CompletionItem]):
+    val macros = symbols.macros()
+    var i = 0
+    while i < macros.len():
+        val m = macros[i]
+        # Avoid duplicates: check if label already added
+        if not has_label(items, m.name):
+            items.push(CompletionItem(
+                label: "&" + m.name,
+                kind: 6,
+                detail: m.scope + " macro",
+                documentation: "PRACTICE macro declared as " + m.scope + " at line " + int_to_text(m.def_line)
+            ))
+        i = i + 1
+
+# ---------------------------------------------------------------------------
+# Command completions — from command DB (kind=14, Keyword)
+# ---------------------------------------------------------------------------
+
+fn add_command_completions(cmd_db: CmmCommandDB, items: [CompletionItem]):
+    var i = 0
+    while i < cmd_db.commands.len():
+        val cmd = cmd_db.commands[i]
+        items.push(CompletionItem(
+            label: cmd.full_name,
+            kind: 14,
+            detail: cmd.group + " command",
+            documentation: cmd.description
+        ))
+        i = i + 1
+
+# ---------------------------------------------------------------------------
+# Function completions — from function DB (kind=3, Function)
+# ---------------------------------------------------------------------------
+
+fn add_function_completions(func_db: CmmFuncDB, items: [CompletionItem]):
+    var i = 0
+    while i < func_db.functions.len():
+        val func = func_db.functions[i]
+        items.push(CompletionItem(
+            label: func.name,
+            kind: 3,
+            detail: func.signature + " -> " + func.return_type,
+            documentation: func.description
+        ))
+        i = i + 1
+
+# ---------------------------------------------------------------------------
+# Keyword completions — CMM control flow and built-in keywords (kind=14)
+# ---------------------------------------------------------------------------
+
+fn add_keyword_completions(items: [CompletionItem]):
+    add_kw(items, "IF", "Conditional branch")
+    add_kw(items, "ELSE", "Else branch")
+    add_kw(items, "WHILE", "While loop")
+    add_kw(items, "RePeaT", "Repeat loop")
+    add_kw(items, "GOTO", "Jump to label")
+    add_kw(items, "GOSUB", "Call subroutine at label")
+    add_kw(items, "RETURN", "Return from subroutine")
+    add_kw(items, "DO", "Call CMM script file")
+    add_kw(items, "ENDDO", "End script / return value")
+    add_kw(items, "LOCAL", "Declare local macro(s)")
+    add_kw(items, "GLOBAL", "Declare global macro")
+    add_kw(items, "PRIVATE", "Declare private macro (block + sub-blocks)")
+    add_kw(items, "ENTRY", "Bind subroutine parameters")
+    add_kw(items, "ON", "Set event handler")
+    add_kw(items, "WAIT", "Wait for condition or time")
+    add_kw(items, "PRINT", "Print to output area")
+    add_kw(items, "OPEN", "Open file channel")
+    add_kw(items, "CLOSE", "Close file channel")
+    add_kw(items, "READ", "Read from file channel")
+    add_kw(items, "WRITE", "Write to file channel")
+    add_kw(items, "DIALOG", "Define dialog panel")
+    # Boolean constant functions
+    items.push(CompletionItem(
+        label: "TRUE()",
+        kind: 14,
+        detail: "Boolean constant",
+        documentation: "Boolean true value"
+    ))
+    items.push(CompletionItem(
+        label: "FALSE()",
+        kind: 14,
+        detail: "Boolean constant",
+        documentation: "Boolean false value"
+    ))
+
+fn add_kw(items: [CompletionItem], name: text, desc: text):
+    items.push(CompletionItem(
+        label: name,
+        kind: 14,
+        detail: "keyword",
+        documentation: desc
+    ))
+
+# ---------------------------------------------------------------------------
+# Sub-command completions — command groups from DB (kind=14)
+# ---------------------------------------------------------------------------
+
+fn add_subcommand_completions(cmd_db: CmmCommandDB, items: [CompletionItem]):
+    # Offer all commands grouped by their dot-separated segments.
+    # Since we do not know the prefix before the dot at this point,
+    # we list all unique groups and their sub-commands.
+    var added_groups: [text] = []
+    var i = 0
+    while i < cmd_db.commands.len():
+        val cmd = cmd_db.commands[i]
+        # Extract the part after the first dot (if any)
+        val dot_idx = find_char(cmd.full_name, ".")
+        if dot_idx >= 0:
+            val sub = cmd.full_name[dot_idx + 1:cmd.full_name.len()]
+            items.push(CompletionItem(
+                label: sub,
+                kind: 14,
+                detail: cmd.group + " sub-command",
+                documentation: cmd.description
+            ))
+        i = i + 1
+
+# ---------------------------------------------------------------------------
+# Option completions — common PRACTICE options (kind=21, Constant)
+# ---------------------------------------------------------------------------
+
+fn add_option_completions(items: [CompletionItem]):
+    add_opt(items, "/Write", "Open for writing / write mode")
+    add_opt(items, "/Read", "Open for reading / read mode")
+    add_opt(items, "/Create", "Create new file")
+    add_opt(items, "/Append", "Append to existing file")
+    add_opt(items, "/CONFIG", "Configuration mode")
+    add_opt(items, "/Byte", "Byte access width (8-bit)")
+    add_opt(items, "/Word", "Word access width (16-bit)")
+    add_opt(items, "/Long", "Long access width (32-bit)")
+    add_opt(items, "/All", "Apply to all / show all")
+    add_opt(items, "/Track", "Track mode")
+    add_opt(items, "/Onchip", "On-chip breakpoint")
+    add_opt(items, "/Program", "Program breakpoint")
+    add_opt(items, "/DISable", "Disable item")
+    add_opt(items, "/ENable", "Enable item")
+    add_opt(items, "/Delete", "Delete item")
+    add_opt(items, "/Hex", "Hex output format")
+    add_opt(items, "/Decimal", "Decimal output format")
+
+fn add_opt(items: [CompletionItem], name: text, desc: text):
+    items.push(CompletionItem(
+        label: name,
+        kind: 21,
+        detail: "option",
+        documentation: desc
+    ))
+
+# ---------------------------------------------------------------------------
+# JSON serialization — format a CompletionItem as LSP JSON
+# ---------------------------------------------------------------------------
+
+# Format a single CompletionItem as an LSP-compatible JSON object string.
+# Uses string concatenation to avoid }} escape issues in Simple strings.
+fn completion_to_json(item: CompletionItem) -> text:
+    val q = "\""
+    var s = "{"
+    s = s + q + "label" + q + ": " + q + escape_json(item.label) + q + ", "
+    s = s + q + "kind" + q + ": " + int_to_text(item.kind) + ", "
+    s = s + q + "detail" + q + ": " + q + escape_json(item.detail) + q + ", "
+    s = s + q + "documentation" + q + ": "
+    s = s + "{" + q + "kind" + q + ": " + q + "markdown" + q + ", "
+    s = s + q + "value" + q + ": " + q + escape_json(item.documentation) + q
+    s = s + "}"
+    s = s + "}"
+    s
+
+# ---------------------------------------------------------------------------
+# Utility helpers
+# ---------------------------------------------------------------------------
+
+# Check if an item with the given label already exists in the list.
+fn has_label(items: [CompletionItem], name: text) -> bool:
+    val target = "&" + name
+    var i = 0
+    while i < items.len():
+        if items[i].label == target:
+            return true
+        i = i + 1
+    false
+
+# Find the first occurrence of a character in a string. Returns -1 if not found.
+fn find_char(s: text, ch: text) -> i64:
+    var i = 0
+    while i < s.len():
+        if s[i:i + 1] == ch:
+            return i
+        i = i + 1
+    -1
+
+# Escape special characters in a string for JSON output.
+fn escape_json(s: text) -> text:
+    var result = ""
+    var i = 0
+    while i < s.len():
+        val ch = s[i:i + 1]
+        if ch == "\\":
+            result = result + "\\\\"
+        else if ch == "\"":
+            result = result + "\\\""
+        else if ch == "\n":
+            result = result + "\\n"
+        else if ch == "\r":
+            result = result + "\\r"
+        else if ch == "\t":
+            result = result + "\\t"
+        else:
+            result = result + ch
+        i = i + 1
+    result
+
+# Convert an integer to its text representation.
+fn int_to_text(n: i64) -> text:
+    "{n}"

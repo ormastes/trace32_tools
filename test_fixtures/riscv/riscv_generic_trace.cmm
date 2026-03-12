@@ -1,0 +1,136 @@
+; Generic RISC-V with N-Trace Configuration
+; RISC-V RV32IMAC with hardware trace support
+
+LOCAL &trace_size &trigger_addr &pc_match
+
+SYStem.RESet
+SYStem.CPU RV32IMAC
+SYStem.CONFIG.DEBUGPORTTYPE JTAG
+SYStem.JtagClock 20MHz
+SYStem.Up
+
+Data.LOAD.Elf "riscv_trace_test.elf"
+
+; N-Trace configuration
+Trace.METHOD Analyzer
+Trace.SIZE 1000000.
+Trace.CLOCK 100MHz
+
+; Analyzer configuration
+Analyzer.RESet
+Analyzer.AutoFocus
+
+; TPIU configuration (if available)
+TPIU.PortSize 4
+TPIU.PortMode CONTINUOUS
+
+; Program flow trace
+Break.Set main /TraceEnable
+Break.Set _exit /TraceDisable
+
+; Trigger on specific address
+&trigger_addr=ADDRESS.OFFSET(critical_section)
+Analyzer.TriggerSet &trigger_addr
+
+; Configure trace filtering
+Trace.FILTER.Address &trigger_addr--(&trigger_addr+0x100)
+Trace.Init
+
+; Run with trace
+Go
+WAIT 5s
+Break.direct
+WAIT !STATE.RUN()
+
+; Analyze trace results
+Trace.List
+Trace.STATistic.Func
+Trace.Chart.Func
+
+PRINT "Trace capture complete: " Trace.RECORDS() " records"
+
+; --- Additional parser exercises ---
+
+; ON ERROR GOSUB trace_error_handler
+ON ERROR GOSUB trace_error_handler
+
+; MCDS trace configuration
+MCDS.RESet
+MCDS.ON
+
+; Trace.FILTER.TASK for per-task filtering
+Trace.FILTER.TASK "main_task"
+
+; Trace.Export to file
+Trace.Export.BranchFlow "trace_export.btf"
+
+; PowerTrace configuration
+PowerTrace.PortSize 4
+PowerTrace.Mode CONTINUOUS
+PowerTrace.AutoInit ON
+
+; PERF counter reading via CSR
+LOCAL &cycle_count &instret &mcountinhibit
+&cycle_count=Data.Long(SPR:0xB00)
+&instret=Data.Long(SPR:0xB02)
+&mcountinhibit=Data.Long(SPR:0x320)
+PRINT "Cycles:    " FORMAT.Decimal(10., &cycle_count)
+PRINT "Instret:   " FORMAT.Decimal(10., &instret)
+PRINT "Inhibit:   " FORMAT.Hex(8., &mcountinhibit)
+
+; Complex WHILE loop with multiple conditions
+LOCAL &trace_full &iterations &max_iters
+&trace_full=0
+&iterations=0
+&max_iters=50.
+WHILE (&trace_full==0)&&(&iterations<&max_iters)
+(
+  Go
+  WAIT 500ms
+  Break.direct
+  WAIT !STATE.RUN()
+  IF Trace.RECORDS()>900000.
+  (
+    PRINT "Trace buffer nearly full at iteration: " FORMAT.Decimal(3., &iterations)
+    &trace_full=1
+  )
+  &iterations=&iterations+1
+)
+
+; OPEN / WRITE / CLOSE for trace summary
+OPEN #1 "trace_summary.log" /Create
+WRITE #1 "RISC-V Trace Summary"
+WRITE #1 "Total records: " Trace.RECORDS()
+WRITE #1 "Iterations:    " FORMAT.Decimal(3., &iterations)
+WRITE #1 "Cycle count:   " FORMAT.Decimal(10., &cycle_count)
+CLOSE #1
+
+; GOSUB to analysis subroutine
+GOSUB analyze_trace_results
+
+; RETURNVALUES from ENDDO
+ENDDO Trace.RECORDS()
+
+; Subroutine: analyze trace results
+analyze_trace_results:
+  LOCAL &records &threshold
+  &records=Trace.RECORDS()
+  &threshold=100.
+  IF &records<&threshold
+  (
+    PRINT %WARNING "Low trace record count: " FORMAT.Decimal(6., &records)
+  )
+  ELSE
+  (
+    PRINT "Trace capture successful: " FORMAT.Decimal(6., &records) " records"
+    Trace.STATistic.Func
+    Trace.Chart.Func
+  )
+  RETURN
+
+; Error handler for trace errors
+trace_error_handler:
+  PRINT %ERROR "Trace error occurred"
+  Trace.OFF
+  Analyzer.RESet
+  RETURN

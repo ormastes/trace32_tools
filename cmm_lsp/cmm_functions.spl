@@ -1,0 +1,269 @@
+# CMM (PRACTICE Script) Built-in Function Database
+# Function database for validation and completion in the CMM Language Server.
+#
+# CMM built-in functions use () syntax and return values.  They are used
+# inside expressions (e.g. conditions, macro assignments, command parameters).
+# Functions are case-insensitive; the UPPER case letters indicate the
+# minimum abbreviation.
+#
+# Reference: doc/research/cmm_grammar_research_2026-03-10.md (Section 5.3)
+
+export CmmFuncInfo, CmmFuncDB
+export build_function_db, lookup_function, get_function_completions, get_function_group
+
+# ---------------------------------------------------------------------------
+# Types
+# ---------------------------------------------------------------------------
+
+struct CmmFuncInfo:
+    name: text               # e.g. "Register"
+    signature: text          # e.g. "Register(<register_name>)"
+    return_type: text        # "hex", "bool", "text", "float", "int", "any"
+    description: text
+    group: text              # "Register", "CPU", "STATE", "STRing", etc.
+
+struct CmmFuncDB:
+    functions: [CmmFuncInfo]
+
+# ---------------------------------------------------------------------------
+# Database builder
+# ---------------------------------------------------------------------------
+
+# Build the built-in function database covering all major T32 function groups.
+fn build_function_db() -> CmmFuncDB:
+    var fns: [CmmFuncInfo] = []
+
+    # --- Register functions ---
+    fns.push(CmmFuncInfo(name: "Register", signature: "Register(<register_name>)", return_type: "hex", description: "Read register value by name (e.g. Register(PC), Register(SP))", group: "Register"))
+
+    # --- CPU / Target state functions ---
+    fns.push(CmmFuncInfo(name: "CPU", signature: "CPU()", return_type: "text", description: "Return current CPU type name", group: "CPU"))
+    fns.push(CmmFuncInfo(name: "STATE.RUN", signature: "STATE.RUN()", return_type: "bool", description: "TRUE() if target is running", group: "STATE"))
+    fns.push(CmmFuncInfo(name: "STATE.POWER", signature: "STATE.POWER()", return_type: "bool", description: "TRUE() if target power is detected", group: "STATE"))
+    fns.push(CmmFuncInfo(name: "STATE.RESET", signature: "STATE.RESET()", return_type: "bool", description: "TRUE() if target is in reset state", group: "STATE"))
+
+    # --- Boolean constants ---
+    fns.push(CmmFuncInfo(name: "TRUE", signature: "TRUE()", return_type: "bool", description: "Boolean true constant", group: "Boolean"))
+    fns.push(CmmFuncInfo(name: "FALSE", signature: "FALSE()", return_type: "bool", description: "Boolean false constant", group: "Boolean"))
+
+    # --- Search result ---
+    fns.push(CmmFuncInfo(name: "FOUND", signature: "FOUND()", return_type: "bool", description: "TRUE() if last search command found a match", group: "Search"))
+
+    # --- OS / File system functions ---
+    fns.push(CmmFuncInfo(name: "OS.FILE", signature: "OS.FILE(<path>)", return_type: "bool", description: "TRUE() if file exists at given path", group: "OS"))
+    fns.push(CmmFuncInfo(name: "OS.DIR", signature: "OS.DIR(<path>)", return_type: "bool", description: "TRUE() if directory exists at given path", group: "OS"))
+    fns.push(CmmFuncInfo(name: "OS.ENV", signature: "OS.ENV(<name>)", return_type: "text", description: "Return value of environment variable", group: "OS"))
+    fns.push(CmmFuncInfo(name: "OS.PPD", signature: "OS.PPD()", return_type: "text", description: "PRACTICE Program Directory (script location)", group: "OS"))
+    fns.push(CmmFuncInfo(name: "OS.PSD", signature: "OS.PSD()", return_type: "text", description: "PRACTICE System Directory (T32 install dir)", group: "OS"))
+    fns.push(CmmFuncInfo(name: "OS.PWD", signature: "OS.PWD()", return_type: "text", description: "Present Working Directory", group: "OS"))
+    fns.push(CmmFuncInfo(name: "OS.NAME", signature: "OS.NAME()", return_type: "text", description: "Return operating system name", group: "OS"))
+    fns.push(CmmFuncInfo(name: "OS.ID", signature: "OS.ID()", return_type: "text", description: "Return OS identifier string", group: "OS"))
+
+    # --- Address functions ---
+    fns.push(CmmFuncInfo(name: "ADDRESS.OFFSET", signature: "ADDRESS.OFFSET(<symbol>)", return_type: "hex", description: "Return address offset of a symbol", group: "Address"))
+    fns.push(CmmFuncInfo(name: "ADDRESS.RANGE", signature: "ADDRESS.RANGE(<symbol>)", return_type: "hex", description: "Return address range (size) of a symbol", group: "Address"))
+    fns.push(CmmFuncInfo(name: "ADDRESS.ACCESS", signature: "ADDRESS.ACCESS(<addr>)", return_type: "text", description: "Return access class of an address", group: "Address"))
+    fns.push(CmmFuncInfo(name: "ADDRESS.SEGMENT", signature: "ADDRESS.SEGMENT(<addr>)", return_type: "hex", description: "Return segment of an address", group: "Address"))
+
+    # --- String functions ---
+    fns.push(CmmFuncInfo(name: "STRing.SCAN", signature: "STRing.SCAN(<str>, <substr>, <start_pos>)", return_type: "int", description: "Search for substring, return position (-1 if not found)", group: "STRing"))
+    fns.push(CmmFuncInfo(name: "STRing.UPpeR", signature: "STRing.UPpeR(<str>)", return_type: "text", description: "Convert string to upper case", group: "STRing"))
+    fns.push(CmmFuncInfo(name: "STRing.LOWeR", signature: "STRing.LOWeR(<str>)", return_type: "text", description: "Convert string to lower case", group: "STRing"))
+    fns.push(CmmFuncInfo(name: "STRing.SCANAndExtract", signature: "STRing.SCANAndExtract(<str>, <delim>, <var>)", return_type: "text", description: "Scan string, extract token, update remainder", group: "STRing"))
+    fns.push(CmmFuncInfo(name: "STRing.LENgth", signature: "STRing.LENgth(<str>)", return_type: "int", description: "Return length of string", group: "STRing"))
+    fns.push(CmmFuncInfo(name: "STRing.MID", signature: "STRing.MID(<str>, <start>, <length>)", return_type: "text", description: "Extract substring by position and length", group: "STRing"))
+    fns.push(CmmFuncInfo(name: "STRing.CUT", signature: "STRing.CUT(<str>, <count>)", return_type: "text", description: "Remove characters from start (positive) or end (negative)", group: "STRing"))
+    fns.push(CmmFuncInfo(name: "STRing.REPLACE", signature: "STRing.REPLACE(<str>, <old>, <new>, <pos>)", return_type: "text", description: "Replace substring occurrence", group: "STRing"))
+    fns.push(CmmFuncInfo(name: "STRing.COUNT", signature: "STRing.COUNT(<str>, <substr>)", return_type: "int", description: "Count occurrences of substring", group: "STRing"))
+    fns.push(CmmFuncInfo(name: "STRing.TRIM", signature: "STRing.TRIM(<str>)", return_type: "text", description: "Remove leading and trailing whitespace", group: "STRing"))
+    fns.push(CmmFuncInfo(name: "STRing.SPLIT", signature: "STRing.SPLIT(<str>, <delim>, <index>)", return_type: "text", description: "Split string by delimiter and return Nth token", group: "STRing"))
+
+    # --- FLASH query functions ---
+    fns.push(CmmFuncInfo(name: "FLASH.UNIT", signature: "FLASH.UNIT(<addr>)", return_type: "int", description: "Return flash unit number for address", group: "FLASH"))
+    fns.push(CmmFuncInfo(name: "FLASH.UNIT.BEGIN", signature: "FLASH.UNIT.BEGIN(<unit>)", return_type: "hex", description: "Return start address of flash unit", group: "FLASH"))
+    fns.push(CmmFuncInfo(name: "FLASH.UNIT.END", signature: "FLASH.UNIT.END(<unit>)", return_type: "hex", description: "Return end address of flash unit", group: "FLASH"))
+    fns.push(CmmFuncInfo(name: "FLASH.TARGET.BUILD", signature: "FLASH.TARGET.BUILD(<type>)", return_type: "text", description: "Return flash target build information", group: "FLASH"))
+
+    # --- Version functions ---
+    fns.push(CmmFuncInfo(name: "VERSION.BUILD", signature: "VERSION.BUILD()", return_type: "int", description: "Return T32 software build number", group: "Version"))
+    fns.push(CmmFuncInfo(name: "VERSION.DATE", signature: "VERSION.DATE()", return_type: "text", description: "Return T32 software build date", group: "Version"))
+    fns.push(CmmFuncInfo(name: "VERSION.SERIAL", signature: "VERSION.SERIAL()", return_type: "text", description: "Return hardware serial number", group: "Version"))
+
+    # --- Eval functions ---
+    fns.push(CmmFuncInfo(name: "eval.type", signature: "eval.type()", return_type: "text", description: "Return type of last EVAL result (hex, decimal, float, string, bool, range, address)", group: "Eval"))
+
+    # --- Dialog query functions ---
+    fns.push(CmmFuncInfo(name: "dialog.string", signature: "dialog.string(<name>)", return_type: "text", description: "Return current text value of a dialog EDIT field", group: "Dialog"))
+    fns.push(CmmFuncInfo(name: "dialog.boolean", signature: "dialog.boolean(<name>)", return_type: "bool", description: "Return current state of a dialog CHECKBOX", group: "Dialog"))
+
+    # --- PRACTICE state functions ---
+    fns.push(CmmFuncInfo(name: "PRACTICE.STATE", signature: "PRACTICE.STATE()", return_type: "text", description: "Return PRACTICE execution state (running, stopped, etc.)", group: "PRACTICE"))
+    fns.push(CmmFuncInfo(name: "PRACTICE.CoMmanD.AVAILable", signature: "PRACTICE.CoMmanD.AVAILable(<cmd>)", return_type: "bool", description: "TRUE() if a PRACTICE command is available", group: "PRACTICE"))
+
+    # --- Coverage functions ---
+    fns.push(CmmFuncInfo(name: "COVerage.PERCENT", signature: "COVerage.PERCENT()", return_type: "float", description: "Return code coverage percentage", group: "Coverage"))
+
+    # --- Data reading functions ---
+    fns.push(CmmFuncInfo(name: "Data.Byte", signature: "Data.Byte(<addr>)", return_type: "hex", description: "Read byte from memory address", group: "Data"))
+    fns.push(CmmFuncInfo(name: "Data.Word", signature: "Data.Word(<addr>)", return_type: "hex", description: "Read 16-bit word from memory address", group: "Data"))
+    fns.push(CmmFuncInfo(name: "Data.Long", signature: "Data.Long(<addr>)", return_type: "hex", description: "Read 32-bit long from memory address", group: "Data"))
+    fns.push(CmmFuncInfo(name: "Data.Quad", signature: "Data.Quad(<addr>)", return_type: "hex", description: "Read 64-bit quad from memory address", group: "Data"))
+    fns.push(CmmFuncInfo(name: "Data.STRing", signature: "Data.STRing(<addr>)", return_type: "text", description: "Read null-terminated string from memory", group: "Data"))
+
+    # --- Symbol functions ---
+    fns.push(CmmFuncInfo(name: "sYmbol.BEGIN", signature: "sYmbol.BEGIN(<name>)", return_type: "hex", description: "Return start address of symbol", group: "Symbol"))
+    fns.push(CmmFuncInfo(name: "sYmbol.END", signature: "sYmbol.END(<name>)", return_type: "hex", description: "Return end address of symbol", group: "Symbol"))
+    fns.push(CmmFuncInfo(name: "sYmbol.SIZEOF", signature: "sYmbol.SIZEOF(<name>)", return_type: "int", description: "Return size of symbol in bytes", group: "Symbol"))
+    fns.push(CmmFuncInfo(name: "sYmbol.EXIST", signature: "sYmbol.EXIST(<name>)", return_type: "bool", description: "TRUE() if symbol exists in symbol table", group: "Symbol"))
+
+    # --- Conversion / type functions ---
+    fns.push(CmmFuncInfo(name: "CONVert.FLOATTOINT", signature: "CONVert.FLOATTOINT(<float>)", return_type: "hex", description: "Convert float to integer (IEEE 754 bit pattern)", group: "Convert"))
+    fns.push(CmmFuncInfo(name: "CONVert.INTTOFLOAT", signature: "CONVert.INTTOFLOAT(<int>)", return_type: "float", description: "Convert integer bit pattern to float", group: "Convert"))
+    fns.push(CmmFuncInfo(name: "FORMAT.Decimal", signature: "FORMAT.Decimal(<count>, <value>)", return_type: "text", description: "Format value as decimal string with width", group: "Convert"))
+    fns.push(CmmFuncInfo(name: "FORMAT.Hex", signature: "FORMAT.Hex(<count>, <value>)", return_type: "text", description: "Format value as hex string with width", group: "Convert"))
+    fns.push(CmmFuncInfo(name: "FORMAT.UnFloat", signature: "FORMAT.UnFloat(<type>, <count>, <value>)", return_type: "text", description: "Format float value as string", group: "Convert"))
+
+    # --- Run-time info ---
+    fns.push(CmmFuncInfo(name: "RUNTIME", signature: "RUNTIME()", return_type: "float", description: "Return elapsed runtime in seconds", group: "Runtime"))
+
+    # --- File I/O functions ---
+    fns.push(CmmFuncInfo(name: "FILE.EOFLASTREAD", signature: "FILE.EOFLASTREAD()", return_type: "bool", description: "TRUE() if last READ reached end of file", group: "File"))
+    fns.push(CmmFuncInfo(name: "FILE.EOF", signature: "FILE.EOF(<channel>)", return_type: "bool", description: "TRUE() if file channel is at end of file", group: "File"))
+    fns.push(CmmFuncInfo(name: "FILE.EXIST", signature: "FILE.EXIST(<path>)", return_type: "bool", description: "TRUE() if file exists", group: "File"))
+    fns.push(CmmFuncInfo(name: "FILE.TYPE", signature: "FILE.TYPE(<path>)", return_type: "text", description: "Return file type", group: "File"))
+    fns.push(CmmFuncInfo(name: "FILE.SIZE", signature: "FILE.SIZE(<path>)", return_type: "int", description: "Return file size in bytes", group: "File"))
+
+    # --- OS extended functions ---
+    fns.push(CmmFuncInfo(name: "OS.FILE.ABSPATH", signature: "OS.FILE.ABSPATH(<path>)", return_type: "text", description: "Return absolute path", group: "OS"))
+    fns.push(CmmFuncInfo(name: "OS.FILE.readable", signature: "OS.FILE.readable(<path>)", return_type: "bool", description: "TRUE() if file is readable", group: "OS"))
+    fns.push(CmmFuncInfo(name: "OS.FILE.EXTENSION", signature: "OS.FILE.EXTENSION(<path>)", return_type: "text", description: "Return file extension", group: "OS"))
+    fns.push(CmmFuncInfo(name: "OS.FILE.NAME", signature: "OS.FILE.NAME(<path>)", return_type: "text", description: "Return file name without path", group: "OS"))
+    fns.push(CmmFuncInfo(name: "OS.FILE.PATH", signature: "OS.FILE.PATH(<path>)", return_type: "text", description: "Return directory part of path", group: "OS"))
+    fns.push(CmmFuncInfo(name: "OS.FILE.SIZE", signature: "OS.FILE.SIZE(<path>)", return_type: "int", description: "Return file size in bytes", group: "OS"))
+    fns.push(CmmFuncInfo(name: "OS.FIRSTFILE", signature: "OS.FIRSTFILE(<pattern>)", return_type: "text", description: "Start file search, return first match", group: "OS"))
+    fns.push(CmmFuncInfo(name: "OS.NEXTFILE", signature: "OS.NEXTFILE()", return_type: "text", description: "Return next file from search", group: "OS"))
+    fns.push(CmmFuncInfo(name: "OS.TMPFILE", signature: "OS.TMPFILE()", return_type: "text", description: "Return temporary file path", group: "OS"))
+    fns.push(CmmFuncInfo(name: "OS.TIMER", signature: "OS.TIMER()", return_type: "float", description: "Return system timer value in seconds", group: "OS"))
+    fns.push(CmmFuncInfo(name: "OS.RETURN", signature: "OS.RETURN()", return_type: "int", description: "Return code of last OS command", group: "OS"))
+
+    # --- PRACTICE extended functions ---
+    fns.push(CmmFuncInfo(name: "PRACTICE.ARG", signature: "PRACTICE.ARG(<index>)", return_type: "text", description: "Return script argument by index", group: "PRACTICE"))
+    fns.push(CmmFuncInfo(name: "PRACTICE.CALLER.FILE", signature: "PRACTICE.CALLER.FILE(<level>)", return_type: "text", description: "Return caller script filename", group: "PRACTICE"))
+    fns.push(CmmFuncInfo(name: "PRACTICE.CALLER.LINE", signature: "PRACTICE.CALLER.LINE()", return_type: "int", description: "Return caller line number", group: "PRACTICE"))
+    fns.push(CmmFuncInfo(name: "PRACTICE.FUNCtion.AVAILable", signature: "PRACTICE.FUNCtion.AVAILable(<name>)", return_type: "bool", description: "TRUE() if PRACTICE function is available", group: "PRACTICE"))
+
+    # --- Version extended functions ---
+    fns.push(CmmFuncInfo(name: "VERSION.ENVironment", signature: "VERSION.ENVironment(<name>)", return_type: "text", description: "Return T32 environment variable", group: "Version"))
+    fns.push(CmmFuncInfo(name: "VERSION.BUILD.BASE", signature: "VERSION.BUILD.BASE()", return_type: "int", description: "Return base build number", group: "Version"))
+    fns.push(CmmFuncInfo(name: "VERSION.SOFTWARE", signature: "VERSION.SOFTWARE()", return_type: "text", description: "Return software version string", group: "Version"))
+
+    # --- Conversion extended functions ---
+    fns.push(CmmFuncInfo(name: "CONVert.CHAR", signature: "CONVert.CHAR(<code>)", return_type: "text", description: "Convert character code to string", group: "Convert"))
+    fns.push(CmmFuncInfo(name: "CONVert.HEXTOINT", signature: "CONVert.HEXTOINT(<str>)", return_type: "int", description: "Convert hex string to integer", group: "Convert"))
+    fns.push(CmmFuncInfo(name: "CONVert.BOOLTOINT", signature: "CONVert.BOOLTOINT(<bool>)", return_type: "int", description: "Convert boolean to integer", group: "Convert"))
+    fns.push(CmmFuncInfo(name: "CONVert.INTTOHEX", signature: "CONVert.INTTOHEX(<int>)", return_type: "text", description: "Convert integer to hex string", group: "Convert"))
+    fns.push(CmmFuncInfo(name: "CONVert.FLOATTOSTR", signature: "CONVert.FLOATTOSTR(<float>)", return_type: "text", description: "Convert float to string", group: "Convert"))
+
+    # --- Format extended functions ---
+    fns.push(CmmFuncInfo(name: "FORMAT.HEX", signature: "FORMAT.HEX(<width>, <value>)", return_type: "text", description: "Format value as hex string with width", group: "Convert"))
+    fns.push(CmmFuncInfo(name: "FORMAT.BINary", signature: "FORMAT.BINary(<width>, <value>)", return_type: "text", description: "Format value as binary string", group: "Convert"))
+    fns.push(CmmFuncInfo(name: "FORMAT.STRing", signature: "FORMAT.STRing(<width>, <value>)", return_type: "text", description: "Format value as string with width", group: "Convert"))
+
+    # --- String extended functions ---
+    fns.push(CmmFuncInfo(name: "STRing.ComPare", signature: "STRing.ComPare(<str1>, <str2>)", return_type: "int", description: "Compare two strings, return 0 if equal", group: "STRing"))
+    fns.push(CmmFuncInfo(name: "STRing.FIND", signature: "STRing.FIND(<str>, <substr>)", return_type: "int", description: "Find substring position", group: "STRing"))
+    fns.push(CmmFuncInfo(name: "STRing.CHAR", signature: "STRing.CHAR(<str>, <pos>)", return_type: "text", description: "Return character at position", group: "STRing"))
+
+    # --- Math functions ---
+    fns.push(CmmFuncInfo(name: "math.ABS", signature: "math.ABS(<value>)", return_type: "float", description: "Absolute value", group: "Math"))
+    fns.push(CmmFuncInfo(name: "math.FCOS", signature: "math.FCOS(<angle>)", return_type: "float", description: "Cosine function", group: "Math"))
+    fns.push(CmmFuncInfo(name: "math.FSIN", signature: "math.FSIN(<angle>)", return_type: "float", description: "Sine function", group: "Math"))
+    fns.push(CmmFuncInfo(name: "math.FSQRT", signature: "math.FSQRT(<value>)", return_type: "float", description: "Square root", group: "Math"))
+
+    # --- System / target functions ---
+    fns.push(CmmFuncInfo(name: "SYStem.MODE", signature: "SYStem.MODE()", return_type: "int", description: "Return current system mode", group: "SYStem"))
+    fns.push(CmmFuncInfo(name: "CPUIS", signature: "CPUIS(<pattern>)", return_type: "bool", description: "TRUE() if CPU matches pattern (wildcard supported)", group: "CPU"))
+    fns.push(CmmFuncInfo(name: "SOFTWARE.BUILD", signature: "SOFTWARE.BUILD()", return_type: "int", description: "Return T32 software build number", group: "Version"))
+    fns.push(CmmFuncInfo(name: "Trace.RECORDS", signature: "Trace.RECORDS()", return_type: "int", description: "Return number of trace records captured", group: "Trace"))
+    fns.push(CmmFuncInfo(name: "TRACK.ADDRESS", signature: "TRACK.ADDRESS()", return_type: "hex", description: "Return tracked address", group: "Address"))
+
+    # --- Dialog query extended ---
+    fns.push(CmmFuncInfo(name: "DIALOG.STRing", signature: "DIALOG.STRing(<name>)", return_type: "text", description: "Return dialog string field value", group: "Dialog"))
+
+    # --- Misc functions ---
+    fns.push(CmmFuncInfo(name: "language", signature: "language()", return_type: "text", description: "Return current TRACE32 language setting", group: "Misc"))
+    fns.push(CmmFuncInfo(name: "HOSTID", signature: "HOSTID()", return_type: "text", description: "Return host identification", group: "Misc"))
+    fns.push(CmmFuncInfo(name: "HOSTIP", signature: "HOSTIP()", return_type: "text", description: "Return host IP address", group: "Misc"))
+    fns.push(CmmFuncInfo(name: "NODENAME", signature: "NODENAME()", return_type: "text", description: "Return network node name", group: "Misc"))
+    fns.push(CmmFuncInfo(name: "PID", signature: "PID()", return_type: "int", description: "Return TRACE32 process ID", group: "Misc"))
+    fns.push(CmmFuncInfo(name: "RANDOM", signature: "RANDOM()", return_type: "int", description: "Return random number", group: "Misc"))
+    fns.push(CmmFuncInfo(name: "RANDOM.RANGE", signature: "RANDOM.RANGE(<min>, <max>)", return_type: "int", description: "Return random number in range", group: "Misc"))
+    fns.push(CmmFuncInfo(name: "Var.VALUE", signature: "Var.VALUE(<expr>)", return_type: "any", description: "Evaluate HLL expression and return value", group: "Var"))
+
+    CmmFuncDB(functions: fns)
+
+# ---------------------------------------------------------------------------
+# Lookup helpers
+# ---------------------------------------------------------------------------
+
+# Convert text to lower case for case-insensitive comparison (ASCII)
+fn to_lower(s: text) -> text:
+    var result = ""
+    var i = 0
+    while i < s.len():
+        val ch = s[i:i + 1]
+        if ch >= "A" and ch <= "Z":
+            result = result + ch.to_lower()
+        else:
+            result = result + ch
+        i = i + 1
+    result
+
+# Look up a function by name (case-insensitive).
+#
+# Returns the first matching CmmFuncInfo, or nil if not found.
+fn lookup_function(db: CmmFuncDB, name: text) -> CmmFuncInfo?:
+    val lower_name = to_lower(name)
+    var i = 0
+    while i < db.functions.len():
+        val func = db.functions[i]
+        if to_lower(func.name) == lower_name:
+            return func
+        i = i + 1
+    nil
+
+# Return all functions whose name starts with prefix (case-insensitive).
+# Used for auto-completion when the user types a partial function name.
+fn get_function_completions(db: CmmFuncDB, prefix: text) -> [CmmFuncInfo]:
+    val lower_prefix = to_lower(prefix)
+    var results: [CmmFuncInfo] = []
+    var i = 0
+    while i < db.functions.len():
+        val func = db.functions[i]
+        val lower_name = to_lower(func.name)
+        if starts_with(lower_name, lower_prefix):
+            results.push(func)
+        i = i + 1
+    results
+
+# Return all functions belonging to a given group (case-insensitive).
+fn get_function_group(db: CmmFuncDB, group: text) -> [CmmFuncInfo]:
+    val lower_group = to_lower(group)
+    var results: [CmmFuncInfo] = []
+    var i = 0
+    while i < db.functions.len():
+        val func = db.functions[i]
+        if to_lower(func.group) == lower_group:
+            results.push(func)
+        i = i + 1
+    results
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+# Check if text starts with a given prefix
+fn starts_with(haystack: text, prefix: text) -> bool:
+    if prefix.len() > haystack.len():
+        return false
+    haystack.slice(0, prefix.len()) == prefix

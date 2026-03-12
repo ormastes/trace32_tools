@@ -1,0 +1,121 @@
+; @target: SiFive E31
+; @arch: RISC-V RV32IMAC
+; @purpose: Multi-hart debug
+; @requires: JTAG
+; @cli-mode: batch
+; SiFive E31 RISC-V Multi-Hart Debug
+; SiFive E31 Complex - RV32IMAC with multiple harts
+
+SCREEN.OFF
+
+AREA.Create CLI_OUTPUT
+AREA.Select CLI_OUTPUT
+
+LOCAL &hart_count &current_hart &csr_val
+LOCAL &misa &mstatus
+
+SYStem.RESet
+SYStem.CPU SiFiveE31
+SYStem.CONFIG.DEBUGPORTTYPE JTAG
+SYStem.JtagClock 10MHz
+
+; Multi-hart configuration
+&hart_count=2
+SYStem.CONFIG.CORE 1. &hart_count
+
+SYStem.Up
+
+; Read CSR registers
+&misa=Data.Long(SPR:0x301)      ; misa
+&mstatus=Data.Long(SPR:0x300)   ; mstatus
+PRINT "[CSR] misa=" FORMAT.Hex(8., &misa)
+PRINT "[CSR] mstatus=" FORMAT.Hex(8., &mstatus)
+
+; Set breakpoints on each hart
+&current_hart=0
+WHILE &current_hart<&hart_count
+(
+  Break.Set main /CORE &current_hart
+  &current_hart=&current_hart+1
+)
+
+; Load ELF
+Data.LOAD.Elf "sifive_e31_test.elf"
+
+; Set stack pointers per hart
+Register.Set /CORE 0. SP 0x80010000
+Register.Set /CORE 1. SP 0x80020000
+
+; Variable watch
+Var.AddWatch hart_id
+Var.AddWatch shared_counter
+
+Go
+WAIT !STATE.RUN() 10s
+
+; Check execution state
+IF !STATE.RUN()
+(
+  PRINT "[DEBUG] stopped_at=" Register(PC)
+  WinPrint.Frame.view /Locals /Caller
+)
+
+; --- Additional parser exercises ---
+
+; ON.ERROR dot-syntax event handler
+ON.ERROR continue
+
+; PARAMETERS (alias for ENTRY)
+PARAMETERS &hart_id
+
+; DO call to external script
+DO ~~/demo/riscv/setup/e31_init.cmm
+
+; Per-hart CSR dump in WHILE loop with SPR: access class
+&current_hart=0
+WHILE &current_hart<&hart_count
+(
+  LOCAL &mie_val &mip_val &mscratch
+  &mie_val=Data.Long(SPR:0x304)
+  &mip_val=Data.Long(SPR:0x344)
+  &mscratch=Data.Long(SPR:0x340)
+  PRINT "[CSR] hart=" FORMAT.Decimal(1., &current_hart) " mie=" FORMAT.Hex(8., &mie_val)
+  PRINT "[CSR] hart=" FORMAT.Decimal(1., &current_hart) " mip=" FORMAT.Hex(8., &mip_val)
+  PRINT "[CSR] hart=" FORMAT.Decimal(1., &current_hart) " mscratch=" FORMAT.Hex(8., &mscratch)
+  &current_hart=&current_hart+1
+)
+
+; Trace.METHOD Analyzer for E31
+Trace.METHOD Analyzer
+Trace.SIZE 500000.
+Trace.Init
+
+WinPrint.Data.List
+WinPrint.Register.view
+WinPrint.Frame.view /Locals /Caller
+
+; Var.NEWLOCAL for C-level variables
+Var.NEWLOCAL int debug_count
+Var.Set debug_count=0
+Var.AddWatch debug_count
+Var.AddWatch shared_counter
+
+; GOSUB to dump subroutine
+GOSUB print_hart_summary &hart_count
+
+PRINT "[STATUS] debug_session=COMPLETE"
+
+ENDDO TRUE()
+
+; Subroutine: print summary of all harts
+print_hart_summary:
+  ENTRY &num_harts
+  LOCAL &idx &pc_val
+  &idx=0
+  WHILE &idx<&num_harts
+  (
+    &pc_val=Register(/CORE &idx PC)
+    PRINT "[DEBUG] hart=" FORMAT.Decimal(1., &idx) " final_pc=" FORMAT.Hex(8., &pc_val)
+    &idx=&idx+1
+  )
+  RETURN

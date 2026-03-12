@@ -1,0 +1,171 @@
+# T32 LSP MCP Server — JSON helpers
+# Inlined for zero-import startup. All functions prefixed lsp_ to avoid name collisions.
+
+# --- JSON character helpers ---
+
+fn lsp_Q() -> text:
+    "\""
+
+fn lsp_LB() -> text:
+    "{"
+
+fn lsp_RB() -> text:
+    "}"
+
+fn lsp_SB_L() -> text:
+    "["
+
+fn lsp_SB_R() -> text:
+    "]"
+
+# --- JSON encoding ---
+
+fn lsp_escape_json(s: text) -> text:
+    var result = s
+    result = result.replace(r"\", r"\\")
+    result = result.replace(lsp_Q(), r"\" + lsp_Q())
+    result = result.replace("\n", r"\n")
+    result = result.replace("\r", r"\r")
+    result = result.replace("\t", r"\t")
+    result
+
+fn lsp_js(s: text) -> text:
+    lsp_Q() + lsp_escape_json(s) + lsp_Q()
+
+fn lsp_jp(key: text, value: text) -> text:
+    lsp_Q() + key + lsp_Q() + ":" + value
+
+fn lsp_jo1(p1: text) -> text:
+    lsp_LB() + p1 + lsp_RB()
+
+fn lsp_jo2(p1: text, p2: text) -> text:
+    lsp_LB() + p1 + "," + p2 + lsp_RB()
+
+fn lsp_jo3(p1: text, p2: text, p3: text) -> text:
+    lsp_LB() + p1 + "," + p2 + "," + p3 + lsp_RB()
+
+fn lsp_jo4(p1: text, p2: text, p3: text, p4: text) -> text:
+    lsp_LB() + p1 + "," + p2 + "," + p3 + "," + p4 + lsp_RB()
+
+# --- JSON extraction ---
+
+fn lsp_extract_field(json: text, key: text) -> text:
+    val search = lsp_Q() + key + lsp_Q() + ":"
+    val idx_result = json.index_of(search)
+    var idx = -1
+    match idx_result:
+        Some(i): idx = i
+        nil: return ""
+    if idx < 0:
+        return ""
+    val start = idx + search.len()
+    val after = json.substring(start)
+    val trimmed = after.trim()
+    if trimmed.starts_with(lsp_Q()):
+        val after_quote = trimmed.substring(1)
+        val end_idx_result = after_quote.index_of(lsp_Q())
+        var end_idx = -1
+        match end_idx_result:
+            Some(i): end_idx = i
+            nil: return ""
+        if end_idx < 0:
+            return ""
+        return trimmed.substring(1, end_idx + 1)
+    else:
+        var parts: [text] = []
+        for ch in trimmed:
+            if ch == "," or ch == lsp_RB() or ch == lsp_SB_R() or ch == " " or ch == "\n":
+                break
+            parts.push(ch)
+        return parts.join("")
+
+fn lsp_extract_field_raw(json: text, key: text) -> text:
+    val search = lsp_Q() + key + lsp_Q() + ":"
+    val idx_result = json.index_of(search)
+    var idx = -1
+    match idx_result:
+        Some(i): idx = i
+        nil: return "null"
+    if idx < 0:
+        return "null"
+    var start = idx + search.len()
+    if start >= json.len():
+        return "null"
+    var rest = json.substring(start)
+    rest = rest.trim()
+    if rest == "":
+        return "null"
+    if rest.starts_with(lsp_Q()):
+        var out: [text] = [lsp_Q()]
+        var escaped = false
+        var pos = 1
+        for _i in range(0, 100000):
+            if pos >= rest.len():
+                break
+            val ch = rest.substring(pos, pos + 1)
+            out.push(ch)
+            if escaped:
+                escaped = false
+            elif ch == "\\":
+                escaped = true
+            elif ch == lsp_Q():
+                break
+            pos = pos + 1
+        return out.join("")
+    var parts: [text] = []
+    for ch in rest:
+        if ch == "," or ch == lsp_RB() or ch == lsp_SB_R() or ch == " " or ch == "\n":
+            break
+        parts.push(ch)
+    val raw = parts.join("")
+    if raw == "":
+        return "null"
+    raw
+
+fn lsp_extract_id(json: text) -> text:
+    lsp_extract_field_raw(json, "id")
+
+fn lsp_extract_nested(json: text, key: text) -> text:
+    val params_search = lsp_Q() + "params" + lsp_Q() + ":"
+    val params_idx_result = json.index_of(params_search)
+    var params_idx = -1
+    match params_idx_result:
+        Some(i): params_idx = i
+        nil: return ""
+    if params_idx < 0:
+        return ""
+    val params_start = params_idx + params_search.len()
+    val params = json.substring(params_start)
+    lsp_extract_field(params, key)
+
+# --- JSON result helpers ---
+
+fn lsp_result_ok(id: text, result: text) -> text:
+    lsp_jo3(lsp_jp("jsonrpc", lsp_js("2.0")), lsp_jp("id", id), lsp_jp("result", result))
+
+fn lsp_result_error(id: text, code: i64, message: text) -> text:
+    val err = lsp_jo2(lsp_jp("code", str(code)), lsp_jp("message", lsp_js(message)))
+    lsp_jo3(lsp_jp("jsonrpc", lsp_js("2.0")), lsp_jp("id", id), lsp_jp("error", err))
+
+# --- MCP Tool Result helpers ---
+
+fn lsp_make_tool_result(id: text, output: text) -> text:
+    val escaped = lsp_escape_json(output)
+    val quoted = lsp_Q() + escaped + lsp_Q()
+    val content = lsp_SB_L() + lsp_jo2(lsp_jp("type", lsp_js("text")), lsp_jp("text", quoted)) + lsp_SB_R()
+    val result = lsp_jo1(lsp_jp("content", content))
+    lsp_result_ok(id, result)
+
+fn lsp_make_tool_error(id: text, code: i64, msg: text) -> text:
+    val content = lsp_SB_L() + lsp_jo2(lsp_jp("type", lsp_js("text")), lsp_jp("text", lsp_js("ERROR " + str(code) + ": " + msg))) + lsp_SB_R()
+    var err_result = lsp_LB() + lsp_jp("content", content) + "," + lsp_jp("isError", "true") + lsp_RB()
+    lsp_result_ok(id, err_result)
+
+# --- Utility ---
+
+fn lsp_text_byte_len(s: text) -> i64:
+    s.len()
+
+# Build a JSON string field: "key":"value"
+fn lsp_json_str(key: text, value: text) -> text:
+    lsp_jp(key, lsp_js(value))

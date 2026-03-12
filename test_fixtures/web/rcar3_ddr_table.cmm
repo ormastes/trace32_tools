@@ -1,0 +1,61 @@
+; R-Car Gen3 DDR Init from CSV Table
+; Exercises: OPEN/READ/CLOSE file I/O, WHILE !FILE.EOFLASTREAD(),
+;            STRING.SPLIT, PRINT %COLOR.NAVY/RED/GREEN, REPEAT with count,
+;            Data.Compare, FOUND(), VM: access class
+
+LOCAL &filename &line &addr &data &count
+LOCAL &passed &failed
+
+&filename="ddr_init_table.csv"
+&passed=0
+&failed=0
+
+; Open and read init table
+OPEN #1 "&filename" /Read
+IF !OS.FILE("&filename")
+(
+  PRINT %COLOR.RED "Error: File not found: &filename"
+  ENDDO
+)
+
+PRINT %COLOR.NAVY "Loading DDR init table..."
+
+&count=0
+WHILE !FILE.EOFLASTREAD()
+(
+  READ #1 %LINE &line
+  IF "&line"!=""
+  (
+    ; Parse CSV: addr,data,delay
+    &addr=STRing.SPLIT("&line",",",0)
+    &data=STRing.SPLIT("&line",",",1)
+    Data.Set D:&addr %Long &data
+    &count=&count+1
+  )
+)
+CLOSE #1
+
+PRINT %COLOR.GREEN "Loaded &count register writes"
+
+; Verify with repeat
+RePeaT 10.
+(
+  &passed=&passed+1
+)
+
+; Compare memory
+Data.Compare D:0x48000000--0x48000FFF VM:0x48000000
+IF !FOUND()
+(
+  &passed=&passed+1
+  PRINT %COLOR.GREEN "Memory compare: PASSED"
+)
+ELSE
+(
+  &failed=&failed+1
+  PRINT %COLOR.RED "Memory compare: FAILED"
+)
+
+PRINT "Results: &passed passed, &failed failed"
+
+ENDDO

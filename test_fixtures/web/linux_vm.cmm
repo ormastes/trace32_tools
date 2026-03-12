@@ -1,0 +1,45 @@
+; Linux Virtual Machine Debug
+; Exercises: d.load.elf /nocode /noclear /cpp /strippart,
+;            TASK.CONFIG linux, dodecrypt, tronchip.set,
+;            task.config l4, menu.rp l4
+
+LOCAL &vmlinux &ko_path &modules_loaded
+
+SYStem.RESet
+SYStem.CPU CortexA53
+SYStem.CONFIG.COREBASE APB:0x80410000 APB:0x80412000
+SYStem.Up
+
+; Load vmlinux with special options
+&vmlinux="/home/user/linux/vmlinux"
+d.load.elf &vmlinux /nocode /noclear /cpp /strippart 4.
+
+; Linux awareness
+TASK.CONFIG ~~/demo/arm64/kernel/linux/linux.t32
+MENU.ReProgram ~~/demo/arm64/kernel/linux/linux.men
+
+; Symbol loading for modules
+sYmbol.AutoLOAD.CHECK
+
+; Set kernel breakpoints
+Break.Set do_sys_open
+Break.Set printk /CMD "Var.View %String (char*)msg"
+
+; Decrypt support
+; dodecrypt ENCRYPTPER key.pem
+
+; Configure trace
+tronchip.set CORESIGHT ON
+Trace.METHOD CAnalyzer
+Trace.SIZE 32000000.
+Trace.Init
+
+Go
+WAIT 10s
+Break.direct
+
+; Check task list
+TASK.List
+Var.Frame
+
+ENDDO

@@ -1,0 +1,1026 @@
+# CMM (PRACTICE Script) Expression Parser
+# Recursive descent expression parser with 13 operator precedence levels.
+#
+# Extends CmmParser (defined in cmm_parser.spl) via impl block.
+# Follows the precedence-climbing pattern from src/lib/common/parser/parser_expr.spl.
+#
+# Precedence (lowest → highest):
+#   13: ||           LogicalOr
+#   12: ^^           LogicalXor
+#   11: &&           LogicalAnd
+#   10: |            BitOr
+#    9: ^            BitXor
+#    8: &            BitAnd
+#    7: == != >= <= > <  Comparison
+#    6: + -          Add/Sub/Concat
+#    5: * / %        Mul/Div/Mod
+#    4: << >>        Shift
+#    3: - ~ !        Unary
+#    2: -- ++ ..     Range
+#    1: ( ) { }      Primary (highest)
+#
+# Reference: doc/research/cmm_grammar_research_2026-03-10.md
+
+use cmm_tokens.{CmmTokenKind, CmmToken}
+use cmm_ast.{CmmExpr, CmmBinOp, CmmUnaryOp, CmmLiteral, CmmSpan, span}
+use cmm_parser.{CmmParser, CmmParseError, to_upper_cmm}
+
+# ---------------------------------------------------------------------------
+# Access class detection helper
+# ---------------------------------------------------------------------------
+
+# Check if a name is a known CMM memory access class.
+# CMM is case-insensitive, so we check both upper and lower forms.
+fn is_access_class(name: text) -> bool:
+    (name == "P" or name == "p" or
+    name == "D" or name == "d" or
+    name == "C" or name == "c" or
+    name == "E" or name == "e" or
+    name == "EP" or name == "ep" or
+    name == "ED" or name == "ed" or
+    name == "A" or name == "a" or
+    name == "AD" or name == "ad" or
+    name == "AP" or name == "ap" or
+    name == "SP" or name == "sp" or
+    name == "SD" or name == "sd" or
+    name == "UD" or name == "ud" or
+    name == "VM" or name == "vm" or
+    name == "NC" or name == "nc" or
+    name == "PP" or name == "pp" or
+    name == "IC" or name == "ic" or
+    name == "DC" or name == "dc" or
+    name == "EA" or name == "ea" or
+    name == "USR" or name == "usr" or
+    name == "EX" or name == "ex" or
+    name == "AX" or name == "ax" or
+    name == "ANC" or name == "anc" or
+    name == "SPR" or name == "spr" or
+    name == "DAP" or name == "dap" or
+    name == "EAXI" or name == "eaxi" or
+    name == "AXI" or name == "axi" or
+    name == "EDBG" or name == "edbg" or
+    name == "APB" or name == "apb" or
+    name == "C15" or name == "c15")
+
+# ---------------------------------------------------------------------------
+# Expression parsing methods — added to CmmParser via impl block
+# ---------------------------------------------------------------------------
+
+impl CmmParser:
+
+    # ===== Top-level entry point =====
+
+    # Parse a full CMM expression starting at the lowest precedence.
+    me parse_expression() -> Result<CmmExpr, CmmParseError>:
+        self.parse_logical_or()
+
+    # ===== Level 13: || (Logical OR) =====
+
+    # Flattened to avoid nested match with return/mutation.
+    me parse_logical_or() -> Result<CmmExpr, CmmParseError>:
+        val left_result = self.parse_logical_xor()
+        match left_result:
+            case Err(e): return Err(e)
+            case _: ()
+        var current = self.unwrap_expr_result(left_result)
+        while self.check_op("||") or self.check_classic_or():
+            self.advance()
+            val right_result = self.parse_logical_xor()
+            match right_result:
+                case Err(e): return Err(e)
+                case _: ()
+            current = CmmExpr.Binary(CmmBinOp.LogOr, current, self.unwrap_expr_result(right_result))
+        Ok(current)
+
+    # ===== Level 12: ^^ (Logical XOR) =====
+
+    # Flattened to avoid nested match with return/mutation.
+    me parse_logical_xor() -> Result<CmmExpr, CmmParseError>:
+        val left_result = self.parse_logical_and()
+        match left_result:
+            case Err(e): return Err(e)
+            case _: ()
+        var current = self.unwrap_expr_result(left_result)
+        while self.check_op("^^") or self.check_classic_xor():
+            self.advance()
+            val right_result = self.parse_logical_and()
+            match right_result:
+                case Err(e): return Err(e)
+                case _: ()
+            current = CmmExpr.Binary(CmmBinOp.LogXor, current, self.unwrap_expr_result(right_result))
+        Ok(current)
+
+    # ===== Level 11: && (Logical AND) =====
+
+    # Flattened to avoid nested match with return/mutation.
+    me parse_logical_and() -> Result<CmmExpr, CmmParseError>:
+        val left_result = self.parse_bitwise_or()
+        match left_result:
+            case Err(e): return Err(e)
+            case _: ()
+        var current = self.unwrap_expr_result(left_result)
+        while self.check_op("&&") or self.check_classic_and():
+            self.advance()
+            val right_result = self.parse_bitwise_or()
+            match right_result:
+                case Err(e): return Err(e)
+                case _: ()
+            current = CmmExpr.Binary(CmmBinOp.LogAnd, current, self.unwrap_expr_result(right_result))
+        Ok(current)
+
+    # ===== Level 10: | (Bitwise OR) =====
+
+    # Flattened to avoid nested match with return/mutation.
+    me parse_bitwise_or() -> Result<CmmExpr, CmmParseError>:
+        val left_result = self.parse_bitwise_xor()
+        match left_result:
+            case Err(e): return Err(e)
+            case _: ()
+        var current = self.unwrap_expr_result(left_result)
+        while self.check_op("|"):
+            self.advance()
+            val right_result = self.parse_bitwise_xor()
+            match right_result:
+                case Err(e): return Err(e)
+                case _: ()
+            current = CmmExpr.Binary(CmmBinOp.BitOr, current, self.unwrap_expr_result(right_result))
+        Ok(current)
+
+    # ===== Level 9: ^ (Bitwise XOR) =====
+
+    # Flattened to avoid nested match with return/mutation.
+    me parse_bitwise_xor() -> Result<CmmExpr, CmmParseError>:
+        val left_result = self.parse_bitwise_and()
+        match left_result:
+            case Err(e): return Err(e)
+            case _: ()
+        var current = self.unwrap_expr_result(left_result)
+        while self.check_op("^"):
+            self.advance()
+            val right_result = self.parse_bitwise_and()
+            match right_result:
+                case Err(e): return Err(e)
+                case _: ()
+            current = CmmExpr.Binary(CmmBinOp.BitXor, current, self.unwrap_expr_result(right_result))
+        Ok(current)
+
+    # ===== Level 8: & (Bitwise AND) =====
+
+    # Flattened to avoid nested match with return/mutation.
+    me parse_bitwise_and() -> Result<CmmExpr, CmmParseError>:
+        val left_result = self.parse_comparison()
+        match left_result:
+            case Err(e): return Err(e)
+            case _: ()
+        var current = self.unwrap_expr_result(left_result)
+        while self.check_op("&"):
+            self.advance()
+            val right_result = self.parse_comparison()
+            match right_result:
+                case Err(e): return Err(e)
+                case _: ()
+            current = CmmExpr.Binary(CmmBinOp.BitAnd, current, self.unwrap_expr_result(right_result))
+        Ok(current)
+
+    # ===== Level 7: == != >= <= > < (Comparison) =====
+
+    # Flattened to avoid nested match with return/mutation.
+    me parse_comparison() -> Result<CmmExpr, CmmParseError>:
+        val left_result = self.parse_addition()
+        match left_result:
+            case Err(e): return Err(e)
+            case _: ()
+        var current = self.unwrap_expr_result(left_result)
+        while self.check_comparison_op():
+            val op_token = self.advance()
+            val op = self.token_to_comparison_op(op_token)
+            val right_result = self.parse_addition()
+            match right_result:
+                case Err(e): return Err(e)
+                case _: ()
+            current = CmmExpr.Binary(op, current, self.unwrap_expr_result(right_result))
+        Ok(current)
+
+    # ===== Level 6: + - (Addition / Subtraction / String Concat) =====
+
+    # Flattened to avoid nested match with return/mutation.
+    me parse_addition() -> Result<CmmExpr, CmmParseError>:
+        val left_result = self.parse_multiplication()
+        match left_result:
+            case Err(e): return Err(e)
+            case _: ()
+        var current = self.unwrap_expr_result(left_result)
+        while self.check_op("+") or self.check_op("-"):
+            val op_token = self.advance()
+            val op = self.token_to_add_op(op_token)
+            val right_result = self.parse_multiplication()
+            match right_result:
+                case Err(e): return Err(e)
+                case _: ()
+            current = CmmExpr.Binary(op, current, self.unwrap_expr_result(right_result))
+        Ok(current)
+
+    # ===== Level 5: * / % (Multiplication / Division / Modulo) =====
+
+    # Flattened to avoid nested match with return/mutation.
+    me parse_multiplication() -> Result<CmmExpr, CmmParseError>:
+        val left_result = self.parse_shift()
+        match left_result:
+            case Err(e): return Err(e)
+            case _: ()
+        var current = self.unwrap_expr_result(left_result)
+        while self.check_op("*") or self.check_op("/") or self.check_op("%"):
+            # Star before ) or , or end-of-stmt is a wildcard, not multiplication
+            if self.check_op("*") and self.is_trailing_star():
+                break
+            val op_token = self.advance()
+            val op = self.token_to_mul_op(op_token)
+            val right_result = self.parse_shift()
+            match right_result:
+                case Err(e): return Err(e)
+                case _: ()
+            current = CmmExpr.Binary(op, current, self.unwrap_expr_result(right_result))
+        Ok(current)
+
+    # ===== Level 4: << >> (Shift) =====
+
+    # Flattened to avoid nested match with return/mutation.
+    me parse_shift() -> Result<CmmExpr, CmmParseError>:
+        val left_result = self.parse_unary()
+        match left_result:
+            case Err(e): return Err(e)
+            case _: ()
+        var current = self.unwrap_expr_result(left_result)
+        while self.check_op("<<") or self.check_op(">>"):
+            val op_token = self.advance()
+            val op = self.token_to_shift_op(op_token)
+            val right_result = self.parse_unary()
+            match right_result:
+                case Err(e): return Err(e)
+                case _: ()
+            current = CmmExpr.Binary(op, current, self.unwrap_expr_result(right_result))
+        Ok(current)
+
+    # ===== Level 3: - ~ ! N: N# (Unary prefix) =====
+
+    me parse_unary() -> Result<CmmExpr, CmmParseError>:
+        # Unary minus
+        if self.check_op("-"):
+            self.advance()
+            val neg_result = self.parse_unary()
+            match neg_result:
+                case Err(e): return Err(e)
+                case _: ()
+            val neg_op = self.unwrap_expr_result(neg_result)
+            return Ok(CmmExpr.Unary(CmmUnaryOp.Neg, neg_op))
+
+        # Bitwise NOT (~)
+        if self.check_op("~"):
+            self.advance()
+            val bnot_result = self.parse_unary()
+            match bnot_result:
+                case Err(e): return Err(e)
+                case _: ()
+            val bnot_op = self.unwrap_expr_result(bnot_result)
+            return Ok(CmmExpr.Unary(CmmUnaryOp.BitNot, bnot_op))
+
+        # Logical NOT (!)
+        if self.check_op("!"):
+            self.advance()
+            val lnot_result = self.parse_unary()
+            match lnot_result:
+                case Err(e): return Err(e)
+                case _: ()
+            val lnot_op = self.unwrap_expr_result(lnot_result)
+            return Ok(CmmExpr.Unary(CmmUnaryOp.LogNot, lnot_op))
+
+        # Classic NOT (N: or N#)
+        if self.check_classic_not():
+            self.advance()
+            val cnot_result = self.parse_unary()
+            match cnot_result:
+                case Err(e): return Err(e)
+                case _: ()
+            val cnot_op = self.unwrap_expr_result(cnot_result)
+            return Ok(CmmExpr.Unary(CmmUnaryOp.LogNot, cnot_op))
+
+        self.parse_range()
+
+    # ===== Level 2: -- ++ .. (Range) =====
+
+    # Flattened to avoid nested match with return/mutation.
+    me parse_range() -> Result<CmmExpr, CmmParseError>:
+        val left_result = self.parse_primary()
+        match left_result:
+            case Err(e): return Err(e)
+            case _: ()
+        val left = self.unwrap_expr_result(left_result)
+        # Check for range operators
+        if self.check_op("--"):
+            self.advance()
+            val right_result = self.parse_primary()
+            match right_result:
+                case Err(e): return Err(e)
+                case _: ()
+            return Ok(CmmExpr.Binary(CmmBinOp.RangeTo, left, self.unwrap_expr_result(right_result)))
+        if self.check_op("++"):
+            self.advance()
+            val right_result = self.parse_primary()
+            match right_result:
+                case Err(e): return Err(e)
+                case _: ()
+            return Ok(CmmExpr.Binary(CmmBinOp.RangeOffset, left, self.unwrap_expr_result(right_result)))
+        if self.check_op(".."):
+            self.advance()
+            val right_result = self.parse_primary()
+            match right_result:
+                case Err(e): return Err(e)
+                case _: ()
+            return Ok(CmmExpr.Binary(CmmBinOp.RangeDots, left, self.unwrap_expr_result(right_result)))
+        Ok(left)
+
+    # ===== Level 1: Primary expressions =====
+
+    me parse_primary() -> Result<CmmExpr, CmmParseError>:
+        if self.is_at_end():
+            return Err(CmmParseError(message: "Unexpected end of input, expected expression", line: 0, column: 0))
+
+        val token = self.peek()
+
+        # --- Literals ---
+
+        # Hex number: 0x1000
+        match token.kind:
+            case CmmTokenKind.HexNumber(v):
+                self.advance()
+                # Handle 0x&MACRO pattern: bare "0x" prefix followed by macro ref
+                if v == "0x" or v == "0X":
+                    match self.peek().kind:
+                        case CmmTokenKind.MacroRef(mname):
+                            self.advance()
+                            return Ok(CmmExpr.Ident("0x&" + mname))
+                        case _: ()
+                return Ok(CmmExpr.Lit(CmmLiteral.HexInt(v)))
+            case _:
+                pass_dn
+
+        match token.kind:
+            case CmmTokenKind.BinNumber(v):
+                self.advance()
+                return Ok(CmmExpr.Lit(CmmLiteral.BinInt(v)))
+            case _:
+                pass_dn
+
+        match token.kind:
+            case CmmTokenKind.DecNumber(v):
+                self.advance()
+                return Ok(CmmExpr.Lit(CmmLiteral.DecInt(v)))
+            case _:
+                pass_dn
+
+        match token.kind:
+            case CmmTokenKind.FloatNumber(v):
+                self.advance()
+                return Ok(CmmExpr.Lit(CmmLiteral.Float(v)))
+            case _:
+                pass_dn
+
+        match token.kind:
+            case CmmTokenKind.IntNumber(v):
+                self.advance()
+                return Ok(CmmExpr.Lit(CmmLiteral.PlainInt(v)))
+            case _:
+                pass_dn
+
+        match token.kind:
+            case CmmTokenKind.HexMask(v):
+                self.advance()
+                return Ok(CmmExpr.Lit(CmmLiteral.HexMask(v)))
+            case _:
+                pass_dn
+
+        match token.kind:
+            case CmmTokenKind.BinMask(v):
+                self.advance()
+                return Ok(CmmExpr.Lit(CmmLiteral.BinMask(v)))
+            case _:
+                pass_dn
+
+        match token.kind:
+            case CmmTokenKind.TimeLiteral(v):
+                self.advance()
+                return Ok(CmmExpr.Lit(CmmLiteral.Time(v)))
+            case _:
+                pass_dn
+
+        match token.kind:
+            case CmmTokenKind.StringLit(v):
+                self.advance()
+                return Ok(CmmExpr.Lit(CmmLiteral.Str(v)))
+            case _:
+                pass_dn
+
+        match token.kind:
+            case CmmTokenKind.CharLiteral(v):
+                self.advance()
+                return Ok(CmmExpr.Lit(CmmLiteral.Char(v)))
+            case _:
+                pass_dn
+
+        # --- Macro references ---
+
+        match token.kind:
+            case CmmTokenKind.MacroRef(name):
+                self.advance()
+                # Check for dot-separated path: &project.plg, &Time-&TimeSkip.
+                if self.check_kind("Dot"):
+                    var full = "&" + name
+                    while self.check_kind("Dot"):
+                        self.advance()
+                        val seg = self.extract_ident_name()
+                        if seg != "":
+                            self.advance()
+                            full = full + "." + seg
+                        else:
+                            full = full + "."
+                    # Check for function call: &obj.method(args)
+                    if self.check_kind("LParen"):
+                        self.advance()
+                        return self.finish_call_expr(full)
+                    return Ok(CmmExpr.Ident(full))
+                # Check for backslash path: &configdir\file
+                if self.check_kind("Backslash"):
+                    var full = "&" + name
+                    while self.check_kind("Backslash"):
+                        self.advance()
+                        full = full + "\\"
+                        val seg = self.extract_ident_name()
+                        if seg != "":
+                            self.advance()
+                            full = full + seg
+                        if seg == "":
+                            val mac = self.extract_macro_in_path()
+                            if mac != "":
+                                self.advance()
+                                full = full + mac
+                        if self.check_kind("Dot"):
+                            self.advance()
+                            val ext = self.extract_ident_name()
+                            if ext != "":
+                                self.advance()
+                                full = full + "." + ext
+                            else:
+                                full = full + "."
+                    return Ok(CmmExpr.Ident(full))
+                # Check for function call on macro: &name(args)
+                if self.check_kind("LParen"):
+                    self.advance()
+                    return self.finish_call_expr("&" + name)
+                return Ok(CmmExpr.MacroRef(name))
+            case _:
+                pass_dn
+
+        match token.kind:
+            case CmmTokenKind.MacroRecRef(name):
+                self.advance()
+                # Check for function call on recursive macro: &&name(args)
+                if self.check_kind("LParen"):
+                    self.advance()
+                    return self.finish_call_expr("&&" + name)
+                return Ok(CmmExpr.MacroRecRef(name))
+            case _:
+                pass_dn
+
+        # --- Parenthesized expression: (expr) ---
+        # Flattened to avoid nested match with return/mutation.
+
+        if self.check_kind("LParen"):
+            self.advance()
+            val paren_result = self.parse_expression()
+            match paren_result:
+                case Err(e): return Err(e)
+                case _: ()
+            val inner = self.unwrap_expr_result(paren_result)
+            if self.check_kind("RParen"):
+                self.advance()
+                return Ok(CmmExpr.Parenthesized(inner))
+            # C-style cast/complex expressions: skip tokens until matching ) or EOL.
+            # Handles patterns like ((struct module*)&magic)->init where
+            # the parenthesized content is a C type cast not parseable as expressions.
+            var paren_depth = 1
+            while not self.is_at_end() and not self.at_stmt_end() and paren_depth > 0:
+                match self.peek().kind:
+                    case CmmTokenKind.LParen: paren_depth = paren_depth + 1
+                    case CmmTokenKind.RParen: paren_depth = paren_depth - 1
+                    case _: ()
+                if paren_depth > 0:
+                    self.advance()
+            if self.check_kind("RParen"):
+                self.advance()
+                return Ok(CmmExpr.Parenthesized(inner))
+            # PRACTICE is lenient: allow unclosed grouping parens at end of line
+            if self.at_stmt_end():
+                return Ok(CmmExpr.Parenthesized(inner))
+            return Err(CmmParseError(message: "Expected ')' after expression", line: self.peek().line, column: self.peek().column))
+
+        # --- Braced expression: {expr} (constant conversion) ---
+        # Flattened to avoid nested match with return/mutation.
+
+        if self.check_kind("LBrace"):
+            self.advance()
+            val brace_result = self.parse_expression()
+            match brace_result:
+                case Err(e): return Err(e)
+                case _: ()
+            val inner = self.unwrap_expr_result(brace_result)
+            if self.check_kind("RBrace"):
+                self.advance()
+                return Ok(CmmExpr.Braced(inner))
+            else:
+                return Err(CmmParseError(message: "Expected '}' after expression", line: self.peek().line, column: self.peek().column))
+
+        # --- File channel: #N ---
+
+        match token.kind:
+            case CmmTokenKind.FileChannel(n):
+                self.advance()
+                return Ok(CmmExpr.FileChannel(n))
+            case _:
+                pass_dn
+
+        # --- Option flag: /Write, /Read ---
+
+        match token.kind:
+            case CmmTokenKind.Option(name):
+                self.advance()
+                return Ok(CmmExpr.OptionFlag(name))
+            case _:
+                pass_dn
+
+        # --- Dot-prefixed name: .text, .data, .bss, .dynamic (ELF section names) ---
+        # In CMM, y.secaddress(.dynamic) passes a dot-prefixed section name.
+        # Also handles ./ relative paths (DO ./script.cmm) and bare . as path component.
+        if self.check_kind("Dot"):
+            val dot_tok = self.peek()
+            val next_ident = self.peek_ahead(1)
+            var dot_name_found = ""
+            match next_ident.kind:
+                case CmmTokenKind.Identifier(n):
+                    dot_name_found = n
+                case _: ()
+            if dot_name_found != "":
+                self.advance()  # consume .
+                self.advance()  # consume identifier
+                return Ok(CmmExpr.DotPath("." + dot_name_found))
+            # Handle ./ relative path prefix (DO ./script.cmm)
+            # Note: /word is lexed as Option("word") by the CMM lexer
+            var next_is_path = false
+            match next_ident.kind:
+                case CmmTokenKind.Slash: next_is_path = true
+                case CmmTokenKind.Backslash: next_is_path = true
+                case CmmTokenKind.Option(o): next_is_path = true
+                case _: ()
+            if next_is_path:
+                self.advance()  # consume .
+                return Ok(CmmExpr.Ident("."))
+
+        # --- DotCommand: could be function call or dot path ---
+        #     Data.dump  → DotPath
+        #     Register(PC) → FunctionCall (but Register is Identifier, not DotCommand)
+        #     STRing.UPpeR("abc") → FunctionCall
+        # Flattened to avoid nested match with return/mutation.
+
+        val dot_name = self.extract_dot_command_name()
+        if dot_name != "":
+            self.advance()
+            # Check if followed by ( — function call
+            if self.check_kind("LParen"):
+                self.advance()
+                return self.finish_call_expr(dot_name)
+            else:
+                return Ok(CmmExpr.DotPath(dot_name))
+
+        # --- Identifier: could be function call, address expression, or bare identifier ---
+        # Flattened to avoid nested match with return/mutation.
+
+        val ident_name = self.extract_ident_name()
+        if ident_name != "":
+            self.advance()
+
+            # C type keywords in v.value() expressions: struct X, union X, enum X
+            val ident_upper = to_upper_cmm(ident_name)
+            if ident_upper == "STRUCT" or ident_upper == "UNION" or ident_upper == "ENUM":
+                val type_name = self.extract_ident_name()
+                if type_name != "":
+                    self.advance()
+                    return Ok(CmmExpr.Ident(ident_name + " " + type_name))
+
+            # Check for function call: Identifier(
+            if self.check_kind("LParen"):
+                self.advance()
+                return self.finish_call_expr(ident_name)
+
+            # Check for address expression: AccessClass:expr (e.g. D:0x1000)
+            if is_access_class(ident_name) and self.check_kind("Colon"):
+                self.advance()
+                val addr_result = self.parse_unary()
+                match addr_result:
+                    case Err(e): return Err(e)
+                    case _: ()
+                return Ok(CmmExpr.Address(ident_name, self.unwrap_expr_result(addr_result)))
+
+            # Bare identifier
+            return Ok(CmmExpr.Ident(ident_name))
+
+        # --- Device selector or C++ scope in expression: ExecHandler::ProcessResume ---
+        # In debug symbol contexts, X:: is a C++ scope resolution, not a device selector.
+        # Combine with following identifier to form a scoped name.
+        match token.kind:
+            case CmmTokenKind.DeviceSelector(prefix):
+                self.advance()
+                val scope_name = self.extract_ident_name()
+                if scope_name != "":
+                    self.advance()
+                    val full_name = prefix + "::" + scope_name
+                    # Check for function call: Name(
+                    if self.check_kind("LParen"):
+                        self.advance()
+                        return self.finish_call_expr(full_name)
+                    return Ok(CmmExpr.Ident(full_name))
+                return Ok(CmmExpr.Ident(prefix + "::"))
+            case _:
+                pass_dn
+
+        # --- Relative path: ../path or ../../path ---
+        # In CMM, `do ../app_debug hello` uses .. as a relative directory.
+        # The `..` operator token is reinterpreted as a path prefix here.
+        if self.check_op(".."):
+            self.advance()
+            var path_text = ".."
+            # Consume /path segments via Option tokens
+            var cont = true
+            while cont:
+                cont = false
+                val opt_name = self.extract_option_name()
+                if opt_name != "":
+                    self.advance()
+                    path_text = path_text + "/" + opt_name
+                    cont = true
+                    # Check for dot extension: .bin, .cmm
+                    if self.check_kind("Dot"):
+                        self.advance()
+                        val ext = self.extract_ident_name()
+                        if ext != "":
+                            self.advance()
+                            path_text = path_text + "." + ext
+                # Check for additional ../ components (../../path)
+                if not cont and self.check_op(".."):
+                    self.advance()
+                    path_text = path_text + "/.."
+                    cont = true
+            return Ok(CmmExpr.Ident(path_text))
+
+        # --- Star wildcard: * used as glob/wildcard in Data.LOAD.auto * etc. ---
+        if self.check_op("*"):
+            self.advance()
+            return Ok(CmmExpr.Ident("*"))
+
+        # --- Tilde path prefix: ~~ or ~ for T32 home directory paths ---
+        # ~~/demo/arm/... or ~/path
+        # Note: /word is lexed as Option("word") by the CMM lexer,
+        # so ~~/demo produces [Tilde, Tilde, Option("demo")]
+        if self.check_op("~"):
+            self.advance()
+            var path_text = "~"
+            # Consume additional tildes (~~, ~~~~, etc.)
+            while self.check_op("~"):
+                self.advance()
+                path_text = path_text + "~"
+            # Consume /path or \path segments via Option tokens, Backslash+Ident
+            var cont = true
+            while cont:
+                cont = false
+                val opt_name = self.extract_option_name()
+                if opt_name != "":
+                    self.advance()
+                    path_text = path_text + "/" + opt_name
+                    cont = true
+                    # Check for dot extension: .bin, .dll
+                    if self.check_kind("Dot"):
+                        self.advance()
+                        val ext = self.extract_ident_name()
+                        if ext != "":
+                            self.advance()
+                            path_text = path_text + "." + ext
+                # Backslash path separator (Windows: ~~\demo\arm\...)
+                if not cont and self.check_kind("Backslash"):
+                    self.advance()
+                    val bs_seg = self.extract_ident_name()
+                    if bs_seg != "":
+                        self.advance()
+                        path_text = path_text + "\\" + bs_seg
+                        cont = true
+                        if self.check_kind("Dot"):
+                            self.advance()
+                            val ext = self.extract_ident_name()
+                            if ext != "":
+                                self.advance()
+                                path_text = path_text + "." + ext
+                if not cont and self.check_op("/"):
+                    self.advance()
+                    path_text = path_text + "/"
+                    cont = true
+            return Ok(CmmExpr.Ident(path_text))
+
+        # --- Backslash path: \\server\share or \path (UNC/Windows paths in CMM) ---
+        if self.check_kind("Backslash"):
+            self.advance()
+            var path_text = "\\"
+            # Consume additional backslash for UNC \\server
+            while self.check_kind("Backslash"):
+                self.advance()
+                path_text = path_text + "\\"
+            # Consume path segments: identifiers, macros, dots
+            var cont = true
+            while cont:
+                cont = false
+                val seg_name = self.extract_ident_name()
+                if seg_name != "":
+                    self.advance()
+                    path_text = path_text + seg_name
+                    cont = true
+                if not cont:
+                    val mac = self.extract_macro_in_path()
+                    if mac != "":
+                        self.advance()
+                        path_text = path_text + mac
+                        cont = true
+                if cont and self.check_kind("Backslash"):
+                    self.advance()
+                    path_text = path_text + "\\"
+                if cont and self.check_kind("Dot"):
+                    self.advance()
+                    path_text = path_text + "."
+            return Ok(CmmExpr.Ident(path_text))
+
+        # --- Percent format specifier: %LE, %Long, %Word, %Byte, %HEX etc. ---
+        if self.check_op("%"):
+            self.advance()
+            val fmt = self.extract_ident_name()
+            if fmt != "":
+                self.advance()
+                return Ok(CmmExpr.OptionFlag("%" + fmt))
+            return Ok(CmmExpr.OptionFlag("%"))
+
+        # --- Classic NOT as unary in primary position ---
+        # Already handled in parse_unary, but catch if it appears here as a fallthrough
+        # Flattened to avoid nested match with return.
+        if self.check_classic_not():
+            self.advance()
+            val not_result = self.parse_unary()
+            match not_result:
+                case Err(e): return Err(e)
+                case _: ()
+            return Ok(CmmExpr.Unary(CmmUnaryOp.LogNot, self.unwrap_expr_result(not_result)))
+
+        # --- Question mark: ??? or ? used as wildcard/don't-care ---
+        if self.check_kind("Question"):
+            self.advance()
+            var q_text = "?"
+            while self.check_kind("Question"):
+                self.advance()
+                q_text = q_text + "?"
+            return Ok(CmmExpr.Ident(q_text))
+
+        # --- Bare ampersand: & used in some CMM expression contexts ---
+        if self.check_op("&"):
+            self.advance()
+            return Ok(CmmExpr.Ident("&"))
+
+        # --- Nothing matched — error ---
+        Err(CmmParseError(message: "Expected expression, found '{token.text}'", line: token.line, column: token.column))
+
+    # ===== Helper methods for flattened parsing =====
+
+    # Unwrap an Ok(CmmExpr) from a Result that is known to be Ok.
+    # Must only be called after verifying the result is not Err.
+    fn unwrap_expr_result(result: Result<CmmExpr, CmmParseError>) -> CmmExpr:
+        match result:
+            case Ok(v): v
+            case _: CmmExpr.Lit(CmmLiteral.PlainInt("0"))
+
+    # Extract the DotCommand name from the current token, or "" if not a DotCommand.
+    fn extract_dot_command_name() -> text:
+        if self.is_at_end():
+            return ""
+        match self.peek().kind:
+            case CmmTokenKind.DotCommand(name): name
+            case _: ""
+
+    # Extract the Identifier name from the current token, or "" if not an Identifier.
+    fn extract_ident_name() -> text:
+        if self.is_at_end():
+            return ""
+        match self.peek().kind:
+            case CmmTokenKind.Identifier(name): name
+            case _: ""
+
+    # Check if current Star token is a trailing wildcard (not multiplication).
+    # True when * is followed by ), comma, newline, or end of input.
+    fn is_trailing_star() -> bool:
+        if self.current + 1 >= self.tokens.len():
+            return true
+        val next = self.tokens[self.current + 1]
+        match next.kind:
+            case CmmTokenKind.RParen: true
+            case CmmTokenKind.Comma: true
+            case CmmTokenKind.Newline: true
+            case CmmTokenKind.Eof: true
+            case _: false
+
+    # Extract the Option name from the current token, or "" if not an Option.
+    fn extract_option_name() -> text:
+        if self.is_at_end():
+            return ""
+        match self.peek().kind:
+            case CmmTokenKind.Option(name): name
+            case _: ""
+
+    # Extract macro reference as path component (e.g. &processname in \\&processname\).
+    fn extract_macro_in_path() -> text:
+        if self.is_at_end():
+            return ""
+        match self.peek().kind:
+            case CmmTokenKind.MacroRef(name): "&" + name
+            case CmmTokenKind.MacroRecRef(name): "&&" + name
+            case _: ""
+
+    # Parse function call arguments and closing paren after LParen has been consumed.
+    # Returns the full FunctionCall expression or an error.
+    me finish_call_expr(fn_name: text) -> Result<CmmExpr, CmmParseError>:
+        var args: [CmmExpr] = []
+        val args_result = self.parse_call_args()
+        match args_result:
+            case Err(e):
+                # Recover from C-style expressions (type casts, -> operator, etc.)
+                # by skipping to the matching close paren
+                args = []
+            case Ok(parsed_args):
+                args = parsed_args
+        # Skip trailing * wildcard before ) (e.g. CPUIS(ADUCM33*))
+        if self.check_op("*") and self.is_trailing_star():
+            self.advance()
+        # Skip other unexpected tokens before ) for error recovery
+        # Track paren depth to find the matching close paren
+        var depth = 1
+        while not self.is_at_end() and not self.at_stmt_end() and depth > 0:
+            if self.check_kind("RParen"):
+                depth = depth - 1
+                if depth == 0:
+                    break
+                self.advance()
+            else:
+                if self.check_kind("LParen"):
+                    depth = depth + 1
+                self.advance()
+        if self.check_kind("RParen"):
+            self.advance()
+            Ok(CmmExpr.FunctionCall(fn_name, args))
+        else:
+            # PRACTICE is lenient: accept unclosed function calls at end of line.
+            # e.g. CPUIS("MSP430AFE22*" followed by block ( on next line.
+            Ok(CmmExpr.FunctionCall(fn_name, args))
+
+    # Unwrap an Ok([CmmExpr]) from a Result that is known to be Ok.
+    fn unwrap_args_result(result: Result<[CmmExpr], CmmParseError>) -> [CmmExpr]:
+        match result:
+            case Ok(v): v
+            case _: []
+
+    # ===== Function call argument parsing =====
+
+    # Parse comma-separated argument list (between parens, parens already consumed).
+    # Returns when RParen is seen (does NOT consume it).
+    me parse_call_args() -> Result<[CmmExpr], CmmParseError>:
+        var args: [CmmExpr] = []
+
+        # Empty argument list
+        if self.check_kind("RParen"):
+            return Ok(args)
+
+        # Parse first argument
+        match self.parse_expression():
+            case Ok(arg):
+                args.push(arg)
+            case Err(e):
+                return Err(e)
+
+        # Parse remaining comma-separated arguments
+        while self.check_kind("Comma"):
+            self.advance()
+            # Allow trailing comma
+            if self.check_kind("RParen"):
+                return Ok(args)
+            match self.parse_expression():
+                case Ok(arg):
+                    args.push(arg)
+                case Err(e):
+                    return Err(e)
+
+        Ok(args)
+
+    # ===== Classic operator detection helpers =====
+
+    # Check if current token is a ClassicOr (:O: or #O#)
+    fn check_classic_or() -> bool:
+        if self.is_at_end():
+            return false
+        match self.peek().kind:
+            case CmmTokenKind.ClassicOr(v):
+                true
+            case _:
+                false
+
+    # Check if current token is a ClassicXor (:X: or #X#)
+    fn check_classic_xor() -> bool:
+        if self.is_at_end():
+            return false
+        match self.peek().kind:
+            case CmmTokenKind.ClassicXor(v):
+                true
+            case _:
+                false
+
+    # Check if current token is a ClassicAnd (:A: or #A#)
+    fn check_classic_and() -> bool:
+        if self.is_at_end():
+            return false
+        match self.peek().kind:
+            case CmmTokenKind.ClassicAnd(v):
+                true
+            case _:
+                false
+
+    # Check if current token is a ClassicNot (N: or N#)
+    fn check_classic_not() -> bool:
+        if self.is_at_end():
+            return false
+        match self.peek().kind:
+            case CmmTokenKind.ClassicNot(v):
+                true
+            case _:
+                false
+
+    # ===== Comparison operator detection =====
+
+    # Check if current token is any comparison operator
+    fn check_comparison_op() -> bool:
+        if self.is_at_end():
+            return false
+        match self.peek().kind:
+            case CmmTokenKind.Eq: true
+            case CmmTokenKind.NotEq: true
+            case CmmTokenKind.GtEq: true
+            case CmmTokenKind.LtEq: true
+            case CmmTokenKind.Gt: true
+            case CmmTokenKind.Lt: true
+            case _: false
+
+    # Convert a comparison token to the corresponding CmmBinOp
+    fn token_to_comparison_op(token: CmmToken) -> CmmBinOp:
+        match token.kind:
+            case CmmTokenKind.Eq: CmmBinOp.Eq
+            case CmmTokenKind.NotEq: CmmBinOp.NotEq
+            case CmmTokenKind.GtEq: CmmBinOp.GtEq
+            case CmmTokenKind.LtEq: CmmBinOp.LtEq
+            case CmmTokenKind.Gt: CmmBinOp.Gt
+            case CmmTokenKind.Lt: CmmBinOp.Lt
+            case _: CmmBinOp.Eq
+
+    # ===== Addition/subtraction operator mapping =====
+
+    # Convert a Plus/Minus token to the corresponding CmmBinOp
+    fn token_to_add_op(token: CmmToken) -> CmmBinOp:
+        match token.kind:
+            case CmmTokenKind.Plus: CmmBinOp.Add
+            case CmmTokenKind.Minus: CmmBinOp.Sub
+            case _: CmmBinOp.Add
+
+    # ===== Multiplication operator mapping =====
+
+    # Convert a Star/Slash/Percent token to the corresponding CmmBinOp
+    fn token_to_mul_op(token: CmmToken) -> CmmBinOp:
+        match token.kind:
+            case CmmTokenKind.Star: CmmBinOp.Mul
+            case CmmTokenKind.Slash: CmmBinOp.Div
+            case CmmTokenKind.Percent: CmmBinOp.Mod
+            case _: CmmBinOp.Mul
+
+    # ===== Shift operator mapping =====
+
+    # Convert a ShiftLeft/ShiftRight token to the corresponding CmmBinOp
+    fn token_to_shift_op(token: CmmToken) -> CmmBinOp:
+        match token.kind:
+            case CmmTokenKind.ShiftLeft: CmmBinOp.Shl
+            case CmmTokenKind.ShiftRight: CmmBinOp.Shr
+            case _: CmmBinOp.Shl

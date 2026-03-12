@@ -1,0 +1,17 @@
+; TRACE32 headless config for STM32 via Power Debug II USB
+; Enables Remote API on port 20000 for t32rem / automation
+; Requires: Xvfb, PCF bitmap fonts enabled, udev rules installed
+
+OS=
+SYS=/opt/t32
+TMP=/tmp
+
+PBI=
+USB
+
+SCREEN=
+INVISIBLE
+
+RCL=
+NETASSIST
+PORT=20000

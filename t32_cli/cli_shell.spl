@@ -1,0 +1,260 @@
+# T32 CLI — Interactive shell mode
+# REPL loop for TRACE32 session interaction
+
+extern fn rt_stdin_read_line() -> text
+
+use app.t32_cli.session.{CLI_CURRENT_SESSION, CLI_CURRENT_CORE, cli_sessions_list, cli_session_use, cli_session_info}
+use app.t32_cli.core_context.{cli_cores_list, cli_core_select}
+use app.t32_cli.window_model.{cli_windows_list, cli_window_open, cli_window_show, cli_window_describe}
+use app.t32_cli.catalog_loader.{load_catalogs}
+use app.t32_cli.types.{T32Catalogs, T32HistoryEntry}
+use app.t32_cli.error_codes.{t32_err_unknown_shell_cmd, t32_err_field_not_found, t32_err_action_not_found, t32_err_window_not_found}
+
+# Shell history
+var SHELL_HISTORY: [T32HistoryEntry] = []
+var SHELL_CATALOG_PATH = "config/t32/catalogs"
+
+# Start the interactive T32 shell
+fn start_t32_shell():
+    print "TRACE32 CLI Shell"
+    print "Type 'help' for commands, 'quit' to exit."
+    print ""
+
+    var running = true
+    while running:
+        val prompt = shell_prompt()
+        print_no_newline(prompt)
+        val line_raw = rt_stdin_read_line() ?? ""
+        val line = trim_line(line_raw)
+
+        if line == "":
+            continue
+
+        if line == "quit":
+            print "Goodbye."
+            running = false
+            continue
+
+        if line == "exit":
+            print "Goodbye."
+            running = false
+            continue
+
+        val result = shell_dispatch(line)
+        if result != "":
+            print result
+
+        # Record in history
+        val entry = T32HistoryEntry.create(line, result, CLI_CURRENT_SESSION, CLI_CURRENT_CORE)
+        SHELL_HISTORY.push(entry)
+
+# Build the shell prompt showing current session and core
+fn shell_prompt() -> text:
+    var session_part = "(none)"
+    if CLI_CURRENT_SESSION != "":
+        session_part = CLI_CURRENT_SESSION
+
+    var core_part = ""
+    if CLI_CURRENT_CORE != "":
+        core_part = ":{CLI_CURRENT_CORE}"
+
+    "{session_part}{core_part}> "
+
+# Parse and dispatch a shell command line
+fn shell_dispatch(line: text) -> text:
+    val parts = split_shell(line)
+    if parts.len() == 0:
+        return ""
+
+    val cmd = parts[0]
+    var args: [text] = []
+    var i = 1
+    while i < parts.len():
+        args.push(parts[i])
+        i = i + 1
+
+    match cmd:
+        "help": shell_help()
+        "sessions": cli_sessions_list()
+        "use": shell_use(args)
+        "cores": cli_cores_list("")
+        "core": shell_core(args)
+        "windows": shell_windows()
+        "show": shell_show(args)
+        "open": shell_open(args)
+        "describe": shell_describe(args)
+        "set": shell_set(args)
+        "do": shell_do(args)
+        "cmm": shell_cmm(args)
+        "screenshot": shell_screenshot(args)
+        "history": shell_history()
+        _: t32_err_unknown_shell_cmd(cmd)
+
+fn shell_help() -> text:
+    var out = "Available commands:\n"
+    out = out + "  sessions              List all sessions\n"
+    out = out + "  use <id>              Switch active session\n"
+    out = out + "  cores                 List cores in current session\n"
+    out = out + "  core <id>             Switch active core\n"
+    out = out + "  windows               List all windows\n"
+    out = out + "  show <name>           Show window content\n"
+    out = out + "  open <name>           Open a window\n"
+    out = out + "  describe <name>       Describe window (actions, fields)\n"
+    out = out + "  set <field> <value>   Set a field value\n"
+    out = out + "  do <action>           Execute an action\n"
+    out = out + "  cmm <script>          Run a CMM script\n"
+    out = out + "  screenshot <win> [path]  Save window screenshot\n"
+    out = out + "  history               Show command history\n"
+    out = out + "  quit                  Exit shell"
+    out
+
+fn shell_use(args: [text]) -> text:
+    if args.len() == 0:
+        return "Usage: use <session_id>"
+    val result = cli_session_use(args[0])
+    match result:
+        Ok(msg): msg
+        Err(e): "Error: {e}"
+
+fn shell_core(args: [text]) -> text:
+    if args.len() == 0:
+        return "Usage: core <core_id>"
+    val result = cli_core_select(args[0])
+    match result:
+        Ok(msg): msg
+        Err(e): "Error: {e}"
+
+fn shell_windows() -> text:
+    val catalogs = load_catalogs(SHELL_CATALOG_PATH)
+    cli_windows_list(catalogs)
+
+fn shell_show(args: [text]) -> text:
+    if args.len() == 0:
+        return "Usage: show <window_key>"
+    val catalogs = load_catalogs(SHELL_CATALOG_PATH)
+    val result = cli_window_show(args[0], catalogs)
+    match result:
+        Ok(output): output
+        Err(e): "Error: {e}"
+
+fn shell_open(args: [text]) -> text:
+    if args.len() == 0:
+        return "Usage: open <window_key>"
+    val catalogs = load_catalogs(SHELL_CATALOG_PATH)
+    val result = cli_window_open(args[0], catalogs)
+    match result:
+        Ok(output): output
+        Err(e): "Error: {e}"
+
+fn shell_describe(args: [text]) -> text:
+    if args.len() == 0:
+        return "Usage: describe <window_key>"
+    val catalogs = load_catalogs(SHELL_CATALOG_PATH)
+    cli_window_describe(args[0], catalogs)
+
+fn shell_set(args: [text]) -> text:
+    if args.len() < 2:
+        return "Usage: set <field_key> <value>"
+    val field_key = args[0]
+    val value = args[1]
+    val catalogs = load_catalogs(SHELL_CATALOG_PATH)
+    val found = catalogs.find_field(field_key)
+    match found:
+        Some(f):
+            "Set {field_key} = {value} (type: {f.value_type}, scope: {f.scope})"
+        nil:
+            t32_err_field_not_found(field_key, catalogs.field_keys())
+
+fn shell_do(args: [text]) -> text:
+    if args.len() == 0:
+        return "Usage: do <action_key>"
+    val action_key = args[0]
+    val catalogs = load_catalogs(SHELL_CATALOG_PATH)
+    val found = catalogs.find_action(action_key)
+    match found:
+        Some(a):
+            var out = "Execute: {a.command_template}\n"
+            out = out + "Action '{a.label}' dispatched."
+            out
+        nil:
+            t32_err_action_not_found(action_key, catalogs.action_keys())
+
+fn shell_cmm(args: [text]) -> text:
+    if args.len() == 0:
+        return "Usage: cmm <script_path>"
+    val script_path = args[0]
+    "Running CMM script: {script_path}\nCommand: DO {script_path}"
+
+fn shell_screenshot(args: [text]) -> text:
+    if args.len() == 0:
+        return "Usage: screenshot <window_key> [output_path]"
+    val window_key = args[0]
+    var output_path = "{window_key}.png"
+    if args.len() > 1:
+        output_path = args[1]
+    val catalogs = load_catalogs(SHELL_CATALOG_PATH)
+    val found = catalogs.find_window(window_key)
+    match found:
+        Some(w):
+            var out = "Screenshot of '{w.title}' -> {output_path}\n"
+            out = out + "Command: WinPOS 0. 0. 80. 40. ,, {w.window_key}\n"
+            out = out + "Command: SCREEN.DUMP {output_path}"
+            out
+        nil:
+            t32_err_window_not_found(window_key, catalogs.window_keys())
+
+fn shell_history() -> text:
+    if SHELL_HISTORY.len() == 0:
+        return "No command history."
+    var out = "Command history:\n"
+    var idx = 1
+    for entry in SHELL_HISTORY:
+        out = out + "  {idx}. [{entry.session_id}] {entry.command}\n"
+        idx = idx + 1
+    out
+
+# Helper: split command line on spaces (simple tokenizer)
+fn split_shell(line: text) -> [text]:
+    var parts: [text] = []
+    var start = -1
+    var i = 0
+    while i < line.len():
+        val ch = line[i]
+        if (ch == ' ' or ch == '\t'):
+            if start >= 0:
+                val part = line.slice(start, i)
+                parts.push(part)
+                start = -1
+        else:
+            if start < 0:
+                start = i
+        i = i + 1
+    if start >= 0:
+        val part = line.slice(start, line.len())
+        parts.push(part)
+    parts
+
+# Helper: trim newlines and whitespace from input
+fn trim_line(s: text) -> text:
+    var start = 0
+    while start < s.len():
+        val ch = s[start]
+        if (ch != ' ' and ch != '\t' and ch != '\r' and ch != '\n'):
+            break
+        start = start + 1
+
+    var end_idx = s.len()
+    while end_idx > start:
+        val ch = s[end_idx - 1]
+        if (ch != ' ' and ch != '\t' and ch != '\r' and ch != '\n'):
+            break
+        end_idx = end_idx - 1
+
+    if start >= end_idx:
+        return ""
+    s.slice(start, end_idx)
+
+# Helper: print without trailing newline
+fn print_no_newline(s: text):
+    # Use print for now — proper no-newline output needs rt_stdout_write
+    print s

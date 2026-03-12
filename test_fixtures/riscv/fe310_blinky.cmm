@@ -1,0 +1,131 @@
+; SiFive FE310 HiFive1 LED Blink
+; SiFive FE310-G000 - RV32IMAC bare-metal
+
+LOCAL &gpio_base &led_pin &pll_cfg
+
+SYStem.RESet
+SYStem.CPU FE310
+SYStem.CONFIG.DEBUGPORTTYPE JTAG
+SYStem.JtagClock 8MHz
+SYStem.Up
+
+; GPIO base address
+&gpio_base=0x10012000
+&led_pin=0x00080000  ; GPIO 19 (Green LED on HiFive1)
+
+; Configure GPIO pin as output
+Data.Set D:&gpio_base+0x08 %Long &led_pin   ; output_en
+Data.Set D:&gpio_base+0x0C %Long &led_pin   ; output_val (LED ON)
+
+; Load blink application
+Data.LOAD.Elf "blink.elf"
+Register.Set PC _start
+
+; Set PLL (configure clock)
+&pll_cfg=Data.Long(D:0x10008008)
+PRINT "PLL Config: " FORMAT.Hex(8., &pll_cfg)
+
+; Register view
+Register.view
+
+; Run and check LED toggle
+Go
+WAIT 1s
+Break.direct
+WAIT !STATE.RUN()
+
+; Check GPIO state
+&led_pin=Data.Long(D:&gpio_base+0x0C)
+PRINT "GPIO output: " FORMAT.Hex(8., &led_pin)
+
+; --- Additional parser exercises ---
+
+; ON ERROR GOTO error_exit
+ON ERROR GOTO error_exit
+
+; PRINTF with format string
+PRINT "LED pin mask: " FORMAT.Hex(8., &led_pin)
+PRINT "GPIO base: " FORMAT.Hex(8., &gpio_base)
+
+; ECHO for debug messages
+ECHO "Starting extended blink tests..."
+ECHO "PLL configuration check"
+
+; Multiple Register.Set calls for RISC-V registers (a0-a7, s0-s11)
+Register.Set a0 0x00000000
+Register.Set a1 0x10012000
+Register.Set a2 0x00080000
+Register.Set a3 0x00000001
+Register.Set a4 0x00000000
+Register.Set a5 0xDEADBEEF
+Register.Set s0 0x80000000
+Register.Set s1 0x80001000
+Register.Set s2 0x80002000
+Register.Set s3 0x00000000
+
+; Bitwise operations (&, |, >>, <<) on register values
+LOCAL &reg_val &masked &shifted &combined
+&reg_val=Data.Long(D:&gpio_base+0x00)
+&masked=&reg_val&0xFF00FF00
+&shifted=(&reg_val>>8.)&0xFF
+&combined=&masked|(&shifted<<16.)
+PRINT "Original: " FORMAT.Hex(8., &reg_val)
+PRINT "Masked:   " FORMAT.Hex(8., &masked)
+PRINT "Shifted:  " FORMAT.Hex(8., &shifted)
+PRINT "Combined: " FORMAT.Hex(8., &combined)
+
+; WHILE loop with timeout counter
+LOCAL &timeout &done
+&timeout=0
+&done=0
+WHILE &timeout<100.&&(&done==0)
+(
+  &led_pin=Data.Long(D:&gpio_base+0x0C)
+  IF (&led_pin&0x00080000)!=0
+  (
+    PRINT "LED toggled at iteration: " FORMAT.Decimal(3., &timeout)
+    &done=1
+  )
+  &timeout=&timeout+1
+)
+IF &done==0
+  PRINT %WARNING "LED toggle not detected within timeout"
+
+; GOSUB with multiple ENTRY params
+GOSUB configure_gpio &gpio_base 0x00080000 1.
+GOSUB configure_gpio &gpio_base 0x00100000 0.
+
+; Data.Assemble at address with mnemonics
+Data.Assemble 0x20000000 addi a0, zero, 1
+Data.Assemble 0x20000004 sw a0, 0(a1)
+Data.Assemble 0x20000008 lui a2, 0x10012
+
+PRINT "FE310 extended blink tests complete"
+
+ENDDO
+
+; Subroutine: configure a GPIO pin
+configure_gpio:
+  ENTRY &base &pin_mask &direction
+  LOCAL &current_val
+  IF &direction==1.
+  (
+    ; Set as output
+    &current_val=Data.Long(D:&base+0x08)
+    Data.Set D:&base+0x08 %Long (&current_val|&pin_mask)
+    PRINT "GPIO pin " FORMAT.Hex(8., &pin_mask) " set as output"
+  )
+  ELSE
+  (
+    ; Set as input
+    &current_val=Data.Long(D:&base+0x04)
+    Data.Set D:&base+0x04 %Long (&current_val|&pin_mask)
+    PRINT "GPIO pin " FORMAT.Hex(8., &pin_mask) " set as input"
+  )
+  RETURN
+
+; Error exit handler
+error_exit:
+  PRINT %ERROR "Fatal error in FE310 blink script"
+  SYStem.Down
+  RETURN

@@ -1,0 +1,257 @@
+# T32 CLI/MCP — Error codes, valid-item lists, and message builders
+# Error code scheme: T4xxx
+#
+# T4001-T4003  CLI dispatch (unknown command, subcommand, missing args)
+# T4010-T4013  Session (not found, duplicate, closed, no active)
+# T4020-T4021  Core (not found, none registered)
+# T4030-T4032  Window (not found, no open cmd, no capture cmd)
+# T4040-T4041  Field (not found, missing value)
+# T4050-T4051  Action (not found, execution failed)
+# T4060        Catalog (file not found / empty)
+# T4070-T4072  Remote (t32rem not found, command failed, connection refused)
+# T4080-T4082  MCP protocol (missing tool name, unknown tool, missing params)
+# T4090        Resource (not found)
+
+# ============================================================================
+# Error Code Constants
+# ============================================================================
+
+val T4001 = "T4001"
+val T4002 = "T4002"
+val T4003 = "T4003"
+val T4010 = "T4010"
+val T4011 = "T4011"
+val T4012 = "T4012"
+val T4013 = "T4013"
+val T4020 = "T4020"
+val T4021 = "T4021"
+val T4030 = "T4030"
+val T4031 = "T4031"
+val T4032 = "T4032"
+val T4040 = "T4040"
+val T4041 = "T4041"
+val T4050 = "T4050"
+val T4051 = "T4051"
+val T4060 = "T4060"
+val T4070 = "T4070"
+val T4071 = "T4071"
+val T4072 = "T4072"
+val T4080 = "T4080"
+val T4081 = "T4081"
+val T4082 = "T4082"
+val T4090 = "T4090"
+
+# ============================================================================
+# Valid Item Lists
+# ============================================================================
+
+fn cli_commands() -> [text]:
+    ["sessions", "cores", "windows", "window", "field", "action", "screenshot", "cmm", "shell", "help"]
+
+fn cli_sessions_subcmds() -> [text]:
+    ["open", "close", "use", "info"]
+
+fn cli_cores_subcmds() -> [text]:
+    ["select"]
+
+fn cli_window_subcmds() -> [text]:
+    ["show", "open", "describe"]
+
+fn cli_field_subcmds() -> [text]:
+    ["get", "set"]
+
+fn cli_action_subcmds() -> [text]:
+    ["do", "list"]
+
+fn cli_shell_commands() -> [text]:
+    ["sessions", "use", "cores", "core", "windows", "show", "open", "describe", "set", "do", "cmm", "screenshot", "history", "help", "quit", "exit"]
+
+fn mcp_tool_names() -> [text]:
+    ["t32_sessions_list", "t32_session_open", "t32_session_resume", "t32_session_close", "t32_core_list", "t32_core_select", "t32_cmd_run", "t32_cmm_run", "t32_eval", "t32_window_list", "t32_window_open", "t32_window_capture", "t32_window_describe", "t32_screenshot", "t32_action_invoke", "t32_field_get", "t32_field_set", "t32_history_tail", "t32_resources_list", "t32_resource_read"]
+
+fn mcp_valid_resource_uris() -> [text]:
+    ["t32:///sessions", "t32:///windows", "t32:///history"]
+
+# ============================================================================
+# Inlined Suggestion Helpers (no stdlib dependency)
+# ============================================================================
+
+fn t32_suggest_similar(name: text, candidates: [text]) -> [text]:
+    var matches: [text] = []
+    if name.len() == 0:
+        return matches
+    val first_char = name.slice(0, 1)
+    var prefix2 = ""
+    if name.len() >= 2:
+        prefix2 = name.slice(0, 2)
+    for candidate in candidates:
+        if candidate.len() == 0:
+            continue
+        if candidate.starts_with(first_char):
+            matches = matches + [candidate]
+        elif prefix2 != "" and candidate.contains(prefix2):
+            matches = matches + [candidate]
+    matches
+
+fn t32_did_you_mean(name: text, candidates: [text]) -> text:
+    val similar = t32_suggest_similar(name, candidates)
+    if similar.len() == 0:
+        return ""
+    "Did you mean: " + similar[0] + "?"
+
+fn t32_join_list(items: [text], sep: text) -> text:
+    if items.len() == 0:
+        return ""
+    var result = items[0]
+    var i = 1
+    while i < items.len():
+        result = result + sep + items[i]
+        i = i + 1
+    result
+
+# ============================================================================
+# Message Builders — CLI
+# ============================================================================
+
+fn t32_err_unknown_cmd(cmd: text) -> text:
+    val valid = cli_commands()
+    val available = t32_join_list(valid, ", ")
+    val hint = t32_did_you_mean(cmd, valid)
+    var msg = "T4001: Unknown command '{cmd}'.\n  Available: {available}"
+    if hint != "":
+        msg = msg + "\n  {hint}"
+    msg
+
+fn t32_err_unknown_shell_cmd(cmd: text) -> text:
+    val valid = cli_shell_commands()
+    val available = t32_join_list(valid, ", ")
+    val hint = t32_did_you_mean(cmd, valid)
+    var msg = "T4001: Unknown command '{cmd}'.\n  Available: {available}"
+    if hint != "":
+        msg = msg + "\n  {hint}"
+    msg
+
+fn t32_err_unknown_subcmd(parent: text, sub: text, valid_subcmds: [text]) -> text:
+    val available = t32_join_list(valid_subcmds, ", ")
+    val hint = t32_did_you_mean(sub, valid_subcmds)
+    var msg = "T4002: Unknown subcommand '{sub}' for '{parent}'.\n  Available: {available}"
+    if hint != "":
+        msg = msg + "\n  {hint}"
+    msg
+
+fn t32_err_missing_args(command: text, usage: text, example: text) -> text:
+    var msg = "T4003: Missing arguments for '{command}'.\n  Usage: {usage}"
+    if example != "":
+        msg = msg + "\n  Example: {example}"
+    msg
+
+# ============================================================================
+# Message Builders — Session
+# ============================================================================
+
+fn t32_err_session_not_found(id: text, available_ids: [text]) -> text:
+    t32_err_not_found("T4010", "session", id, available_ids)
+
+fn t32_err_session_duplicate(name: text, existing_id: text) -> text:
+    "T4011: Session with name '{name}' already exists (id: {existing_id}).\n  Use a different name or close the existing session first."
+
+fn t32_err_session_closed(id: text) -> text:
+    "T4012: Session '{id}' is closed.\n  Use 'sessions open ...' to create a new session."
+
+fn t32_err_no_session() -> text:
+    "T4013: No active session.\n  Use 'sessions open <host> <port> <name> <arch>' to create one,\n  or 'sessions use <id>' to select an existing session."
+
+fn t32_err_no_session_mcp() -> text:
+    "T4013: No active session.\n  Use the 't32_session_open' tool to connect to a TRACE32 instance."
+
+# ============================================================================
+# Message Builders — Core
+# ============================================================================
+
+fn t32_err_core_not_found(core_id: text, available_ids: [text]) -> text:
+    t32_err_not_found("T4020", "core", core_id, available_ids)
+
+# ============================================================================
+# Message Builders — Window
+# ============================================================================
+
+fn t32_err_window_not_found(window_key: text, available_keys: [text]) -> text:
+    t32_err_not_found("T4030", "window", window_key, available_keys)
+
+fn t32_err_no_open_cmd(window_key: text) -> text:
+    "T4031: Window '{window_key}' has no open command.\n  This window may only support capture mode."
+
+fn t32_err_no_capture_cmd(window_key: text) -> text:
+    "T4032: Window '{window_key}' has no capture command.\n  This window may only support direct viewing."
+
+# ============================================================================
+# Message Builders — Field / Action
+# ============================================================================
+
+fn t32_err_field_not_found(key: text, available_keys: [text]) -> text:
+    t32_err_not_found("T4040", "field", key, available_keys)
+
+fn t32_err_action_not_found(key: text, available_keys: [text]) -> text:
+    t32_err_not_found("T4050", "action", key, available_keys)
+
+# ============================================================================
+# Message Builders — Catalog
+# ============================================================================
+
+fn t32_err_catalog_warning(path: text) -> text:
+    "T4060: Catalog file not found or empty: {path}"
+
+# ============================================================================
+# Message Builders — Remote / t32rem
+# ============================================================================
+
+fn t32_err_t32rem_not_found() -> text:
+    "T4070: t32rem not found.\n  Set the T32REM environment variable to the path of t32rem,\n  or install TRACE32 to /opt/t32/."
+
+fn t32_err_cmd_failed(kind: text, exit_code: text, output: text) -> text:
+    "T4071: {kind} failed (exit {exit_code}).\n  Output: {output}"
+
+# ============================================================================
+# Message Builders — MCP Protocol
+# ============================================================================
+
+fn t32_err_missing_tool_name() -> text:
+    "T4080: Missing tool name in request.\n  Provide a 'name' field in the tool call."
+
+fn t32_err_unknown_tool(tool_name: text) -> text:
+    val valid = mcp_tool_names()
+    val available = t32_join_list(valid, ", ")
+    val hint = t32_did_you_mean(tool_name, valid)
+    var msg = "T4081: Unknown tool '{tool_name}'.\n  Available: {available}"
+    if hint != "":
+        msg = msg + "\n  {hint}"
+    msg
+
+fn t32_err_missing_param(param: text, tool: text, usage: text, example: text) -> text:
+    var msg = "T4082: Missing required parameter '{param}' for tool '{tool}'.\n  Usage: {usage}"
+    if example != "":
+        msg = msg + "\n  Example: {example}"
+    msg
+
+# ============================================================================
+# Message Builders — Resource
+# ============================================================================
+
+fn t32_err_resource_not_found(uri: text) -> text:
+    val valid = mcp_valid_resource_uris()
+    val available = t32_join_list(valid, ", ")
+    "T4090: Resource not found: {uri}\n  Valid URIs: {available}"
+
+# ============================================================================
+# Generic Not-Found Builder
+# ============================================================================
+
+fn t32_err_not_found(code: text, kind: text, key: text, available: [text]) -> text:
+    val available_str = t32_join_list(available, ", ")
+    val hint = t32_did_you_mean(key, available)
+    var msg = "{code}: {kind} '{key}' not found."
+    if available.len() > 0:
+        msg = msg + "\n  Available: {available_str}"
+    if hint != "":
+        msg = msg + "\n  {hint}"
+    msg

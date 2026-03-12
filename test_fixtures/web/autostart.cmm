@@ -1,0 +1,64 @@
+; TRACE32 Autostart Configuration Script
+; Exercises: VERSION.BUILD(), PRACTICE.CALLER.FILE(1),
+;            OS.FILE.ABSPATH, PRIVATE, ELSE IF chains,
+;            VERSION.ENVironment(STARTUP), OS.FILE.readable(),
+;            RUN with macro, END
+
+LOCAL &startup_dir &script_file &min_build
+
+PRIVATE &config_ok
+
+; Version check
+&min_build=137000.
+IF VERSION.BUILD()<&min_build
+(
+  PRINT %ERROR "Build " FORMAT.Decimal(6., VERSION.BUILD()) " too old"
+  PRINT "Minimum required: " FORMAT.Decimal(6., &min_build)
+  END
+)
+
+; Get startup environment
+&startup_dir=VERSION.ENVironment("STARTUP")
+IF "&startup_dir"==""
+  &startup_dir=OS.PPD()
+
+; Find config script
+&script_file="&startup_dir/config.cmm"
+IF OS.FILE("&script_file")
+(
+  IF OS.FILE.readable("&script_file")
+  (
+    &config_ok=TRUE()
+  )
+  ELSE
+  (
+    PRINT "Config file not readable"
+    &config_ok=FALSE()
+  )
+)
+ELSE IF OS.FILE("&startup_dir/default_config.cmm")
+(
+  &script_file="&startup_dir/default_config.cmm"
+  &config_ok=TRUE()
+)
+ELSE IF OS.FILE("~~/config.cmm")
+(
+  &script_file="~~/config.cmm"
+  &config_ok=TRUE()
+)
+ELSE
+(
+  PRINT "No config file found"
+  &config_ok=FALSE()
+)
+
+; Run config if found
+IF &config_ok
+(
+  &script_file=OS.FILE.ABSPATH("&script_file")
+  PRINT "Loading: &script_file"
+  PRINT "Caller: " PRACTICE.CALLER.FILE(1)
+  DO "&script_file"
+)
+
+END

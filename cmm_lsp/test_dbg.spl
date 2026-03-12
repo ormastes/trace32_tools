@@ -1,0 +1,16 @@
+use cmm_lexer.{lex_cmm_source}
+use cmm_tokens.{CmmTokenKind, CmmToken}
+
+fn show_tokens(source: text):
+    val tokens = lex_cmm_source(source)
+    var i = 0
+    while i < tokens.len():
+        val t = tokens[i]
+        print "  [{i}] {t.text}"
+        i = i + 1
+
+print "=== Test: !(bdm()&&powerdebug()) ==="
+show_tokens("if !(bdm()&&powerdebug())\n")
+
+print "=== Test: str&&dialog ==="
+show_tokens("if \"&sval\"!=\"\"&&dialog.boolean(HEX)\n")

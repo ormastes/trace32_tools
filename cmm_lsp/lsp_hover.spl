@@ -1,0 +1,415 @@
+# CMM Language Server — Hover Information Provider
+# Returns rich hover content for CMM tokens: commands, functions, macros,
+# labels, and keywords.
+#
+# The hover result includes markdown-formatted content and the source range
+# of the hovered token/node.
+
+export HoverResult, get_hover_at
+
+use cmm_commands.{CmmCommandDB, CmmCommandInfo, lookup_command}
+use cmm_functions.{CmmFuncDB, CmmFuncInfo, lookup_function}
+use cmm_analyzer.{CmmSymbolTable, CmmSymbol, CmmSymbolKind}
+use cmm_ast.{CmmProgram, CmmStmt, CmmExpr, CmmSpan}
+
+val _default_sp = CmmSpan(start_line: 0, start_col: 0, end_line: 0, end_col: 0)
+
+# ---------------------------------------------------------------------------
+# HoverResult
+# ---------------------------------------------------------------------------
+
+struct HoverResult:
+    content: text        # markdown content
+    range_start_line: i64
+    range_start_col: i64
+    range_end_line: i64
+    range_end_col: i64
+
+# ---------------------------------------------------------------------------
+# Main entry point
+# ---------------------------------------------------------------------------
+
+# Return hover information for the token/node at (line, col).
+# Returns nil if nothing meaningful is found at that position.
+fn get_hover_at(program: CmmProgram, symbols: CmmSymbolTable, line: i64, col: i64, cmd_db: CmmCommandDB, func_db: CmmFuncDB) -> HoverResult?:
+    # Walk the program statements to find the relevant node at (line, col)
+    var i = 0
+    while i < program.statements.len():
+        val result = hover_for_stmt(program.statements[i], symbols, line, col, cmd_db, func_db)
+        if result.?:
+            return result
+        i = i + 1
+    nil
+
+# ---------------------------------------------------------------------------
+# Statement-level hover
+# ---------------------------------------------------------------------------
+
+fn hover_for_stmt(stmt: CmmStmt, symbols: CmmSymbolTable, line: i64, col: i64, cmd_db: CmmCommandDB, func_db: CmmFuncDB) -> HoverResult?:
+    match stmt:
+        # Command — hover shows command description from DB
+        case CmmStmt.Command(cmd, params, sp):
+            if span_contains(sp, line, col):
+                val info = lookup_command(cmd_db, cmd)
+                if info.?:
+                    val ci = info ?? placeholder_cmd()
+                    return HoverResult(
+                        content: "**" + ci.full_name + "** (" + ci.short_name + ")\n\n" + ci.description + "\n\nGroup: " + ci.group + " | Min version: " + ci.min_version,
+                        range_start_line: sp.start_line,
+                        range_start_col: sp.start_col,
+                        range_end_line: sp.end_line,
+                        range_end_col: sp.end_col
+                    )
+                # Not in DB — still provide basic hover
+                return HoverResult(
+                    content: "**Command:** `" + cmd + "`",
+                    range_start_line: sp.start_line,
+                    range_start_col: sp.start_col,
+                    range_end_line: sp.end_line,
+                    range_end_col: sp.end_col
+                )
+
+        # Device-qualified command
+        case CmmStmt.DeviceCommand(dev, cmd, params, sp):
+            if span_contains(sp, line, col):
+                val info = lookup_command(cmd_db, cmd)
+                if info.?:
+                    val ci = info ?? placeholder_cmd()
+                    return HoverResult(
+                        content: "**" + ci.full_name + "** (device: " + dev + ")\n\n" + ci.description,
+                        range_start_line: sp.start_line,
+                        range_start_col: sp.start_col,
+                        range_end_line: sp.end_line,
+                        range_end_col: sp.end_col
+                    )
+
+        # Macro assignment — show macro info
+        case CmmStmt.MacroAssign(name, expr, sp):
+            if span_contains(sp, line, col):
+                return hover_for_macro(name, symbols, sp)
+
+        case CmmStmt.MacroRecAssign(name, expr, sp):
+            if span_contains(sp, line, col):
+                return hover_for_macro(name, symbols, sp)
+
+        # Label definition
+        case CmmStmt.LabelDef(name, sp):
+            if span_contains(sp, line, col):
+                return HoverResult(
+                    content: "**Label:** `" + name + "`\n\nDefined at line " + int_to_text(sp.start_line),
+                    range_start_line: sp.start_line,
+                    range_start_col: sp.start_col,
+                    range_end_line: sp.end_line,
+                    range_end_col: sp.end_col
+                )
+
+        # GOTO — show target label info
+        case CmmStmt.Goto(target, sp):
+            if span_contains(sp, line, col):
+                return hover_for_label_ref(target, symbols, sp, "GOTO")
+
+        # GOSUB — show target label info
+        case CmmStmt.Gosub(target, args, sp):
+            if span_contains(sp, line, col):
+                return hover_for_label_ref(target, symbols, sp, "GOSUB")
+
+        # JUMPTO — cross-module jump
+        case CmmStmt.JumpTo(target, sp):
+            if span_contains(sp, line, col):
+                return hover_for_label_ref(target, symbols, sp, "JUMPTO")
+
+        # DO — show file reference info
+        case CmmStmt.DoCall(file_expr, args, sp):
+            if span_contains(sp, line, col):
+                val file_name = extract_text_from_expr(file_expr)
+                if file_name != "":
+                    return HoverResult(
+                        content: "**DO** — Execute script: `" + file_name + "`",
+                        range_start_line: sp.start_line,
+                        range_start_col: sp.start_col,
+                        range_end_line: sp.end_line,
+                        range_end_col: sp.end_col
+                    )
+
+        # LOCAL/GLOBAL/PRIVATE declarations
+        case CmmStmt.LocalDecl(names, sp):
+            if span_contains(sp, line, col):
+                return hover_for_decl("LOCAL", names, sp)
+
+        case CmmStmt.GlobalDecl(names, sp):
+            if span_contains(sp, line, col):
+                return hover_for_decl("GLOBAL", names, sp)
+
+        case CmmStmt.PrivateDecl(names, sp):
+            if span_contains(sp, line, col):
+                return hover_for_decl("PRIVATE", names, sp)
+
+        # ENTRY declaration
+        case CmmStmt.EntryDecl(names, sp):
+            if span_contains(sp, line, col):
+                return hover_for_decl("ENTRY", names, sp)
+
+        # IF/ELSE — recurse into condition expressions and bodies
+        case CmmStmt.IfElse(cond, then_body, else_body, sp):
+            if span_contains(sp, line, col):
+                # Check expressions for function calls
+                val expr_result = hover_for_expr(cond, symbols, line, col, cmd_db, func_db)
+                if expr_result.?:
+                    return expr_result
+                val body_result = hover_for_stmt(then_body, symbols, line, col, cmd_db, func_db)
+                if body_result.?:
+                    return body_result
+                if else_body.?:
+                    val eb = else_body ?? CmmStmt.EmptyLine(_default_sp)
+                    return hover_for_stmt(eb, symbols, line, col, cmd_db, func_db)
+
+        # WHILE — recurse
+        case CmmStmt.WhileLoop(cond, body, sp):
+            if span_contains(sp, line, col):
+                val expr_result = hover_for_expr(cond, symbols, line, col, cmd_db, func_db)
+                if expr_result.?:
+                    return expr_result
+                return hover_for_stmt(body, symbols, line, col, cmd_db, func_db)
+
+        # RePeaT — recurse
+        case CmmStmt.RepeatLoop(count, body, sp):
+            if span_contains(sp, line, col):
+                return hover_for_stmt(body, symbols, line, col, cmd_db, func_db)
+
+        # Block — recurse into children
+        case CmmStmt.Block(stmts, sp):
+            if span_contains(sp, line, col):
+                var bi = 0
+                while bi < stmts.len():
+                    val result = hover_for_stmt(stmts[bi], symbols, line, col, cmd_db, func_db)
+                    if result.?:
+                        return result
+                    bi = bi + 1
+
+        # ON/GLOBALON event handlers — recurse
+        case CmmStmt.OnEvent(event, action, sp):
+            if span_contains(sp, line, col):
+                return hover_for_stmt(action, symbols, line, col, cmd_db, func_db)
+
+        case CmmStmt.GlobalOnEvent(event, action, sp):
+            if span_contains(sp, line, col):
+                return hover_for_stmt(action, symbols, line, col, cmd_db, func_db)
+
+        # WAIT
+        case CmmStmt.WaitStmt(expr, sp):
+            if span_contains(sp, line, col):
+                return hover_for_expr(expr, symbols, line, col, cmd_db, func_db)
+
+        # PRINT
+        case CmmStmt.PrintStmt(exprs, sp):
+            if span_contains(sp, line, col):
+                return hover_for_exprs(exprs, symbols, line, col, cmd_db, func_db)
+
+        case _: ()
+
+    nil
+
+# ---------------------------------------------------------------------------
+# Expression-level hover
+# ---------------------------------------------------------------------------
+
+fn hover_for_expr(expr: CmmExpr, symbols: CmmSymbolTable, line: i64, col: i64, cmd_db: CmmCommandDB, func_db: CmmFuncDB) -> HoverResult?:
+    match expr:
+        # Function call — look up in function DB
+        case CmmExpr.FunctionCall(name, args):
+            val info = lookup_function(func_db, name)
+            if info.?:
+                val fi = info ?? placeholder_func()
+                return HoverResult(
+                    content: "**" + fi.name + "**\n\n```\n" + fi.signature + " -> " + fi.return_type + "\n```\n\n" + fi.description + "\n\nGroup: " + fi.group,
+                    range_start_line: line,
+                    range_start_col: col,
+                    range_end_line: line,
+                    range_end_col: col + name.len()
+                )
+            # Also check if it is a command used as a function (e.g. Data.Byte())
+            val cmd_info = lookup_command(cmd_db, name)
+            if cmd_info.?:
+                val ci = cmd_info ?? placeholder_cmd()
+                return HoverResult(
+                    content: "**" + ci.full_name + "** (used as function)\n\n" + ci.description,
+                    range_start_line: line,
+                    range_start_col: col,
+                    range_end_line: line,
+                    range_end_col: col + name.len()
+                )
+
+        # Macro reference
+        case CmmExpr.MacroRef(name):
+            val syms = symbols.find_by_name(name)
+            if syms.len() > 0:
+                val sym = syms[0]
+                return HoverResult(
+                    content: "**PRACTICE macro:** `&" + name + "`\n\nScope: " + sym.scope + "\nDeclared at line " + int_to_text(sym.def_line),
+                    range_start_line: line,
+                    range_start_col: col,
+                    range_end_line: line,
+                    range_end_col: col + name.len() + 1
+                )
+
+        # Recursive macro reference
+        case CmmExpr.MacroRecRef(name):
+            val syms = symbols.find_by_name(name)
+            if syms.len() > 0:
+                val sym = syms[0]
+                return HoverResult(
+                    content: "**PRACTICE macro (recursive):** `&&" + name + "`\n\nScope: " + sym.scope + "\nDeclared at line " + int_to_text(sym.def_line),
+                    range_start_line: line,
+                    range_start_col: col,
+                    range_end_line: line,
+                    range_end_col: col + name.len() + 2
+                )
+
+        # DotPath — could be a command or function reference
+        case CmmExpr.DotPath(path):
+            val cmd_info = lookup_command(cmd_db, path)
+            if cmd_info.?:
+                val ci = cmd_info ?? placeholder_cmd()
+                return HoverResult(
+                    content: "**" + ci.full_name + "**\n\n" + ci.description + "\n\nGroup: " + ci.group,
+                    range_start_line: line,
+                    range_start_col: col,
+                    range_end_line: line,
+                    range_end_col: col + path.len()
+                )
+
+        # Binary/Unary — recurse into sub-expressions
+        case CmmExpr.Binary(op, lhs, rhs):
+            val lhs_result = hover_for_expr(lhs, symbols, line, col, cmd_db, func_db)
+            if lhs_result.?:
+                return lhs_result
+            return hover_for_expr(rhs, symbols, line, col, cmd_db, func_db)
+
+        case CmmExpr.Unary(op, inner):
+            return hover_for_expr(inner, symbols, line, col, cmd_db, func_db)
+
+        case CmmExpr.Parenthesized(inner):
+            return hover_for_expr(inner, symbols, line, col, cmd_db, func_db)
+
+        case CmmExpr.Braced(inner):
+            return hover_for_expr(inner, symbols, line, col, cmd_db, func_db)
+
+        case _: ()
+
+    nil
+
+# Hover over a list of expressions — return first match.
+fn hover_for_exprs(exprs: [CmmExpr], symbols: CmmSymbolTable, line: i64, col: i64, cmd_db: CmmCommandDB, func_db: CmmFuncDB) -> HoverResult?:
+    var i = 0
+    while i < exprs.len():
+        val result = hover_for_expr(exprs[i], symbols, line, col, cmd_db, func_db)
+        if result.?:
+            return result
+        i = i + 1
+    nil
+
+# ---------------------------------------------------------------------------
+# Hover helpers
+# ---------------------------------------------------------------------------
+
+# Hover for a macro name — look up in symbol table.
+fn hover_for_macro(name: text, symbols: CmmSymbolTable, sp: CmmSpan) -> HoverResult?:
+    val syms = symbols.find_by_name(name)
+    if syms.len() > 0:
+        val sym = syms[0]
+        return HoverResult(
+            content: "**PRACTICE macro:** `&" + name + "`\n\nScope: " + sym.scope + "\nDeclared at line " + int_to_text(sym.def_line),
+            range_start_line: sp.start_line,
+            range_start_col: sp.start_col,
+            range_end_line: sp.end_line,
+            range_end_col: sp.end_col
+        )
+    HoverResult(
+        content: "**Macro:** `&" + name + "` (undeclared)",
+        range_start_line: sp.start_line,
+        range_start_col: sp.start_col,
+        range_end_line: sp.end_line,
+        range_end_col: sp.end_col
+    )
+
+# Hover for a label reference in GOTO/GOSUB/JUMPTO.
+fn hover_for_label_ref(target: text, symbols: CmmSymbolTable, sp: CmmSpan, stmt_type: text) -> HoverResult?:
+    val syms = symbols.find_by_name(target)
+    var def_info = ""
+    var li = 0
+    while li < syms.len():
+        match syms[li].kind:
+            case CmmSymbolKind.LabelSym:
+                def_info = "\nDefined at line " + int_to_text(syms[li].def_line)
+            case _: ()
+        li = li + 1
+
+    if def_info == "":
+        def_info = "\n(label not found in this file)"
+
+    HoverResult(
+        content: "**" + stmt_type + "** target: `" + target + "`" + def_info,
+        range_start_line: sp.start_line,
+        range_start_col: sp.start_col,
+        range_end_line: sp.end_line,
+        range_end_col: sp.end_col
+    )
+
+# Hover for a declaration statement (LOCAL, GLOBAL, PRIVATE, ENTRY).
+fn hover_for_decl(decl_type: text, names: [text], sp: CmmSpan) -> HoverResult?:
+    var names_str = ""
+    var i = 0
+    while i < names.len():
+        if i > 0:
+            names_str = names_str + ", "
+        names_str = names_str + "&" + names[i]
+        i = i + 1
+    HoverResult(
+        content: "**" + decl_type + "** declaration: " + names_str,
+        range_start_line: sp.start_line,
+        range_start_col: sp.start_col,
+        range_end_line: sp.end_line,
+        range_end_col: sp.end_col
+    )
+
+# ---------------------------------------------------------------------------
+# Utility helpers
+# ---------------------------------------------------------------------------
+
+# Check whether a span contains a given (line, col) position.
+fn span_contains(sp: CmmSpan, line: i64, col: i64) -> bool:
+    if line < sp.start_line or line > sp.end_line:
+        return false
+    if line == sp.start_line and col < sp.start_col:
+        return false
+    if line == sp.end_line and col > sp.end_col:
+        return false
+    true
+
+# Extract a plain text name from a simple expression (Ident, Str, DotPath).
+fn extract_text_from_expr(expr: CmmExpr) -> text:
+    match expr:
+        case CmmExpr.Ident(name): name
+        case CmmExpr.Lit(lit):
+            match lit:
+                case CmmLiteral.Str(s): s
+                case _: ""
+        case CmmExpr.DotPath(path): path
+        case _: ""
+
+# We need CmmLiteral for the extract helper
+use cmm_ast.{CmmLiteral}
+
+# Placeholder constructors for safe unwrapping
+fn placeholder_cmd() -> CmmCommandInfo:
+    CmmCommandInfo(full_name: "", short_name: "", group: "", description: "", min_version: "")
+
+fn placeholder_func() -> CmmFuncInfo:
+    CmmFuncInfo(name: "", signature: "", return_type: "", description: "", group: "")
+
+# Need these types imported for placeholders
+use cmm_commands.{CmmCommandInfo}
+use cmm_functions.{CmmFuncInfo}
+
+fn int_to_text(n: i64) -> text:
+    "{n}"

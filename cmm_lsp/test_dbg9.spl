@@ -1,0 +1,19 @@
+use cmm_lexer.{lex_cmm_source}
+use cmm_tokens.{CmmTokenKind, CmmToken}
+
+fn show_tokens(source: text):
+    val tokens = lex_cmm_source(source)
+    var i = 0
+    while i < tokens.len():
+        val t = tokens[i]
+        print "  [{i}] {t.text}"
+        i = i + 1
+
+print "=== 9ff ==="
+show_tokens("(&addr>9ff)\n")
+
+print "=== 0ffff8000 ==="
+show_tokens("&0ffff8000\n")
+
+print "=== d.l(d:(iobase()+010110))&0ffff8000 ==="
+show_tokens("d.l(d:(iobase()+010110))&0ffff8000\n")

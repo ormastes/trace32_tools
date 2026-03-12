@@ -1,0 +1,126 @@
+; WCH CH32V307 with FreeRTOS
+; CH32V307 - RV32IMACF with RTOS awareness
+
+LOCAL &elf_file &heap_start &heap_end
+
+SYStem.RESet
+SYStem.CPU CH32V307
+SYStem.CONFIG.DEBUGPORTTYPE SWD
+SYStem.JtagClock 10MHz
+SYStem.Up
+
+; Load application with RTOS
+&elf_file="ch32v307_freertos.elf"
+Data.LOAD.Elf "&elf_file"
+
+; FreeRTOS awareness
+TASK.CONFIG ~~/demo/riscv/kernel/freertos/freertos.t32
+MENU.ReProgram ~~/demo/riscv/kernel/freertos/freertos.men
+
+; Set breakpoints on task functions
+Break.Set vTaskStartScheduler
+Break.Set xTaskCreate
+Break.Set vApplicationIdleHook
+
+; Monitor heap
+&heap_start=sYmbol.BEGIN(ucHeap)
+&heap_end=sYmbol.END(ucHeap)
+PRINT "Heap: " FORMAT.Hex(8., &heap_start) "--" FORMAT.Hex(8., &heap_end)
+
+; Run to scheduler start
+Go
+WAIT !STATE.RUN() 10s
+
+; Display task list
+TASK.List
+TASK.DTask
+
+; View task stacks
+Var.View pxCurrentTCB
+Var.Frame /Locals
+
+; --- Additional parser exercises ---
+
+; ON.STOP GOSUB cleanup
+ON.STOP GOSUB cleanup_handler
+
+; sYmbol.AutoLOAD.CHECK
+sYmbol.AutoLOAD.CHECK "do ~~/demo/riscv/kernel/freertos/autoload.cmm"
+
+; GROUP.Create with option for task grouping
+GROUP.Create "HighPriority" task_main task_comm /RED
+GROUP.Create "LowPriority" task_idle task_monitor
+
+; MMU.SCAN for memory mapping
+MMU.FORMAT RISCV SV39 satp
+MMU.SCAN
+TRANSlation.ON
+
+; AREA.Create and AREA.view for custom output area
+AREA.Create TASK_STATUS 80. 25.
+AREA.view TASK_STATUS
+AREA.Select TASK_STATUS
+
+; PRINT with %ERROR / %WARNING formatting
+PRINT %ERROR "Critical: Task stack overflow detected"
+PRINT %WARNING "Warning: Low heap memory"
+PRINT "FreeRTOS heap: " FORMAT.Hex(8., &heap_start) "--" FORMAT.Hex(8., &heap_end)
+
+; Per-task stack check loop
+LOCAL &task_count &task_idx &stack_ptr &stack_low
+&task_count=4.
+&task_idx=0
+WHILE &task_idx<&task_count
+(
+  ; Read task stack pointer
+  GOSUB check_task_stack &task_idx
+  &task_idx=&task_idx+1
+)
+
+; OPEN / WRITE / CLOSE for task report
+OPEN #1 "ch32v307_task_report.log" /Create
+WRITE #1 "CH32V307 FreeRTOS Task Report"
+WRITE #1 "Heap: " FORMAT.Hex(8., &heap_start) "--" FORMAT.Hex(8., &heap_end)
+WRITE #1 "Tasks: " FORMAT.Decimal(2., &task_count)
+CLOSE #1
+
+; RePeaT with counter for periodic check
+RePeaT 3.
+(
+  TASK.List
+  WAIT 1s
+)
+
+; IF with bitwise check on register
+LOCAL &mstatus_val
+&mstatus_val=Data.Long(SPR:0x300)
+IF (&mstatus_val&0x08)!=0
+  PRINT "Interrupts are globally enabled"
+ELSE
+  PRINT %WARNING "Interrupts are globally disabled"
+
+PRINT "CH32V307 kernel debug complete"
+
+ENDDO
+
+; Subroutine: check a single task stack
+check_task_stack:
+  ENTRY &idx
+  LOCAL &sp_val
+  &sp_val=0x80000000+&idx*0x1000
+  IF &sp_val<0x80000100
+  (
+    PRINT %ERROR "Task " FORMAT.Decimal(1., &idx) " stack overflow!"
+  )
+  ELSE
+  (
+    PRINT "Task " FORMAT.Decimal(1., &idx) " stack OK: " FORMAT.Hex(8., &sp_val)
+  )
+  RETURN
+
+; Cleanup handler (ON.STOP target)
+cleanup_handler:
+  PRINT "Cleaning up debug session..."
+  Break.Delete /ALL
+  AREA.RESet
+  RETURN

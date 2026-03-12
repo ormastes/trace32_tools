@@ -1,0 +1,11 @@
+# Minimal test
+use cmm_parser.{parse_cmm_source}
+
+extern fn rt_file_read_text(path: text) -> text
+
+val content = rt_file_read_text("/opt/t32/demo/arm/flash/byte/spi-eon-en25f/en25f.cmm") ?? ""
+val p = parse_cmm_source(content)
+if p.errors.len() == 0:
+    print "OK"
+if p.errors.len() > 0:
+    print "FAIL: {p.errors[0]}"

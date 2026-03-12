@@ -1,0 +1,92 @@
+; @target: STM32WB55
+; @arch: Cortex-M4 + Cortex-M0+
+; @purpose: BLE stack debug
+; @requires: SWD, Power Debug II USB
+; @cli-mode: batch
+
+; STM32WB55 BLE Stack Debug
+
+SCREEN.OFF
+AREA.Create CLI_OUTPUT
+AREA.Select CLI_OUTPUT
+ON ERROR GOSUB error_handler
+
+LOCAL &elf_path &ble_mode &ble_state
+LOCAL &hci_cmd_buf &ble_gap_state &ble_gatt_state
+LOCAL &sram2a_base &bd_addr_low &bd_addr_high
+
+ENTRY &elf_path &ble_mode
+IF "&elf_path"==""
+  &elf_path="stm32wb_ble_app.elf"
+IF "&ble_mode"==""
+  &ble_mode="peripheral"
+
+SYStem.RESet
+SYStem.CPU STM32WB55
+SYStem.CONFIG.DEBUGPORTTYPE SWD
+SYStem.CONFIG.CORE 1. 2.
+SYStem.Up
+
+; Load BLE application
+Data.LOAD.Elf "&elf_path"
+
+PRINT "[BLE] mode=&ble_mode"
+
+; BLE shared memory - SRAM2A at 0x20030000
+&sram2a_base=0x20030000
+
+; Print BLE state
+WinPrint.Var.View BleApplicationContext
+WinPrint.Var.View hci_cmd_resp_released
+
+; Set breakpoints on BLE events
+Break.Set hci_notify_asynch_evt
+Break.Set SVCCTL_App_Notification
+Break.Set aci_gap_set_discoverable
+Break.Set aci_gatt_add_service
+
+; Run to BLE init
+Go
+WAIT !STATE.RUN() 15s
+
+; Read BLE state from shared memory
+&hci_cmd_buf=Data.Long(D:&sram2a_base)
+&ble_gap_state=Data.Long(D:&sram2a_base+0x100)
+&ble_gatt_state=Data.Long(D:&sram2a_base+0x200)
+PRINT "[BLE] hci_cmd_buf=" FORMAT.Hex(8., &hci_cmd_buf)
+PRINT "[BLE] gap_state=" FORMAT.Hex(8., &ble_gap_state)
+PRINT "[BLE] gatt_state=" FORMAT.Hex(8., &ble_gatt_state)
+
+; Read BD address from OTP area
+&bd_addr_low=Data.Long(D:0x1FFF7580)
+&bd_addr_high=Data.Long(D:0x1FFF7584)
+PRINT "[BLE] addr=" FORMAT.Hex(8., &bd_addr_high) FORMAT.Hex(8., &bd_addr_low)
+
+; Check BLE init status
+&ble_state=Var.VALUE(BleApplicationContext.BleApplicationContext_legacy.connectionStatus)
+IF &ble_state!=0
+(
+  PRINT "[BLE] state=INITIALIZED connection_status=" FORMAT.Hex(2., &ble_state)
+)
+ELSE
+(
+  PRINT "[BLE] state=NOT_INITIALIZED"
+)
+
+; Continue and watch for BLE events
+Go
+WAIT !STATE.RUN() 10s
+
+IF !STATE.RUN()
+(
+  PRINT "[BLE] event_handler_pc=" FORMAT.Hex(8., Register(PC))
+  WinPrint.Frame.view /Locals /Caller
+)
+
+PRINT "[STATUS] operation=SUCCESS"
+
+ENDDO TRUE()
+
+error_handler:
+  PRINT "[ERROR] line=" PRACTICE.CALLER.LINE()
+  ENDDO FALSE()

@@ -1,0 +1,70 @@
+# Validate CMM parser on a flat list of files from stdin/args.
+# Usage: bin/release/simple validate_flat.spl <file_list_path> <report_path>
+
+use cmm_parser.{parse_cmm_source}
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text)
+extern fn sys_get_args() -> [text]
+
+val args = sys_get_args()
+if args.len() < 3:
+    print "Usage: validate_flat.spl <file_list> <report>"
+    pass_dn
+
+val list_path = args[1]
+val report_path = args[2]
+
+val list_content = rt_file_read_text(list_path) ?? ""
+var files: [text] = []
+var start = 0
+var i = 0
+while i < list_content.len():
+    if list_content[i:i + 1] == "\n":
+        val line = list_content[start:i]
+        if line.len() > 0:
+            files.push(line)
+        start = i + 1
+    i = i + 1
+if start < list_content.len():
+    val line = list_content[start:list_content.len()]
+    if line.len() > 0:
+        files.push(line)
+
+var total = 0
+var ok_count = 0
+var fail_count = 0
+var fail_lines: [text] = []
+
+var fi = 0
+while fi < files.len():
+    val path = files[fi]
+    val source = rt_file_read_text(path) ?? ""
+    if source.len() > 0:
+        val program = parse_cmm_source(source)
+        total = total + 1
+        if program.errors.len() > 0:
+            fail_count = fail_count + 1
+            fail_lines.push(path + "|" + program.errors[0])
+        else:
+            ok_count = ok_count + 1
+    fi = fi + 1
+    if fi % 100 == 0:
+        print "  Progress: {fi}/{files.len()} files..."
+
+var rate = 0
+if total > 0:
+    rate = ok_count * 100 / total
+var report = "# CMM Validate Flat\n"
+report = report + "# Total: {total}  OK: {ok_count}  Fail: {fail_count}  Skip: 0\n"
+report = report + "# Rate: {rate}% ({ok_count}/{total})\n"
+report = report + "#\n"
+var fj = 0
+while fj < fail_lines.len():
+    report = report + fail_lines[fj] + "\n"
+    fj = fj + 1
+
+rt_file_write_text(report_path, report)
+print "Total: {total}  OK: {ok_count}  Fail: {fail_count}"
+print "Rate: {rate}% ({ok_count}/{total})"
+print "Report: {report_path}"

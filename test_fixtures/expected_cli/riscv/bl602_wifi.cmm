@@ -1,0 +1,164 @@
+; @target: BL602
+; @arch: RISC-V RV32IMACF
+; @purpose: WiFi SoC debug
+; @requires: JTAG
+; @cli-mode: batch
+; Bouffalo BL602 WiFi SoC Debug
+; BL602 - RV32IMACF with WiFi
+
+SCREEN.OFF
+
+AREA.Create CLI_OUTPUT
+AREA.Select CLI_OUTPUT
+
+LOCAL &elf_file &wdog_base &flash_base
+LOCAL &wifi_init_done
+ENTRY &wifi_mode
+
+SYStem.RESet
+SYStem.CPU BL602
+SYStem.CONFIG.DEBUGPORTTYPE JTAG
+SYStem.JtagClock 4MHz
+
+; Disable watchdog before debug
+&wdog_base=0x4000A500
+GOSUB disable_watchdog
+
+SYStem.Up
+
+; Load firmware
+&elf_file="bl602_wifi_demo.elf"
+Data.LOAD.Elf "&elf_file"
+
+; Setup flash for OTA partition
+&flash_base=0x23000000
+FLASH.RESet
+FLASH.Create 1. &flash_base--(&flash_base+0x200000-1) 0x1000 TARGET Long
+FLASH.TARGET 0x22020000 0x22030000 0x1000 ~~/demo/riscv/flash/byte/spi_flash_bl602.bin
+
+; Program flash
+FLASH.Erase 0x23000000--0x231FFFFF
+FLASH.Program 0x23000000--0x231FFFFF
+Data.LOAD.Elf "&elf_file" 0x23000000--0x231FFFFF
+FLASH.Program off
+
+; Set breakpoints for WiFi init
+Break.Set wifi_main_init
+Break.Set bl_wifi_sta_connect
+
+Register.Set PC _start
+Go
+WAIT !STATE.RUN() 15s
+
+; Check if WiFi init completed
+&wifi_init_done=Var.VALUE(g_wifi_initialized)
+IF &wifi_init_done==1
+  PRINT "[STATUS] wifi_init=SUCCESS"
+ELSE
+  PRINT %ERROR "[ERROR] wifi_init=INCOMPLETE"
+
+; --- Additional parser exercises ---
+
+; ON ERROR JUMPTO fatal_error
+ON ERROR JUMPTO fatal_error
+
+; WiFi mode selection via CLI parameter
+IF "&wifi_mode"=="AP"
+  GOSUB setup_ap_mode
+ELSE
+  GOSUB setup_sta_mode
+
+; READ/WRITE file I/O for config parsing
+LOCAL &config_line &ssid &password &channel
+OPEN #1 "wifi_config.txt" /Read
+READ #1 &ssid
+READ #1 &password
+READ #1 &channel
+CLOSE #1
+
+; Write parsed config to log
+OPEN #2 "wifi_debug.log" /Create
+WRITE #2 "SSID: &ssid"
+WRITE #2 "Channel: &channel"
+CLOSE #2
+
+; PRINT with color formatting for status
+PRINT %COLOR.GREEN "[STATUS] config_load=SUCCESS"
+PRINT %COLOR.RED "[WIFI] warning=open_network_detected"
+PRINT "[WIFI] ssid=&ssid channel=&channel"
+
+; GLOBALON TIME handler
+GLOBALON TIME 5.s DO wifi_keepalive.cmm
+
+; Multiple GOSUB calls to different subroutines
+GOSUB setup_sta_mode
+GOSUB check_connection_status
+GOSUB dump_wifi_regs
+
+; STRing.SPLIT for parsing config (using SCANAndExtract)
+LOCAL &parsed &rest_str
+&parsed=STRing.SCANAndExtract("&ssid"," ",&rest_str)
+PRINT "[WIFI] first_token=&parsed"
+
+dialog_closed:
+  PRINT "[STATUS] dialog=closed"
+
+ENDDO TRUE()
+
+; Subroutine: Disable watchdog
+disable_watchdog:
+  Data.Set D:&wdog_base+0x00 %Long 0x00000000  ; WDOG_CTR = 0
+  Data.Set D:&wdog_base+0x04 %Long 0x00000000  ; WDOG_CFG = 0
+  RETURN
+
+; Subroutine: Setup station mode
+setup_sta_mode:
+  ENTRY &mode_param
+  LOCAL &wifi_ctrl
+  &wifi_ctrl=Data.Long(D:0x44000000)
+  Data.Set D:0x44000000 %Long (&wifi_ctrl|0x01)
+  PRINT "[WIFI] mode=STATION"
+  RETURN
+
+; Subroutine: Setup AP mode
+setup_ap_mode:
+  LOCAL &wifi_ctrl
+  &wifi_ctrl=Data.Long(D:0x44000000)
+  Data.Set D:0x44000000 %Long (&wifi_ctrl|0x02)
+  PRINT "[WIFI] mode=AP"
+  RETURN
+
+; Subroutine: Check WiFi connection
+check_connection_status:
+  LOCAL &status_reg &retry
+  &retry=0
+  WHILE &retry<10.
+  (
+    &status_reg=Data.Long(D:0x44000010)
+    IF (&status_reg&0x01)==1
+    (
+      PRINT %COLOR.GREEN "[WIFI] connection=CONNECTED"
+      RETURN
+    )
+    &retry=&retry+1
+  )
+  PRINT %COLOR.RED "[WIFI] connection=TIMEOUT"
+  RETURN
+
+; Subroutine: Dump WiFi registers
+dump_wifi_regs:
+  LOCAL &i &reg_val
+  &i=0
+  WHILE &i<8.
+  (
+    &reg_val=Data.Long(D:0x44000000+&i*4)
+    PRINT "[REG] wifi_reg[" FORMAT.Decimal(1., &i) "]=" FORMAT.Hex(8., &reg_val)
+    &i=&i+1
+  )
+  RETURN
+
+; Fatal error handler (target of JUMPTO)
+fatal_error:
+  PRINT %ERROR "[ERROR] msg=Fatal error in BL602 WiFi script"
+  SYStem.Down
+  END

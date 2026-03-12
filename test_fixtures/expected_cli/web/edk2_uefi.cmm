@@ -1,0 +1,48 @@
+; @target: x86_64
+; @arch: x86_64
+; @purpose: UEFI firmware debug
+; @requires: JTAG/SWD
+; @cli-mode: batch
+; EDK2 UEFI Debug with TRACE32
+; Exercises: language() function,
+;            os.file(), chdir, radix hex
+
+SCREEN.OFF
+
+AREA.Create CLI_OUTPUT
+AREA.Select CLI_OUTPUT
+
+ON ERROR GOSUB error_handler
+
+LOCAL &uefi_root &build_dir &fv_path
+
+; Check language for localization
+IF language()=="GERMAN"
+  PRINT "[CONFIG] language=GERMAN"
+ELSE
+  PRINT "[CONFIG] language=ENGLISH"
+
+RADIX.hex
+
+; Setup paths
+&uefi_root=OS.ENV("EDK2_ROOT")
+IF "&uefi_root"==""
+  &uefi_root="c:\edk2"
+&build_dir="&uefi_root\Build\OvmfX64\DEBUG_VS2019\FV"
+
+IF OS.DIR("&build_dir")
+  ChDir "&build_dir"
+
+; Load UEFI firmware volume
+&fv_path="&build_dir\OVMF.fd"
+IF os.file("&fv_path")
+(
+  Data.LOAD.Binary "&fv_path" 0xFF000000
+  PRINT "[STATUS] uefi_firmware=LOADED"
+)
+
+ENDDO TRUE()
+
+error_handler:
+  PRINT "[ERROR] line=" PRACTICE.CALLER.LINE()
+  ENDDO FALSE()

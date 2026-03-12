@@ -1,0 +1,353 @@
+# CMM (PRACTICE Script) Abstract Syntax Tree
+# AST node types for the TRACE32 PRACTICE scripting language.
+#
+# CMM is a line-oriented test language by Lauterbach GmbH for TRACE32
+# debugger automation. A CMM program is a flat sequence of statements,
+# one per line. Block structure uses parentheses, not indentation.
+#
+# Reference: doc/research/cmm_grammar_research_2026-03-10.md
+
+export CmmProgram, CmmStmt, CmmExpr, CmmLiteral, CmmBinOp, CmmUnaryOp
+export CmmDialogItem, CmmSpan
+export span, span_range, merge_spans
+
+# ---------------------------------------------------------------------------
+# Source location
+# ---------------------------------------------------------------------------
+
+struct CmmSpan:
+    start_line: i64
+    start_col: i64
+    end_line: i64
+    end_col: i64
+
+# ---------------------------------------------------------------------------
+# Binary operators — 13 precedence levels from the CMM grammar
+#
+#  Prec  Operators              Meaning
+#  ----  --------------------   ----------------
+#   1    ( ) { }                Brackets (handled in expr parser)
+#   2    -- ++ ..               Ranges
+#   3    + - ~ !                Unary signs/NOT (see CmmUnaryOp)
+#   4    << >>                  Shift
+#   5    * / %                  Mul / Div / Mod
+#   6    + - +                  Add / Sub / String concat
+#   7    == != >= <= > <        Comparison
+#   8    &                      Binary AND
+#   9    ^                      Binary XOR
+#  10    |                      Binary OR
+#  11    &&                     Logical AND
+#  12    ^^                     Logical XOR
+#  13    ||                     Logical OR
+# ---------------------------------------------------------------------------
+
+enum CmmBinOp:
+    # Arithmetic (prec 5-6)
+    Add             # +
+    Sub             # -
+    Mul             # *
+    Div             # /
+    Mod             # %
+
+    # Shift (prec 4)
+    Shl             # <<
+    Shr             # >>
+
+    # Comparison (prec 7)
+    Eq              # ==
+    NotEq           # !=
+    Lt              # <
+    Gt              # >
+    LtEq            # <=
+    GtEq            # >=
+
+    # Bitwise (prec 8-10)
+    BitAnd          # &
+    BitXor          # ^
+    BitOr           # |
+
+    # Logical (prec 11-13)
+    LogAnd          # &&
+    LogXor          # ^^
+    LogOr           # ||
+
+    # Range (prec 2)
+    RangeTo         # -- (range with borders)
+    RangeOffset     # ++ (range with offset)
+    RangeDots       # .. (range alternate syntax)
+
+    # String
+    Concat          # + in string context
+
+# ---------------------------------------------------------------------------
+# Unary operators (prec 3)
+# ---------------------------------------------------------------------------
+
+enum CmmUnaryOp:
+    Neg             # - (arithmetic negation)
+    BitNot          # ~ (binary complement)
+    LogNot          # ! (logical not)
+
+# ---------------------------------------------------------------------------
+# Literal values
+#
+# CMM has unusually rich literal syntax: hex, binary, explicit-decimal
+# (trailing dot), hex/binary masks with don't-care bits, time values,
+# and a "plain integer" form whose interpretation depends on the active
+# RADIX setting.
+# ---------------------------------------------------------------------------
+
+enum CmmLiteral:
+    HexInt(text)        # 0x1000, 0xEEEE
+    BinInt(text)        # 0y101, 0y100010001
+    DecInt(text)        # 100., 1234. (trailing dot forces decimal)
+    Float(text)         # 1.3, 1.3e+34, 0.123
+    PlainInt(text)      # 1000 (interpretation depends on RADIX mode)
+    HexMask(text)       # 0xFX, 0xff1cxxxx
+    BinMask(text)       # 0yX111XXX
+    Time(text)          # 10s, 23.24ms, 75.0ns, 100us
+    Str(text)           # "hello", "abc""def"
+    Char(text)          # 'A', 'a'
+    BoolTrue            # TRUE()
+    BoolFalse           # FALSE()
+
+# ---------------------------------------------------------------------------
+# Expressions
+#
+# CMM expressions appear as command parameters, macro assignment
+# right-hand sides, and inside control-flow conditions. Key features:
+#
+# - MacroRef: &variable (text substitution)
+# - MacroRecRef: &&variable (recursive resolution)
+# - Address: access_class:expr (e.g. D:0x1000, P:main)
+# - Braced: {expr} freezes value to a constant
+# - FunctionCall: Register(PC), STRing.UPpeR("abc"), etc.
+# - DotPath: Data.Byte, SYStem.CPU as expressions
+# ---------------------------------------------------------------------------
+
+enum CmmExpr:
+    Lit(CmmLiteral)                             # literal value
+    MacroRef(text)                              # &variable
+    MacroRecRef(text)                           # &&variable (recursive)
+    FunctionCall(text, [CmmExpr])               # Register(PC), CPU()
+    Binary(CmmBinOp, CmmExpr, CmmExpr)          # lhs op rhs
+    Unary(CmmUnaryOp, CmmExpr)                  # op expr
+    Address(text, CmmExpr)                      # D:0x1000 (access_class : expr)
+    Parenthesized(CmmExpr)                      # (expr)
+    Braced(CmmExpr)                             # {expr} (constant conversion)
+    Ident(text)                                 # bare word (symbol, param)
+    DotPath(text)                               # Data.Byte, SYStem.state
+    FileChannel(text)                           # #1, #2 (file handle ref)
+    OptionFlag(text)                            # /Write, /Read, /Create
+    MacroExpand(text, CmmExpr)                  # "&(var)suffix" expansion
+    ExprEmpty                                   # missing optional expression
+
+# ---------------------------------------------------------------------------
+# Dialog item types
+#
+# DIALOG blocks define GUI panels in TRACE32. Items are listed between
+# DIALOG ( ... ) parentheses and describe headers, labels, input fields,
+# buttons, checkboxes, pull-down menus, and close handlers.
+# ---------------------------------------------------------------------------
+
+enum CmmDialogItem:
+    DlgHeader(text)                             # HEADER "title"
+    DlgPos(CmmExpr, CmmExpr, CmmExpr)          # POS x. y. w.
+    DlgText(text)                               # TEXT "label"
+    DlgEdit(text, text, text)                   # NAME: EDIT default callback
+    DlgButton(text, text, text)                 # NAME: BUTTON text callback
+    DlgDefButton(text, text, text)              # NAME: DEFBUTTON text callback
+    DlgCheckbox(text, text, text)               # NAME: CHECKBOX text callback
+    DlgChoosebox(text, text)                    # NAME: CHOOSEBOX text callback
+    DlgPulldown(text, text)                     # NAME: PULLDOWN options callback
+    DlgLine(text)                               # LINE "group label"
+    DlgClose(text)                              # CLOSE callback
+
+# ---------------------------------------------------------------------------
+# Statements — one per line in CMM
+#
+# Categories:
+#   Basic:       Commands, macro assignments, labels, comments
+#   Control:     IF/ELSE, WHILE, RePeaT, GOTO/GOSUB, DO/ENDDO, etc.
+#   Declaration: LOCAL, GLOBAL, PRIVATE, ENTRY
+#   Events:      ON (ERROR/STOP/etc.), GLOBALON
+#   I/O:         OPEN, CLOSE, READ, WRITE, WRITEB, APPEND, PRINT
+#   Dialog:      DIALOG ( items )
+#   Structure:   Block (parenthesized groups), blank lines, error nodes
+# ---------------------------------------------------------------------------
+
+enum CmmStmt:
+    # --- Basic --------------------------------------------------------
+
+    # Dot-separated command with parameters, e.g. Data.LOAD sieve.dbg
+    Command(text, [CmmExpr], CmmSpan)
+
+    # Device-qualified command, e.g. B::Data.dump 0x0
+    DeviceCommand(text, text, [CmmExpr], CmmSpan)
+
+    # Macro assignment: &var=expr
+    MacroAssign(text, CmmExpr, CmmSpan)
+
+    # Recursive macro assignment: &&var=expr
+    MacroRecAssign(text, CmmExpr, CmmSpan)
+
+    # Label definition (must start at column 1): start:
+    LabelDef(text, CmmSpan)
+
+    # Comment line: ; text  or  // text
+    CommentLine(text, CmmSpan)
+
+    # --- Control flow -------------------------------------------------
+
+    # IF cond body [ELSE else_body]
+    # body/else_body is a single CmmStmt (often a Block for multi-line)
+    IfElse(CmmExpr, CmmStmt, CmmStmt?, CmmSpan)
+
+    # WHILE cond body
+    WhileLoop(CmmExpr, CmmStmt, CmmSpan)
+
+    # RePeaT [count] body  (count=nil means infinite)
+    RepeatLoop(CmmExpr?, CmmStmt, CmmSpan)
+
+    # GOTO label
+    Goto(text, CmmSpan)
+
+    # GOSUB label [args...]
+    Gosub(text, [CmmExpr], CmmSpan)
+
+    # RETURN [values...]
+    ReturnStmt([CmmExpr], CmmSpan)
+
+    # JUMPTO label (cross-module jump)
+    JumpTo(text, CmmSpan)
+
+    # DO file [args...] — call another CMM script
+    DoCall(CmmExpr, [CmmExpr], CmmSpan)
+
+    # ENDDO [return values...]
+    Enddo([CmmExpr], CmmSpan)
+
+    # RUN file [args...] — call clearing the stack
+    RunCall(CmmExpr, [CmmExpr], CmmSpan)
+
+    # END — terminate script
+    EndStmt(CmmSpan)
+
+    # STOP — halt execution
+    StopStmt(CmmSpan)
+
+    # CONTinue — resume target
+    ContinueCmd(CmmSpan)
+
+    # --- Declarations -------------------------------------------------
+
+    # LOCAL &a &b &c — declare local macros
+    LocalDecl([text], CmmSpan)
+
+    # GLOBAL &a — declare global macro
+    GlobalDecl([text], CmmSpan)
+
+    # PRIVATE &a — declare private macro (block + sub-blocks)
+    PrivateDecl([text], CmmSpan)
+
+    # ENTRY [%LINE] &a &b — subroutine parameter binding
+    EntryDecl([text], CmmSpan)
+
+    # --- Events -------------------------------------------------------
+
+    # ON ERROR GOTO label / ON STOP GOSUB handler / etc.
+    OnEvent(text, CmmStmt, CmmSpan)
+
+    # GLOBALON ERROR DO handler.cmm / GLOBALON TIME 1.s DO periodic.cmm
+    GlobalOnEvent(text, CmmStmt, CmmSpan)
+
+    # --- I/O ----------------------------------------------------------
+
+    # OPEN #n file /mode
+    OpenFile(CmmExpr, CmmExpr, text, CmmSpan)
+
+    # CLOSE #n
+    CloseFile(CmmExpr, CmmSpan)
+
+    # READ #n [%LINE] &var1 &var2
+    ReadFile(CmmExpr, [text], CmmSpan)
+
+    # WRITE #n expr1 expr2
+    WriteFile(CmmExpr, [CmmExpr], CmmSpan)
+
+    # WRITEB #n expr1 expr2 (binary write)
+    WriteBFile(CmmExpr, [CmmExpr], CmmSpan)
+
+    # APPEND file expr1 expr2
+    AppendFile(CmmExpr, [CmmExpr], CmmSpan)
+
+    # PRINT expr1 expr2
+    PrintStmt([CmmExpr], CmmSpan)
+
+    # --- Waiting ------------------------------------------------------
+
+    # WAIT expr (time or condition)
+    WaitStmt(CmmExpr, CmmSpan)
+
+    # --- Dialog -------------------------------------------------------
+
+    # DIALOG ( items... )
+    DialogBlock([CmmDialogItem], CmmSpan)
+
+    # --- Structure ----------------------------------------------------
+
+    # Parenthesized block: ( stmt1  stmt2  ... )
+    Block([CmmStmt], CmmSpan)
+
+    # Blank / empty line
+    EmptyLine(CmmSpan)
+
+    # Unparseable line preserved for error recovery
+    ErrorNode(text, CmmSpan)
+
+# ---------------------------------------------------------------------------
+# Top-level program
+# ---------------------------------------------------------------------------
+
+struct CmmProgram:
+    statements: [CmmStmt]
+    file_path: text
+    errors: [text]
+
+# ---------------------------------------------------------------------------
+# Helper constructors
+# ---------------------------------------------------------------------------
+
+# Create a single-position span (one character)
+fn span(line: i64, col: i64) -> CmmSpan:
+    CmmSpan(start_line: line, start_col: col, end_line: line, end_col: col)
+
+# Create a span covering a range of positions
+fn span_range(start_line: i64, start_col: i64, end_line: i64, end_col: i64) -> CmmSpan:
+    CmmSpan(start_line: start_line, start_col: start_col, end_line: end_line, end_col: end_col)
+
+# Merge two spans into one covering both (min start, max end)
+fn merge_spans(a: CmmSpan, b: CmmSpan) -> CmmSpan:
+    val sl = a.start_line
+    val sc = a.start_col
+    val el = b.end_line
+    val ec = b.end_col
+    # Pick earlier start
+    var rsl = sl
+    var rsc = sc
+    if b.start_line < sl:
+        rsl = b.start_line
+        rsc = b.start_col
+    if b.start_line == sl:
+        if b.start_col < sc:
+            rsc = b.start_col
+    # Pick later end
+    var rel = el
+    var rec = ec
+    if a.end_line > el:
+        rel = a.end_line
+        rec = a.end_col
+    if a.end_line == el:
+        if a.end_col > ec:
+            rec = a.end_col
+    CmmSpan(start_line: rsl, start_col: rsc, end_line: rel, end_col: rec)

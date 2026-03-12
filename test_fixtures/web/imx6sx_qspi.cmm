@@ -1,0 +1,48 @@
+; i.MX6 SoloX QuadSPI Flash Programming
+; Exercises: AREA.CLEAR/AREA.view, FLASHFILE.* commands,
+;            Data.Test /Prime, ADDRESS.OFFSET(TRACK.ADDRESS()),
+;            C15: access class, shift operators >>8.
+
+LOCAL &qspi_base &flash_size &page_size
+LOCAL &status &result
+
+AREA.Create QSPI
+AREA.Select QSPI
+AREA.view QSPI
+AREA.CLEAR QSPI
+
+SYStem.RESet
+SYStem.CPU iMX6SoloX
+SYStem.Up
+
+; Configure QSPI controller
+&qspi_base=0x021E0000
+Data.Set D:&qspi_base+0x00 %Long 0x000F400C  ; MCR
+Data.Set D:&qspi_base+0x08 %Long 0x00030081  ; BUF0CR
+
+; Check flash ID
+FLASHFILE.RESet
+FLASHFILE.CONFIG &qspi_base 0x0 0x0 0x0
+FLASHFILE.TARGET "&(OS.PPD())/qspi_flash.bin" 0x900000 0x1000 &qspi_base
+FLASHFILE.GETID
+
+; Test memory
+Data.Test D:0x60000000++0xFFFF /Prime
+
+; Address offset tracking
+&result=ADDRESS.OFFSET(TRACK.ADDRESS())
+PRINT "Track offset: &result"
+
+; Access via C15 (system control)
+&status=Data.Long(C15:0x1)  ; Read SCTLR
+PRINT "SCTLR: " FORMAT.Hex(8., &status)
+
+; Shift operations
+&result=(&status>>8.)&0xFF
+PRINT "Bits [15:8] = " FORMAT.Hex(2., &result)
+
+Go
+WAIT 5s
+Break.direct
+
+ENDDO

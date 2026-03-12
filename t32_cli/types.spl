@@ -1,0 +1,238 @@
+# T32 GUI-to-CLI shared types
+# Data model for sessions, cores, windows, actions, and fields
+
+# A TRACE32 PowerView session — one running instance
+class T32Session:
+    id: text
+    instance_name: text
+    api_port: i32
+    intercom_name: text
+    architecture: text
+    cores: [T32CoreContext]
+
+impl T32Session:
+    static fn create(id: text, instance_name: text, api_port: i32, intercom_name: text, architecture: text) -> T32Session:
+        T32Session(
+            id: id,
+            instance_name: instance_name,
+            api_port: api_port,
+            intercom_name: intercom_name,
+            architecture: architecture,
+            cores: []
+        )
+
+    fn add_core(core: T32CoreContext):
+        self.cores.push(core)
+
+    fn find_core(core_id: text) -> Option<T32CoreContext>:
+        for c in self.cores:
+            if c.core_id == core_id:
+                return Some(c)
+        nil
+
+# A core within a multi-core session
+class T32CoreContext:
+    core_id: text
+    instance_binding: text
+    label: text
+    current_window: text
+    field_state: Dict<text, text>
+
+impl T32CoreContext:
+    static fn create(core_id: text, instance_binding: text, label: text) -> T32CoreContext:
+        T32CoreContext(
+            core_id: core_id,
+            instance_binding: instance_binding,
+            label: label,
+            current_window: "",
+            field_state: {}
+        )
+
+# A TRACE32 window represented in CLI model
+class T32WindowNode:
+    window_key: text
+    title: text
+    kind: text             # built_in | custom_dialog | synthetic_cli
+    capture_mode: text     # function | print_parse | screenshot
+    open_command: text
+    capture_command: text
+    parser_spec: text
+    actions: [T32Action]
+    fields: [T32Field]
+
+impl T32WindowNode:
+    static fn create(window_key: text, title: text, kind: text, capture_mode: text) -> T32WindowNode:
+        T32WindowNode(
+            window_key: window_key,
+            title: title,
+            kind: kind,
+            capture_mode: capture_mode,
+            open_command: "",
+            capture_command: "",
+            parser_spec: "",
+            actions: [],
+            fields: []
+        )
+
+    static fn built_in(window_key: text, title: text, open_cmd: text, capture_cmd: text) -> T32WindowNode:
+        T32WindowNode(
+            window_key: window_key,
+            title: title,
+            kind: "built_in",
+            capture_mode: "print_parse",
+            open_command: open_cmd,
+            capture_command: capture_cmd,
+            parser_spec: "",
+            actions: [],
+            fields: []
+        )
+
+    fn add_action(action: T32Action):
+        self.actions.push(action)
+
+    fn add_field(field: T32Field):
+        self.fields.push(field)
+
+    fn find_action(action_key: text) -> Option<T32Action>:
+        for a in self.actions:
+            if a.action_key == action_key:
+                return Some(a)
+        nil
+
+# An action available in a window
+class T32Action:
+    action_key: text
+    label: text
+    action_type: text      # open_window | refresh | execute | set_field_then_execute | switch_core
+    command_template: text
+    target_window_key: text
+    side_effects: [text]
+
+impl T32Action:
+    static fn create(action_key: text, label: text, action_type: text, command_template: text) -> T32Action:
+        T32Action(
+            action_key: action_key,
+            label: label,
+            action_type: action_type,
+            command_template: command_template,
+            target_window_key: "",
+            side_effects: []
+        )
+
+    static fn execute(action_key: text, label: text, command_template: text) -> T32Action:
+        T32Action(
+            action_key: action_key,
+            label: label,
+            action_type: "execute",
+            command_template: command_template,
+            target_window_key: "",
+            side_effects: []
+        )
+
+    static fn open_window(action_key: text, label: text, command_template: text, target: text) -> T32Action:
+        T32Action(
+            action_key: action_key,
+            label: label,
+            action_type: "open_window",
+            command_template: command_template,
+            target_window_key: target,
+            side_effects: []
+        )
+
+# A field within a window
+class T32Field:
+    field_key: text
+    label: text
+    value_type: text       # string | int | hex | enum | bool
+    scope: text            # window | session | core | global
+    current_value: text
+
+impl T32Field:
+    static fn create(field_key: text, label: text, value_type: text, scope: text) -> T32Field:
+        T32Field(
+            field_key: field_key,
+            label: label,
+            value_type: value_type,
+            scope: scope,
+            current_value: ""
+        )
+
+# Container for loaded catalogs
+class T32Catalogs:
+    windows: [T32WindowNode]
+    actions: [T32Action]
+    fields: [T32Field]
+
+impl T32Catalogs:
+    static fn empty() -> T32Catalogs:
+        T32Catalogs(windows: [], actions: [], fields: [])
+
+    fn find_window(key: text) -> Option<T32WindowNode>:
+        for w in self.windows:
+            if w.window_key == key:
+                return Some(w)
+        nil
+
+    fn find_action(key: text) -> Option<T32Action>:
+        for a in self.actions:
+            if a.action_key == key:
+                return Some(a)
+        nil
+
+    fn find_field(key: text) -> Option<T32Field>:
+        for f in self.fields:
+            if f.field_key == key:
+                return Some(f)
+        nil
+
+    fn window_keys() -> [text]:
+        var keys: [text] = []
+        for w in self.windows:
+            keys.push(w.window_key)
+        keys
+
+    fn action_keys() -> [text]:
+        var keys: [text] = []
+        for a in self.actions:
+            keys.push(a.action_key)
+        keys
+
+    fn field_keys() -> [text]:
+        var keys: [text] = []
+        for f in self.fields:
+            keys.push(f.field_key)
+        keys
+
+# A captured window snapshot
+class T32WindowSnapshot:
+    window_key: text
+    raw_text: text
+    parsed_rows: [Dict<text, text>]
+    timestamp: text
+
+impl T32WindowSnapshot:
+    static fn create(window_key: text, raw_text: text) -> T32WindowSnapshot:
+        T32WindowSnapshot(
+            window_key: window_key,
+            raw_text: raw_text,
+            parsed_rows: [],
+            timestamp: ""
+        )
+
+# Command history entry
+class T32HistoryEntry:
+    command: text
+    result: text
+    session_id: text
+    core_id: text
+    timestamp: text
+
+impl T32HistoryEntry:
+    static fn create(command: text, result: text, session_id: text, core_id: text) -> T32HistoryEntry:
+        T32HistoryEntry(
+            command: command,
+            result: result,
+            session_id: session_id,
+            core_id: core_id,
+            timestamp: ""
+        )
