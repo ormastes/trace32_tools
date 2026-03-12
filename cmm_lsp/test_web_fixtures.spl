@@ -4,7 +4,7 @@
 # runs the analyzer, and reports OK/FAIL per file with error details.
 #
 # Usage:
-#   bin/release/simple examples/10_tooling/cmm_lsp/test_web_fixtures.spl
+#   bin/release/simple examples/10_tooling/trace32_tools/cmm_lsp/test_web_fixtures.spl
 
 use cmm_parser.{parse_cmm_source, parse_cmm_file}
 use cmm_analyzer.{analyze_program}
@@ -37,7 +37,7 @@ fn run_fixture_tests():
         script_dir = dir_of(all_args[0])
     var base_dir = script_dir + "/test_fixtures"
     if script_dir == "":
-        base_dir = "examples/10_tooling/cmm_lsp/test_fixtures"
+        base_dir = "examples/10_tooling/trace32_tools/test_fixtures"
 
     print "=== CMM LSP Parser — Web & RISC-V Fixture Tests ==="
     print "Base dir: {base_dir}"

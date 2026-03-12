@@ -4,7 +4,7 @@
 # statistics with error categorization.
 #
 # Usage:
-#   simple examples/10_tooling/cmm_lsp/bulk_validate.spl [dir]
+#   simple examples/10_tooling/trace32_tools/cmm_lsp/bulk_validate.spl [dir]
 #   (default dir: /opt/t32/demo)
 
 use cmm_parser.{parse_cmm_source}

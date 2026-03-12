@@ -39,7 +39,7 @@ Then create `~/.claude/plugins/cache/cmm-lsp/cmm-lsp/local/.lsp.json` with absol
 {
   "cmm": {
     "command": "/absolute/path/to/simple/bin/release/simple",
-    "args": ["run", "/absolute/path/to/simple/examples/10_tooling/cmm_lsp/lsp_server.spl"],
+    "args": ["run", "/absolute/path/to/simple/examples/10_tooling/trace32_tools/cmm_lsp/lsp_server.spl"],
     "extensionToLanguage": {
       ".cmm": "cmm"
     },

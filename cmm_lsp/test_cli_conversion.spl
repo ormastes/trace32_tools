@@ -4,7 +4,7 @@
 # their originals: GUI commands removed, functional content preserved.
 #
 # Usage:
-#   bin/release/simple examples/10_tooling/cmm_lsp/test_cli_conversion.spl
+#   bin/release/simple examples/10_tooling/trace32_tools/cmm_lsp/test_cli_conversion.spl
 
 use cmm_parser.{parse_cmm_source}
 
@@ -324,7 +324,7 @@ fn run_cli_conversion_tests():
         script_dir = dir_of(all_args[0])
     var fixtures_dir = script_dir + "/test_fixtures"
     if script_dir == "":
-        fixtures_dir = "examples/10_tooling/cmm_lsp/test_fixtures"
+        fixtures_dir = "examples/10_tooling/trace32_tools/test_fixtures"
 
     val expected_cli_dir = fixtures_dir + "/expected_cli"
 

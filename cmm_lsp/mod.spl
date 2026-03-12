@@ -4,12 +4,12 @@
 # implemented in Simple language.
 #
 # Usage:
-#   simple examples/10_tooling/cmm_lsp/mod.spl --lsp          # Start LSP server (stdio)
-#   simple examples/10_tooling/cmm_lsp/mod.spl parse file.cmm  # Parse and print AST
-#   simple examples/10_tooling/cmm_lsp/mod.spl check file.cmm  # Check for errors
-#   simple examples/10_tooling/cmm_lsp/mod.spl bulk /opt/t32/demo  # Bulk parse CMM files
-#   simple examples/10_tooling/cmm_lsp/mod.spl verify file.cmm  # Deep validation report
-#   simple examples/10_tooling/cmm_lsp/mod.spl --version       # Show version
+#   simple examples/10_tooling/trace32_tools/cmm_lsp/mod.spl --lsp          # Start LSP server (stdio)
+#   simple examples/10_tooling/trace32_tools/cmm_lsp/mod.spl parse file.cmm  # Parse and print AST
+#   simple examples/10_tooling/trace32_tools/cmm_lsp/mod.spl check file.cmm  # Check for errors
+#   simple examples/10_tooling/trace32_tools/cmm_lsp/mod.spl bulk /opt/t32/demo  # Bulk parse CMM files
+#   simple examples/10_tooling/trace32_tools/cmm_lsp/mod.spl verify file.cmm  # Deep validation report
+#   simple examples/10_tooling/trace32_tools/cmm_lsp/mod.spl --version       # Show version
 
 use cmm_parser.{parse_cmm_source, parse_cmm_file}
 use cmm_ast.{CmmStmt}
