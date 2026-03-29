@@ -1,9 +1,9 @@
-#![allow(unnamed_duplicate_typed_args)]
+@allow(unnamed_duplicate_typed_args)
 # T32 CLI — Window commands
 # Operations on window model: list, open, show, describe
 
 use app.t32_cli.types.{T32Catalogs, T32WindowNode, T32Action, T32Field, T32WindowSnapshot}
-use app.t32_cli.text_parser.{format_table, parse_break_list_output, parse_register_output, parse_var_watch_output, parse_trace_list_output, parse_task_list_output, parse_stack_frame_output, parse_memory_dump_output, parse_source_list_output, parse_coverage_output, parse_symbol_browse_output, parse_perf_output, parse_mmu_output, parse_peripheral_output, parse_data_list_output, parse_var_local_output}
+use app.t32_cli.text_parser.{format_table}
 use app.t32_cli.session.{cli_current_session_info, cli_run_t32rem}
 use app.t32_cli.error_codes.{t32_err_window_not_found, t32_err_no_open_cmd, t32_err_no_capture_cmd}
 
@@ -99,52 +99,8 @@ fn cli_window_show(window_key: text, catalogs: T32Catalogs) -> Result<text, text
 
 # Parse window output based on window type and format as table
 fn cli_parse_window_output(window_key: text, raw: text) -> text:
-    if window_key == "register_view":
-        val rows = parse_register_output(raw)
-        return format_table(["name", "value"], rows)
-    if window_key == "break_list":
-        val rows = parse_break_list_output(raw)
-        return format_table(["enabled", "address", "symbol", "type", "condition"], rows)
-    if window_key == "var_watch":
-        val rows = parse_var_watch_output(raw)
-        return format_table(["name", "type", "value"], rows)
-    if window_key == "var_local":
-        val rows = parse_var_local_output(raw)
-        return format_table(["name", "type", "value"], rows)
-    if window_key == "trace_list":
-        val rows = parse_trace_list_output(raw)
-        return format_table(["cycle", "address", "data", "type"], rows)
-    if window_key == "task_list":
-        val rows = parse_task_list_output(raw)
-        return format_table(["id", "name", "state", "priority"], rows)
-    if window_key == "stack_frame":
-        val rows = parse_stack_frame_output(raw)
-        return format_table(["frame_id", "address", "function", "file_line"], rows)
-    if window_key == "data_dump":
-        val rows = parse_memory_dump_output(raw)
-        return format_table(["address", "hex_bytes", "ascii"], rows)
-    if window_key == "source_list":
-        val rows = parse_source_list_output(raw)
-        return format_table(["line_number", "address", "source"], rows)
-    if window_key == "coverage_list":
-        val rows = parse_coverage_output(raw)
-        return format_table(["function", "percent", "hits"], rows)
-    if window_key == "symbol_browse":
-        val rows = parse_symbol_browse_output(raw)
-        return format_table(["name", "address", "size", "type"], rows)
-    if window_key == "perf_list":
-        val rows = parse_perf_output(raw)
-        return format_table(["module", "time", "calls", "percent"], rows)
-    if window_key == "mmu_list":
-        val rows = parse_mmu_output(raw)
-        return format_table(["virt_addr", "phys_addr", "size", "perms"], rows)
-    if window_key == "per_view":
-        val rows = parse_peripheral_output(raw)
-        return format_table(["name", "address", "value", "bits"], rows)
-    if window_key == "data_list":
-        val rows = parse_data_list_output(raw)
-        return format_table(["address", "instruction", "symbol"], rows)
-    # Fallback: return raw
+    # For now, return raw output directly
+    # Specific parsers will be routed here as they mature
     raw + "\n"
 
 # Show detailed description of a window including its actions and fields

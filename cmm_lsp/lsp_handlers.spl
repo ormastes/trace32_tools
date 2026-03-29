@@ -22,6 +22,7 @@ use cmm_diagnostics.{CmmDiagnostic, CmmDiagnosticKind}
 use cmm_analyzer.{CmmAnalysisResult, CmmSymbolTable, CmmSymbol, CmmSymbolKind}
 use lsp_json.{JsonPair, json_object, json_array, json_string, json_number, json_bool, json_null}
 use lsp_json.{json_get_string, json_get_int, json_get_object, escape_json}
+use cmm_text_helpers.{is_word_char}
 
 # ---------------------------------------------------------------------------
 # initialize
@@ -697,23 +698,6 @@ fn get_word_before_dot(content: text, line: i64, character: i64) -> text:
         return ""
     line_text[start:dot_pos]
 
-# Check if a character is part of a word (letters, digits, dot, underscore, ampersand).
-fn is_word_char(ch: text) -> bool:
-    if ch.len() != 1:
-        return false
-    # A-Z
-    if ch >= "A" and ch <= "Z":
-        return true
-    # a-z
-    if ch >= "a" and ch <= "z":
-        return true
-    # 0-9
-    if ch >= "0" and ch <= "9":
-        return true
-    # dot, underscore, ampersand
-    if ch == "." or ch == "_" or ch == "&":
-        return true
-    false
 
 # Strip a leading '&' from a word if present.
 fn strip_leading_ampersand(word: text) -> text:

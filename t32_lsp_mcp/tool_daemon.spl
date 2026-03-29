@@ -1,0 +1,73 @@
+@allow(unnamed_duplicate_typed_args)
+# T32 LSP MCP — Persistent tool daemon
+#
+# Loads the heavy CMM parser/analyzer stack once, then processes file-backed
+# requests from the lightweight MCP front-end.
+
+use t32_lsp_mcp.tools.{handle_cmm_parse, handle_cmm_diagnostics, handle_cmm_complete, handle_cmm_hover, handle_cmm_symbols, handle_cmm_validate_cli}
+
+extern fn sys_get_args() -> [text]
+extern fn rt_dir_list(path: text) -> [text]
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+fn daemon_arg0_is_script(arg0: text) -> bool:
+    arg0.ends_with(".spl") or arg0.ends_with("tool_daemon") or arg0.ends_with("tool_daemon.spl")
+
+fn main():
+    val raw_args = sys_get_args()
+    var args = raw_args
+    if args.len() >= 2 and not args[0].ends_with(".spl") and args[1].ends_with(".spl"):
+        args = args[2:args.len()]
+    elif args.len() >= 1 and daemon_arg0_is_script(args[0]):
+        args = args[1:args.len()]
+
+    val root = if args.len() >= 1: args[0] else: "/tmp/t32_lsp_mcp_daemon"
+    rt_process_run("/bin/sh", ["-c", "mkdir -p " + root])
+    rt_file_write_text(root + "/ready", "ready")
+
+    while true:
+        val entries = rt_dir_list(root) ?? []
+        var handled = false
+        var i = 0
+        while i < entries.len():
+            val name = entries[i]
+            if name.ends_with(".req"):
+                handled = true
+                daemon_handle_request(root, root + "/" + name)
+            i = i + 1
+        if not handled:
+            rt_process_run("/bin/sh", ["-c", "sleep 0.05"])
+
+fn daemon_handle_request(root: text, req_path: text):
+    val raw = rt_file_read_text(req_path) ?? ""
+    val lines = raw.split("\n")
+    if lines.len() < 4:
+        rt_file_delete(req_path)
+        return
+
+    val id = lines[0]
+    val tool_name = lines[1]
+    val args_path = lines[2]
+    val response_path = lines[3]
+    val args_raw = rt_file_read_text(args_path) ?? "null"
+    val response = daemon_dispatch_tool(id, tool_name, args_raw)
+    rt_file_write_text(response_path, response)
+    rt_file_delete(req_path)
+
+fn daemon_dispatch_tool(id: text, tool_name: text, args_raw: text) -> text:
+    if tool_name == "cmm_parse":
+        return handle_cmm_parse(id, args_raw)
+    if tool_name == "cmm_diagnostics":
+        return handle_cmm_diagnostics(id, args_raw)
+    if tool_name == "cmm_complete":
+        return handle_cmm_complete(id, args_raw)
+    if tool_name == "cmm_hover":
+        return handle_cmm_hover(id, args_raw)
+    if tool_name == "cmm_symbols":
+        return handle_cmm_symbols(id, args_raw)
+    if tool_name == "cmm_validate_cli":
+        return handle_cmm_validate_cli(id, args_raw)
+    ""

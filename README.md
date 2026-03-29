@@ -17,7 +17,7 @@ Or download from [GitHub Releases](https://github.com/ormastes/simple/releases?q
 
 | Asset | Platform | Description |
 |-------|----------|-------------|
-| `t32-mcp-server` | Linux, Windows | TRACE32 debug session control — 20 MCP tools |
+| `t32-mcp-server` | Linux, Windows | TRACE32 debug session control — 23 MCP tools |
 | `t32-lsp-mcp-server` | Linux, Windows | CMM language intelligence — 6 MCP tools |
 | `cmm-lsp` | Linux, Windows | CMM Language Server executable (LSP over stdio) |
 | `cmm-lsp-claude-plugin-${VERSION}.tar.gz` | Any | Claude Code plugin bundle data for marketplace-based installs from a repo checkout |
@@ -161,7 +161,7 @@ printf 'Content-Length: %s\r\n\r\n%s' "${#msg}" "$msg" | \
 
 ## Tools
 
-### T32 MCP Server (20 tools)
+### T32 MCP Server (23 tools)
 
 Controls live TRACE32 debug sessions. Requires a running TRACE32 PowerView instance.
 
@@ -173,6 +173,14 @@ Controls live TRACE32 debug sessions. Requires a running TRACE32 PowerView insta
 | **Window** | `t32_window_list`, `t32_window_open`, `t32_window_capture`, `t32_window_describe`, `t32_screenshot` | Capture register views, memory dumps, source listings |
 | **Action** | `t32_action_invoke`, `t32_field_get`, `t32_field_set` | Named actions from SDN catalogs |
 | **History** | `t32_history_tail`, `t32_resources_list`, `t32_resource_read` | Command history and MCP resources |
+
+`t32_cmd_run` and `t32_cmm_run` include headless blocking detection. GUI/input PRACTICE commands such as `DIALOG.*`, `ENTER`, `INKEY`, `PAUSE`, and `SCREEN.WAIT` return a blocked tool result unless `force: "true"` is passed.
+
+The built-in window catalog now includes additional status views:
+- `riscv_csr_view`
+- `flash_status`
+- `system_status`
+- `nexus_trace`
 
 **Example workflow:**
 
@@ -277,7 +285,7 @@ Once the T32 MCP servers and CMM LSP plugin are installed, try these prompts in 
 ```bash
 cd /path/to/simple
 
-# 1. T32 MCP — live debug session control (20 tools)
+# 1. T32 MCP — live debug session control (23 tools)
 claude mcp add t32-mcp -- \
   /absolute/path/to/simple/bin/release/simple \
   /absolute/path/to/simple/examples/10_tooling/trace32_tools/t32_mcp/main.spl
@@ -309,6 +317,52 @@ claude plugin install cmm-lsp@simple-local
 | t32-cli | Yes | Interactive session management |
 
 **TRACE32 setup:** Enable the Remote API in PowerView: `RCL.Port 20000` or set `RCL=NETASSIST` in your `config.t32`.
+
+## MCP Config
+
+The T32 MCP server reads `config/t32/t32_mcp.sdn` for default connection settings:
+
+```sdn
+connection
+  default_port: 20000
+  default_host: localhost
+  rcl_port: 20000
+  rcl_host: localhost
+  backend_preference: t32rem
+```
+
+Notes:
+- CLI flags still override config.
+- Environment variables such as `T32_DEFAULT_HOST`, `T32_DEFAULT_PORT`, `T32_RCL_HOST`, `T32_RCL_PORT`, and `T32_BACKEND_PREFERENCE` override the file.
+- `backend_preference: python_rcl` prefers the Python RCL bridge when it is installed.
+
+The window catalog lives in `config/t32/catalogs/windows.sdn`. Entries may include optional metadata such as `capture_mode`, `arch`, and `notes`. The MCP exposes that metadata through `t32_window_list`, `t32_window_describe`, and the `t32:///windows` resource.
+
+## Blocking Guard
+
+`t32_check_blocking()` is the headless guard used by both command tools.
+
+- `BLOCK` prevents execution unless `force: "true"` is set
+- `WARN` allows execution but returns cautionary metadata
+- `INFO` reports no-op display commands in headless mode
+
+Typical blocking commands:
+- `DIALOG.OK`, `DIALOG.YESNO`, `DIALOG.FILE`, `DIALOG.STRING`
+- `ENTER`, `INKEY`, `PAUSE`, `STOP`
+- `SCREEN.WAIT`
+
+Typical non-blocking notes:
+- `SCREEN.ON`
+- `WINPOS`
+- timing-sensitive `WAIT`
+
+Example:
+
+```text
+t32_cmd_run(command: "ENTER")
+```
+
+returns a blocked result with warnings and a hint to use `force: "true"` only when the caller really intends to bypass the guard.
 
 ---
 

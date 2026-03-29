@@ -1,0 +1,256 @@
+# CMM (PRACTICE Script) Parser — Shared Core
+#
+# Shared parser state and ASCII case-folding helpers extracted to break the
+# import cycle between `cmm_parser.spl`, `cmm_parser_expr.spl`, and
+# `cmm_parser_stmts.spl`.
+
+use cmm_tokens.{CmmTokenKind, CmmToken}
+
+export CmmParser, CmmParseError, to_upper_cmm
+
+# Parse error with source location
+struct CmmParseError:
+    message: text
+    line: i64
+    column: i64
+
+# Main parser state. Methods are distributed across multiple files via impl
+# blocks that all import this shared core.
+class CmmParser:
+    tokens: [CmmToken]
+    current: i64
+    errors: [text]
+
+impl CmmParser:
+    fn is_at_end() -> bool:
+        if self.current >= self.tokens.len():
+            true
+        else:
+            match self.tokens[self.current].kind:
+                case CmmTokenKind.Eof: true
+                case _: false
+
+    fn peek() -> CmmToken:
+        if self.current < self.tokens.len():
+            self.tokens[self.current]
+        else:
+            self.tokens[self.tokens.len() - 1]
+
+    fn peek_ahead(offset: i64) -> CmmToken:
+        val idx = self.current + offset
+        if idx < self.tokens.len():
+            self.tokens[idx]
+        else:
+            self.tokens[self.tokens.len() - 1]
+
+    fn previous() -> CmmToken:
+        if self.current > 0:
+            self.tokens[self.current - 1]
+        else:
+            self.tokens[0]
+
+    me advance() -> CmmToken:
+        if not self.is_at_end():
+            self.current = self.current + 1
+        self.previous()
+
+    fn check_kind(kind_name: text) -> bool:
+        if self.is_at_end():
+            return false
+        val tok = self.peek()
+        match tok.kind:
+            case CmmTokenKind.Identifier(name): kind_name == "Identifier"
+            case CmmTokenKind.DotCommand(name): kind_name == "DotCommand"
+            case CmmTokenKind.MacroRef(name): kind_name == "MacroRef"
+            case CmmTokenKind.MacroRecRef(name): kind_name == "MacroRecRef"
+            case CmmTokenKind.HexNumber(n): kind_name == "HexNumber"
+            case CmmTokenKind.BinNumber(n): kind_name == "BinNumber"
+            case CmmTokenKind.DecNumber(n): kind_name == "DecNumber"
+            case CmmTokenKind.FloatNumber(n): kind_name == "FloatNumber"
+            case CmmTokenKind.IntNumber(n): kind_name == "IntNumber"
+            case CmmTokenKind.HexMask(n): kind_name == "HexMask"
+            case CmmTokenKind.BinMask(n): kind_name == "BinMask"
+            case CmmTokenKind.TimeLiteral(t): kind_name == "TimeLiteral"
+            case CmmTokenKind.StringLit(s): kind_name == "StringLit"
+            case CmmTokenKind.CharLiteral(c): kind_name == "CharLiteral"
+            case CmmTokenKind.Label(l): kind_name == "Label"
+            case CmmTokenKind.DeviceSelector(d): kind_name == "DeviceSelector"
+            case CmmTokenKind.Option(o): kind_name == "Option"
+            case CmmTokenKind.FileChannel(f): kind_name == "FileChannel"
+            case CmmTokenKind.Comment(c): kind_name == "Comment"
+            case CmmTokenKind.Newline: kind_name == "Newline"
+            case CmmTokenKind.Eof: kind_name == "Eof"
+            case CmmTokenKind.LParen: kind_name == "LParen"
+            case CmmTokenKind.RParen: kind_name == "RParen"
+            case CmmTokenKind.LBrace: kind_name == "LBrace"
+            case CmmTokenKind.RBrace: kind_name == "RBrace"
+            case CmmTokenKind.Comma: kind_name == "Comma"
+            case CmmTokenKind.Colon: kind_name == "Colon"
+            case CmmTokenKind.Dot: kind_name == "Dot"
+            case CmmTokenKind.Backslash: kind_name == "Backslash"
+            case CmmTokenKind.LBracket: kind_name == "LBracket"
+            case CmmTokenKind.RBracket: kind_name == "RBracket"
+            case CmmTokenKind.Question: kind_name == "Question"
+            case _: false
+
+    fn check_op(op: text) -> bool:
+        if self.is_at_end():
+            return false
+        val tok = self.peek()
+        match tok.kind:
+            case CmmTokenKind.Plus: op == "+"
+            case CmmTokenKind.Minus: op == "-"
+            case CmmTokenKind.Star: op == "*"
+            case CmmTokenKind.Slash: op == "/"
+            case CmmTokenKind.Percent: op == "%"
+            case CmmTokenKind.Eq: op == "=="
+            case CmmTokenKind.NotEq: op == "!="
+            case CmmTokenKind.Lt: op == "<"
+            case CmmTokenKind.Gt: op == ">"
+            case CmmTokenKind.LtEq: op == "<="
+            case CmmTokenKind.GtEq: op == ">="
+            case CmmTokenKind.ShiftLeft: op == "<<"
+            case CmmTokenKind.ShiftRight: op == ">>"
+            case CmmTokenKind.Ampersand: op == "&"
+            case CmmTokenKind.Pipe: op == "|"
+            case CmmTokenKind.Caret: op == "^"
+            case CmmTokenKind.Tilde: op == "~"
+            case CmmTokenKind.Bang: op == "!"
+            case CmmTokenKind.LogicalAnd: op == "&&"
+            case CmmTokenKind.LogicalOr: op == "||"
+            case CmmTokenKind.LogicalXor: op == "^^"
+            case CmmTokenKind.Assign: op == "="
+            case CmmTokenKind.RangeTo: op == "--"
+            case CmmTokenKind.RangeOffset: op == "++"
+            case CmmTokenKind.RangeDots: op == ".."
+            case _: false
+
+    me consume_op(op: text) -> bool:
+        if self.check_op(op):
+            self.advance()
+            true
+        else:
+            false
+
+    fn check_classic_and() -> bool:
+        if self.is_at_end(): return false
+        match self.peek().kind:
+            case CmmTokenKind.ClassicAnd(t): true
+            case _: false
+
+    fn check_classic_or() -> bool:
+        if self.is_at_end(): return false
+        match self.peek().kind:
+            case CmmTokenKind.ClassicOr(t): true
+            case _: false
+
+    fn check_classic_xor() -> bool:
+        if self.is_at_end(): return false
+        match self.peek().kind:
+            case CmmTokenKind.ClassicXor(t): true
+            case _: false
+
+    fn check_classic_not() -> bool:
+        if self.is_at_end(): return false
+        match self.peek().kind:
+            case CmmTokenKind.ClassicNot(t): true
+            case _: false
+
+    fn at_stmt_end() -> bool:
+        if self.is_at_end():
+            return true
+        match self.peek().kind:
+            case CmmTokenKind.Newline: true
+            case CmmTokenKind.Eof: true
+            case CmmTokenKind.Comment(c): true
+            case _: false
+
+    me skip_newlines():
+        while not self.is_at_end():
+            match self.peek().kind:
+                case CmmTokenKind.Newline: self.advance()
+                case CmmTokenKind.Comment(c): self.advance()
+                case _: return
+
+    fn peek_identifier() -> text?:
+        if self.is_at_end(): return nil
+        match self.peek().kind:
+            case CmmTokenKind.Identifier(name): name
+            case _: nil
+
+    fn check_cmm_keyword(keyword: text) -> bool:
+        val name = self.peek_identifier()
+        if name.?:
+            val n = name ?? ""
+            to_upper_cmm(n) == keyword
+        else:
+            false
+
+    me skip_to_next_line():
+        while not self.is_at_end():
+            match self.peek().kind:
+                case CmmTokenKind.Newline: return
+                case CmmTokenKind.Eof: return
+                case _: self.advance()
+
+    me skip_to_next_line_or_rparen():
+        while not self.is_at_end():
+            match self.peek().kind:
+                case CmmTokenKind.Newline: return
+                case CmmTokenKind.Eof: return
+                case CmmTokenKind.RParen: return
+                case _: self.advance()
+
+    fn make_error(message: text) -> CmmParseError:
+        val tok = self.peek()
+        CmmParseError(message: message, line: tok.line, column: tok.column)
+
+# --- Case-insensitive helpers ---
+
+fn to_upper_cmm(s: text) -> text:
+    var needs_conversion = false
+    var i = 0
+    while i < s.len():
+        val ch = s[i:i + 1]
+        if ch >= "a" and ch <= "z":
+            needs_conversion = true
+            break
+        i = i + 1
+    if not needs_conversion:
+        return s
+    var parts: [text] = []
+    i = 0
+    while i < s.len():
+        val ch = s[i:i + 1]
+        parts.push(char_to_upper(ch))
+        i = i + 1
+    parts.join("")
+
+fn char_to_upper(ch: text) -> text:
+    if ch == "a": return "A"
+    if ch == "b": return "B"
+    if ch == "c": return "C"
+    if ch == "d": return "D"
+    if ch == "e": return "E"
+    if ch == "f": return "F"
+    if ch == "g": return "G"
+    if ch == "h": return "H"
+    if ch == "i": return "I"
+    if ch == "j": return "J"
+    if ch == "k": return "K"
+    if ch == "l": return "L"
+    if ch == "m": return "M"
+    if ch == "n": return "N"
+    if ch == "o": return "O"
+    if ch == "p": return "P"
+    if ch == "q": return "Q"
+    if ch == "r": return "R"
+    if ch == "s": return "S"
+    if ch == "t": return "T"
+    if ch == "u": return "U"
+    if ch == "v": return "V"
+    if ch == "w": return "W"
+    if ch == "x": return "X"
+    if ch == "y": return "Y"
+    if ch == "z": return "Z"
+    ch

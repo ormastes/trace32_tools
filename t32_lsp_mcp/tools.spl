@@ -1,4 +1,4 @@
-#![allow(unnamed_duplicate_typed_args)]
+@allow(unnamed_duplicate_typed_args)
 # T32 LSP MCP — Tool implementations
 # Each handler receives the request id and raw arguments JSON, returns a JSON response.
 
@@ -79,7 +79,7 @@ fn handle_cmm_complete(id: text, args: text) -> text:
     val target_char = int(char_str)
 
     # Extract the word prefix at the given position
-    val lines = split_to_lines(source)
+    val lines = source.split("\n")
     var prefix = extract_word_from_lines(lines, target_line, target_char)
 
     # Get completions from the command database
@@ -119,7 +119,7 @@ fn handle_cmm_hover(id: text, args: text) -> text:
     val target_char = int(char_str)
 
     # Extract the word at the given position
-    val lines = split_to_lines(source)
+    val lines = source.split("\n")
     var word = extract_word_from_lines(lines, target_line, target_char)
 
     if word == "":
@@ -197,28 +197,28 @@ fn handle_cmm_validate_cli(id: text, args: text) -> text:
         issues.push("Missing SCREEN.OFF command")
 
     # Check 3: AREA channel setup
-    val lower_source = to_lower_cli(source)
-    val has_area_create = contains_text(lower_source, "area.create")
-    val has_area_select = contains_text(lower_source, "area.select")
+    val lower_source = source.to_lower()
+    val has_area_create = lower_source.contains("area.create")
+    val has_area_select = lower_source.contains("area.select")
     if not has_area_create or not has_area_select:
         issues.push("Missing AREA.Create/Select setup")
 
     # Check 4: ON ERROR handler
-    val has_error_handler = (contains_text(lower_source, "on error") or contains_text(lower_source, "on.error") or contains_text(lower_source, "globalon error"))
+    val has_error_handler = (lower_source.contains("on error") or lower_source.contains("on.error") or lower_source.contains("globalon error"))
     if not has_error_handler:
         issues.push("Missing ON ERROR handler")
 
     # Check 5: Metadata headers
-    val has_target = contains_text(source, "@target:")
-    val has_purpose = contains_text(source, "@purpose:")
+    val has_target = source.contains("@target:")
+    val has_purpose = source.contains("@purpose:")
     if not has_target:
         issues.push("Missing @target: metadata header")
     if not has_purpose:
         issues.push("Missing @purpose: metadata header")
 
     # Check 6: ENDDO with return value
-    val has_enddo_true = contains_text(source, "ENDDO TRUE()")
-    val has_enddo_false = contains_text(source, "ENDDO FALSE()")
+    val has_enddo_true = source.contains("ENDDO TRUE()")
+    val has_enddo_false = source.contains("ENDDO FALSE()")
     if not has_enddo_true and not has_enddo_false:
         issues.push("Missing ENDDO TRUE()/FALSE() return value")
 
@@ -248,41 +248,31 @@ fn handle_cmm_validate_cli(id: text, args: text) -> text:
     )
     lsp_make_tool_result(id, result)
 
-# --- Helper: convert text to lines ---
-
-fn split_to_lines(content: text) -> [text]:
-    var lines: [text] = []
-    var start = 0
-    var i = 0
-    while i < content.len():
-        if content[i:i + 1] == "\n":
-            lines.push(content[start:i])
-            start = i + 1
-        i = i + 1
-    if start <= content.len():
-        lines.push(content[start:content.len()])
-    lines
-
 fn line_text_for_position(lines: [text], target_line: i64) -> text:
     # MCP/LSP callers often use 0-based lines; tolerate both 0-based and 1-based.
-    if target_line >= 0 and target_line < lines.len():
-        return lines[target_line]
-    if target_line >= 1 and target_line <= lines.len():
-        return lines[target_line - 1]
+    if target_line >= 0:
+        if target_line < lines.len():
+            return lines[target_line]
+    if target_line >= 1:
+        if target_line <= lines.len():
+            return lines[target_line - 1]
     ""
 
 fn extract_word_from_lines(lines: [text], target_line: i64, target_char: i64) -> text:
     var word = ""
-    if target_line >= 1 and target_line <= lines.len():
-        val line_text_1 = lines[target_line - 1]
-        word = extract_word_at(line_text_1, target_char)
-        if word == "":
-            word = extract_word_at(line_text_1, target_char + 1)
-    if word == "" and target_line >= 0 and target_line < lines.len():
-        val line_text_0 = lines[target_line]
-        word = extract_word_at(line_text_0, target_char)
-        if word == "":
-            word = extract_word_at(line_text_0, target_char + 1)
+    if target_line >= 1:
+        if target_line <= lines.len():
+            val line_text_1 = lines[target_line - 1]
+            word = extract_word_at(line_text_1, target_char)
+            if word == "":
+                word = extract_word_at(line_text_1, target_char + 1)
+    if word == "":
+        if target_line >= 0:
+            if target_line < lines.len():
+                val line_text_0 = lines[target_line]
+                word = extract_word_at(line_text_0, target_char)
+                if word == "":
+                    word = extract_word_at(line_text_0, target_char + 1)
     word
 
 # --- Helper: extract word at character offset ---
@@ -342,11 +332,11 @@ fn is_word_char(ch: text) -> bool:
     false
 
 fn lookup_hover_text(db: CmmCommandDB, word: text) -> text:
-    val lower_word = to_lower_cli(word)
+    val lower_word = word.to_lower()
     var i = 0
     while i < db.commands.len():
         val cmd = db.commands[i]
-        if to_lower_cli(cmd.full_name) == lower_word or to_lower_cli(cmd.short_name) == lower_word:
+        if cmd.full_name.to_lower() == lower_word or cmd.short_name.to_lower() == lower_word:
             var hover_text = cmd.full_name
             if cmd.description != "":
                 hover_text = hover_text + " - " + cmd.description
@@ -367,107 +357,30 @@ fn symbol_kind_str(kind: CmmSymbolKind) -> text:
         case CmmSymbolKind.SubroutineSym: "subroutine"
         case CmmSymbolKind.FileRefSym: "file_ref"
 
-# --- CLI validation helpers (reused from test_cli_conversion.spl) ---
-
-fn to_lower_cli(s: text) -> text:
-    var r = ""
-    var i = 0
-    while i < s.len():
-        val ch = s[i:i + 1]
-        r = r + to_lower_char_cli(ch)
-        i = i + 1
-    r
-
-fn to_lower_char_cli(ch: text) -> text:
-    if ch == "A": return "a"
-    if ch == "B": return "b"
-    if ch == "C": return "c"
-    if ch == "D": return "d"
-    if ch == "E": return "e"
-    if ch == "F": return "f"
-    if ch == "G": return "g"
-    if ch == "H": return "h"
-    if ch == "I": return "i"
-    if ch == "J": return "j"
-    if ch == "K": return "k"
-    if ch == "L": return "l"
-    if ch == "M": return "m"
-    if ch == "N": return "n"
-    if ch == "O": return "o"
-    if ch == "P": return "p"
-    if ch == "Q": return "q"
-    if ch == "R": return "r"
-    if ch == "S": return "s"
-    if ch == "T": return "t"
-    if ch == "U": return "u"
-    if ch == "V": return "v"
-    if ch == "W": return "w"
-    if ch == "X": return "x"
-    if ch == "Y": return "y"
-    if ch == "Z": return "z"
-    ch
-
-fn contains_text(hay: text, needle: text) -> bool:
-    if needle.len() > hay.len():
-        return false
-    var i = 0
-    while i <= hay.len() - needle.len():
-        if hay[i:i + needle.len()] == needle:
-            return true
-        i = i + 1
-    false
-
-fn starts_with_text(s: text, prefix: text) -> bool:
-    if prefix.len() > s.len():
-        return false
-    s[0:prefix.len()] == prefix
-
-fn ends_with_text(s: text, suffix: text) -> bool:
-    if suffix.len() > s.len():
-        return false
-    s[s.len() - suffix.len():s.len()] == suffix
-
-fn trim_start_text(s: text) -> text:
-    var i = 0
-    while i < s.len():
-        val ch = s[i:i + 1]
-        if ch != " " and ch != "\t":
-            return s[i:s.len()]
-        i = i + 1
-    ""
-
-fn has_no_spaces_text(s: text) -> bool:
-    var i = 0
-    while i < s.len():
-        if s[i:i + 1] == " ":
-            return false
-        i = i + 1
-    true
-
 fn check_gui_keywords(content: text) -> [text]:
     val banned: [text] = ["dialog", "winpos", "winclear", "winpage", "wintabs", "framepos", "toolbar", "statusbar", "screen.always", "screen.alw", "menu.reprogram", "area.view", "autostore", "menu.rp", "toolitem", "winresume", "winfocus"]
     var violations: [text] = []
-    val lines = split_to_lines(content)
+    val lines = content.split("\n")
     var li = 0
     while li < lines.len():
-        val trimmed = trim_start_text(lines[li])
+        val trimmed = lines[li].trim_start()
         if trimmed.len() == 0:
             li = li + 1
             continue
-        val lowered = to_lower_cli(trimmed)
+        val lowered = trimmed.to_lower()
         # Skip comments
-        if starts_with_text(lowered, ";"):
+        if lowered.starts_with(";"):
             li = li + 1
             continue
         # Skip labels (e.g. dialog_closed:)
-        if ends_with_text(trimmed, ":") and has_no_spaces_text(trimmed):
+        if trimmed.ends_with(":") and not trimmed.contains(" "):
             li = li + 1
             continue
         # Check each banned keyword
         var bi = 0
         while bi < banned.len():
             val kw = banned[bi]
-            if starts_with_text(lowered, kw):
+            if lowered.starts_with(kw):
                 if lowered.len() == kw.len():
                     violations.push(kw)
                 else:
@@ -479,13 +392,13 @@ fn check_gui_keywords(content: text) -> [text]:
     violations
 
 fn check_has_command(content: text, cmd: text) -> bool:
-    val lines = split_to_lines(content)
+    val lines = content.split("\n")
     var li = 0
     while li < lines.len():
-        val trimmed = trim_start_text(lines[li])
-        if trimmed.len() > 0 and not starts_with_text(trimmed, ";"):
-            val lowered = to_lower_cli(trimmed)
-            if starts_with_text(lowered, cmd):
+        val trimmed = lines[li].trim_start()
+        if trimmed.len() > 0 and not trimmed.starts_with(";"):
+            val lowered = trimmed.to_lower()
+            if lowered.starts_with(cmd):
                 return true
         li = li + 1
     false

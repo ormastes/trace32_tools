@@ -1,0 +1,225 @@
+@allow(unnamed_duplicate_typed_args)
+# T32 MCP — Native ctypes bridge to t32api64.so via DynLib
+#
+# Wraps TRACE32 Remote C API for in-process, persistent connection.
+# Backend priority: ctypes (this) → t32rem → python_rcl
+#
+# Requires compiled binary mode (spl_dlopen not available in interpreter).
+
+# --- FFI primitives (zero stdlib import pattern) ---
+
+extern fn spl_dlopen(path: text) -> i64
+extern fn spl_dlsym(handle: i64, name: text) -> i64
+extern fn spl_wffi_call_i64(fptr: i64, args: [i64], nargs: i64) -> i64
+extern fn spl_str_ptr(s: text) -> i64
+extern fn rt_cstring_to_text(ptr: i64) -> text
+extern fn rt_alloc(size: i64) -> i64
+extern fn rt_free(ptr: i64)
+extern fn rt_memset(dest: i64, byte_val: i64, len: i64) -> i64
+extern fn rt_ptr_read_i32(addr: i64, offset: i64) -> i32
+extern fn rt_env_get(name: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn stderr_write(data: text) -> i64
+extern fn stderr_flush() -> i64
+
+# --- Module state ---
+
+var _t32_lib_handle: i64 = 0
+var _t32_lib_path: text = ""
+var _t32_connected: bool = false
+var _t32_conn_host: text = ""
+var _t32_conn_port: i64 = 0
+var _t32_fptr_cache: {text: i64} = {}
+
+# --- Internal helpers ---
+
+fn _t32_ctypes_log(msg: text):
+    stderr_write("[t32-ctypes] " + msg + "\n")
+    stderr_flush()
+
+fn _t32_fptr(name: text) -> i64:
+    if _t32_fptr_cache.contains(name):
+        return _t32_fptr_cache[name]
+    val fptr = spl_dlsym(_t32_lib_handle, name)
+    _t32_fptr_cache[name] = fptr
+    fptr
+
+fn _t32c0(name: text) -> i64:
+    val fptr = _t32_fptr(name)
+    var args: [i64] = []
+    spl_wffi_call_i64(fptr, args, 0)
+
+fn _t32c1(name: text, a0: i64) -> i64:
+    val fptr = _t32_fptr(name)
+    var args: [i64] = []
+    args.push(a0)
+    spl_wffi_call_i64(fptr, args, 1)
+
+fn _t32c2(name: text, a0: i64, a1: i64) -> i64:
+    val fptr = _t32_fptr(name)
+    var args: [i64] = []
+    args.push(a0)
+    args.push(a1)
+    spl_wffi_call_i64(fptr, args, 2)
+
+# --- Library discovery and loading ---
+
+fn t32_ctypes_find_lib() -> text:
+    # 1. Module-level config (set from SDN or env in main.spl)
+    if T32_API_LIB_PATH != "" and rt_file_exists(T32_API_LIB_PATH):
+        return T32_API_LIB_PATH
+    # 2. T32_API_LIB env var (direct check as fallback)
+    val env_path = rt_env_get("T32_API_LIB") ?? ""
+    if env_path != "" and rt_file_exists(env_path):
+        return env_path
+    # 3. Common installation paths
+    val candidates = [
+        "/opt/t32/bin/pc_linux64/t32api64.so",
+        "/opt/t32/bin/t32api64.so",
+        "t32api64.so"
+    ]
+    for path in candidates:
+        if rt_file_exists(path):
+            return path
+    ""
+
+fn t32_ctypes_load() -> bool:
+    if _t32_lib_handle != 0:
+        return true
+    val lib_path = t32_ctypes_find_lib()
+    if lib_path == "":
+        return false
+    val handle = spl_dlopen(lib_path)
+    if handle == 0:
+        _t32_ctypes_log("failed to dlopen: " + lib_path)
+        return false
+    _t32_lib_handle = handle
+    _t32_lib_path = lib_path
+    _t32_ctypes_log("loaded " + lib_path)
+    true
+
+# --- Connection lifecycle ---
+
+fn t32_ctypes_init(host: text, port: i64) -> i64:
+    if _t32_lib_handle == 0:
+        return -1
+    # If already connected to a different host:port, disconnect first
+    if _t32_connected:
+        if _t32_conn_host != host or _t32_conn_port != port:
+            t32_ctypes_close()
+        else:
+            return 0
+    # T32_Config("NODE=", host)
+    var rc = _t32c2("T32_Config", spl_str_ptr("NODE="), spl_str_ptr(host))
+    if rc != 0:
+        _t32_ctypes_log("T32_Config NODE failed: " + str(rc))
+        return rc
+    # T32_Config("PORT=", port_str)
+    val port_str = str(port)
+    rc = _t32c2("T32_Config", spl_str_ptr("PORT="), spl_str_ptr(port_str))
+    if rc != 0:
+        _t32_ctypes_log("T32_Config PORT failed: " + str(rc))
+        return rc
+    # T32_Config("PACKLEN=", "1024")
+    rc = _t32c2("T32_Config", spl_str_ptr("PACKLEN="), spl_str_ptr("1024"))
+    if rc != 0:
+        _t32_ctypes_log("T32_Config PACKLEN failed: " + str(rc))
+        return rc
+    # T32_Init()
+    rc = _t32c0("T32_Init")
+    if rc != 0:
+        _t32_ctypes_log("T32_Init failed: " + str(rc))
+        return rc
+    # T32_Attach(1) — 1 = ICD device
+    rc = _t32c1("T32_Attach", 1)
+    if rc != 0:
+        _t32_ctypes_log("T32_Attach failed: " + str(rc))
+        _t32c0("T32_Exit")
+        return rc
+    _t32_connected = true
+    _t32_conn_host = host
+    _t32_conn_port = port
+    _t32_ctypes_log("connected to " + host + ":" + port_str)
+    0
+
+fn t32_ctypes_close():
+    if _t32_lib_handle != 0 and _t32_connected:
+        _t32c0("T32_Exit")
+    _t32_connected = false
+    _t32_conn_host = ""
+    _t32_conn_port = 0
+
+fn t32_ctypes_available() -> bool:
+    _t32_lib_handle != 0 and _t32_connected
+
+# --- Command execution ---
+
+fn t32_ctypes_cmd(command: text) -> (text, i64):
+    val rc = _t32c1("T32_Cmd", spl_str_ptr(command))
+    ("", rc)
+
+fn t32_ctypes_eval(expr: text) -> (text, i64):
+    # Send EVAL command
+    val eval_cmd = "EVAL " + expr
+    var rc = _t32c1("T32_Cmd", spl_str_ptr(eval_cmd))
+    if rc != 0:
+        return ("", rc)
+    # Read result into 256-byte buffer
+    val buf = rt_alloc(256)
+    rt_memset(buf, 0, 256)
+    rc = _t32c1("T32_EvalGet", buf)
+    if rc != 0:
+        rt_free(buf)
+        return ("", rc)
+    val result = rt_cstring_to_text(buf)
+    rt_free(buf)
+    (result, 0)
+
+fn t32_ctypes_ping() -> i64:
+    _t32c0("T32_Ping")
+
+# --- Status bar ---
+
+fn t32_ctypes_get_message() -> (text, i64):
+    val msg_buf = rt_alloc(256)
+    rt_memset(msg_buf, 0, 256)
+    val type_buf = rt_alloc(8)
+    rt_memset(type_buf, 0, 8)
+    val rc = _t32c2("T32_GetMessage", msg_buf, type_buf)
+    if rc != 0:
+        rt_free(msg_buf)
+        rt_free(type_buf)
+        return ("", -1)
+    val message = rt_cstring_to_text(msg_buf)
+    val msg_type = rt_ptr_read_i32(type_buf, 0)
+    rt_free(msg_buf)
+    rt_free(type_buf)
+    (message, i64(msg_type))
+
+fn t32_ctypes_get_practice_state() -> i64:
+    val state_buf = rt_alloc(8)
+    rt_memset(state_buf, 0, 8)
+    val rc = _t32c1("T32_GetPracticeState", state_buf)
+    if rc != 0:
+        rt_free(state_buf)
+        return -1
+    val state = rt_ptr_read_i32(state_buf, 0)
+    rt_free(state_buf)
+    i64(state)
+
+# --- Unified adapter (matches t32_run_remote signature) ---
+
+fn t32_ctypes_run_remote(session: McpT32Session, cmd: text) -> (text, i64):
+    val upper = cmd.trim().to_upper()
+    # Route EVAL commands → ctypes_eval (extracts result)
+    if upper.starts_with("EVAL "):
+        val expr = cmd.trim().substring(5, cmd.trim().len())
+        return t32_ctypes_eval(expr)
+    # Route PING → ctypes_ping
+    if upper == "PING":
+        val rc = t32_ctypes_ping()
+        if rc == 0:
+            return ("OK", 0)
+        return ("", rc)
+    # Everything else → T32_Cmd
+    t32_ctypes_cmd(cmd.trim())

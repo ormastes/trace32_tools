@@ -14,7 +14,8 @@
 use cmm_tokens.{CmmTokenKind, CmmToken}
 use cmm_ast.{CmmProgram, CmmStmt, CmmExpr, CmmLiteral, CmmSpan, CmmDialogItem}
 use cmm_ast.{span, span_range, merge_spans}
-use cmm_parser.{CmmParser, CmmParseError, to_upper_cmm}
+use cmm_dialog_model.{cmm_dialog_parse_modifier}
+use cmm_parser_core.{CmmParser, CmmParseError, to_upper_cmm}
 use cmm_parser_expr.{is_access_class}
 
 # Helper struct for flattened macro assignment detection.
@@ -30,13 +31,14 @@ struct PercentLineInfo:
     found: bool
     tokens_to_skip: i64
 
+
 impl CmmParser:
 
     # =========================================================================
     # Top-level statement dispatch
     # =========================================================================
 
-    me parse_statement() -> Result<CmmStmt, CmmParseError>:
+    me parse_statement_impl() -> Result<CmmStmt, CmmParseError>:
         val tok = self.peek()
 
         # --- Labels (must be first — emitted by lexer as Label token) ---
@@ -704,13 +706,14 @@ impl CmmParser:
             return self.parse_generic_command()
 
         self.advance()  # consume (
+        val modifier = cmm_dialog_parse_modifier(self)
         var items: [CmmDialogItem] = []
         self.skip_newlines()
 
         while not self.is_at_end():
             if self.check_kind("RParen"):
                 self.advance()  # consume )
-                return Ok(CmmStmt.DialogBlock(items, span(start_tok.line, start_tok.column)))
+                return Ok(CmmStmt.DialogBlock(modifier, items, span(start_tok.line, start_tok.column)))
             if self.check_kind("Newline"):
                 self.advance()
             else if self.check_kind("Comment"):
@@ -749,7 +752,8 @@ impl CmmParser:
             self.advance()  # consume widget keyword
             return self.parse_labeled_dialog_widget(label_name, widget_upper, widget_name)
 
-        # Non-label dialog items: HEADER, POS, TEXT, DEFBUTTON, BUTTON, LINE, CLOSE
+        # Non-label dialog items: HEADER, POS, TEXT, DEFBUTTON, BUTTON, EDIT,
+        # CHECKBOX, CHOOSEBOX, PULLDOWN, LINE, CLOSE
         match tok.kind:
             case CmmTokenKind.Identifier(name):
                 val upper = to_upper_cmm(name)
@@ -784,6 +788,30 @@ impl CmmParser:
                     val callback = self.consume_string_or_empty()
                     self.skip_to_next_line()
                     return Ok(CmmDialogItem.DlgButton("", btn_text, callback))
+
+                if upper == "EDIT":
+                    val default_val = self.consume_string_or_empty()
+                    val callback = self.consume_string_or_empty()
+                    self.skip_to_next_line()
+                    return Ok(CmmDialogItem.DlgEdit("", default_val, callback))
+
+                if upper == "CHECKBOX":
+                    val cb_text = self.consume_string_or_empty()
+                    val callback = self.consume_string_or_empty()
+                    self.skip_to_next_line()
+                    return Ok(CmmDialogItem.DlgCheckbox("", cb_text, callback))
+
+                if upper == "CHOOSEBOX":
+                    val cb_text = self.consume_string_or_empty()
+                    val callback = self.consume_string_or_empty()
+                    self.skip_to_next_line()
+                    return Ok(CmmDialogItem.DlgChoosebox("", cb_text, callback))
+
+                if upper == "PULLDOWN":
+                    val options = self.consume_string_or_empty()
+                    val callback = self.consume_string_or_empty()
+                    self.skip_to_next_line()
+                    return Ok(CmmDialogItem.DlgPulldown("", options, callback))
 
                 if upper == "LINE":
                     val group_label = self.consume_string_or_empty()
@@ -1012,13 +1040,13 @@ impl CmmParser:
             val cb_text = self.consume_string_or_empty()
             val callback = self.consume_string_or_empty()
             self.skip_to_next_line()
-            return Ok(CmmDialogItem.DlgChoosebox(cb_text, callback))
+            return Ok(CmmDialogItem.DlgChoosebox(label_name, cb_text, callback))
 
         if widget_upper == "PULLDOWN":
             val options = self.consume_string_or_empty()
             val callback = self.consume_string_or_empty()
             self.skip_to_next_line()
-            return Ok(CmmDialogItem.DlgPulldown(options, callback))
+            return Ok(CmmDialogItem.DlgPulldown(label_name, options, callback))
 
         # Unknown widget after label — skip line
         self.skip_to_next_line()
@@ -1250,3 +1278,6 @@ impl CmmParser:
         match self.parse_expression():
             case Ok(expr): expr
             case Err(e): CmmExpr.ExprEmpty
+
+fn parse_statement_entry(parser: CmmParser) -> Result<CmmStmt, CmmParseError>:
+    parser.parse_statement_impl()

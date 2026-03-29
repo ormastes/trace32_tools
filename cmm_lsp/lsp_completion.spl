@@ -15,6 +15,7 @@ use cmm_commands.{CmmCommandDB, CmmCommandInfo, build_command_db, get_completion
 use cmm_functions.{CmmFuncDB, CmmFuncInfo, build_function_db, get_function_completions}
 use cmm_analyzer.{CmmSymbolTable, CmmSymbol, CmmSymbolKind}
 use cmm_ast.{CmmProgram}
+use cmm_text_helpers.{escape_json}
 
 # ---------------------------------------------------------------------------
 # CompletionItem — mirrors LSP CompletionItem (simplified)
@@ -72,7 +73,7 @@ fn add_macro_completions(symbols: CmmSymbolTable, items: [CompletionItem]):
                 label: "&" + m.name,
                 kind: 6,
                 detail: m.scope + " macro",
-                documentation: "PRACTICE macro declared as " + m.scope + " at line " + int_to_text(m.def_line)
+                documentation: "PRACTICE macro declared as " + m.scope + " at line " + "{m.def_line}"
             ))
         i = i + 1
 
@@ -221,7 +222,7 @@ fn completion_to_json(item: CompletionItem) -> text:
     val q = "\""
     var s = "{"
     s = s + q + "label" + q + ": " + q + escape_json(item.label) + q + ", "
-    s = s + q + "kind" + q + ": " + int_to_text(item.kind) + ", "
+    s = s + q + "kind" + q + ": " + "{item.kind}" + ", "
     s = s + q + "detail" + q + ": " + q + escape_json(item.detail) + q + ", "
     s = s + q + "documentation" + q + ": "
     s = s + "{" + q + "kind" + q + ": " + q + "markdown" + q + ", "
@@ -253,27 +254,3 @@ fn find_char(s: text, ch: text) -> i64:
         i = i + 1
     -1
 
-# Escape special characters in a string for JSON output.
-fn escape_json(s: text) -> text:
-    var result = ""
-    var i = 0
-    while i < s.len():
-        val ch = s[i:i + 1]
-        if ch == "\\":
-            result = result + "\\\\"
-        else if ch == "\"":
-            result = result + "\\\""
-        else if ch == "\n":
-            result = result + "\\n"
-        else if ch == "\r":
-            result = result + "\\r"
-        else if ch == "\t":
-            result = result + "\\t"
-        else:
-            result = result + ch
-        i = i + 1
-    result
-
-# Convert an integer to its text representation.
-fn int_to_text(n: i64) -> text:
-    "{n}"

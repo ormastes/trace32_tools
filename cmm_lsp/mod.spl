@@ -19,6 +19,7 @@ use cmm_commands.{build_command_db}
 use cmm_functions.{build_function_db}
 use cmm_version.{default_config, config_for_version}
 use lsp_server.{start_lsp_server}
+use cmm_text_helpers.{is_cmm_file, has_extension}
 
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_exists(path: text) -> bool
@@ -338,7 +339,7 @@ fn cmd_bulk_parse(dir: text):
 
         # Read file and check for encrypted marker
         val content = rt_file_read_text(path) ?? ""
-        if starts_with(content, "trace32 encrypted cmm file"):
+        if content.starts_with("trace32 encrypted cmm file"):
             skipped_encrypted = skipped_encrypted + 1
             i = i + 1
             continue
@@ -422,42 +423,7 @@ fn collect_cmm_files(dir: text) -> [text]:
         i = i + 1
     results
 
-# Check if a filename has a .cmm extension (case-insensitive).
-fn is_cmm_file(name: text) -> bool:
-    if name.len() < 5:
-        return false
-    val ext = name[name.len() - 4:name.len()]
-    val lower_ext = to_lower_simple(ext)
-    lower_ext == ".cmm"
-
-# Check if a filename has any extension (contains a dot after the first char).
-fn has_extension(name: text) -> bool:
-    var i = 1
-    while i < name.len():
-        if name[i:i + 1] == ".":
-            return true
-        i = i + 1
-    false
-
 # Heuristic: entry names without dots are likely directories.
 fn is_directory_like(name: text) -> bool:
     not has_extension(name)
 
-# Simple lowercase conversion for ASCII characters.
-fn to_lower_simple(s: text) -> text:
-    var result = ""
-    var i = 0
-    while i < s.len():
-        val ch = s[i:i + 1]
-        if ch >= "A" and ch <= "Z":
-            result = result + ch.to_lower()
-        else:
-            result = result + ch
-        i = i + 1
-    result
-
-# Check if text starts with a given prefix.
-fn starts_with(s: text, prefix: text) -> bool:
-    if prefix.len() > s.len():
-        return false
-    s[0:prefix.len()] == prefix

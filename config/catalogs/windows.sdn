@@ -14,6 +14,7 @@ window register_view
   capture_mode: print_parse
   open_command: Register.view /SpotLight
   capture_command: WinPrint.Register.view
+  notes: General register spotlight
 
 window var_local
   title: Local Variables
@@ -56,6 +57,40 @@ window trace_list
   capture_mode: print_parse
   open_command: Trace.List
   capture_command: WinPrint.Trace.List
+  notes: Generic trace records
+
+window riscv_csr_view
+  title: RISC-V CSR View
+  kind: built_in
+  capture_mode: print_parse
+  arch: riscv
+  open_command: Register.view /SpotLight /CSR
+  capture_command: WinPrint.Register.view
+  notes: RISC-V control and status registers
+
+window flash_status
+  title: Flash Status
+  kind: built_in
+  capture_mode: print_parse
+  open_command: FLASH.List
+  capture_command: WinPrint.FLASH.List
+  notes: Flash programming status and configuration
+
+window system_status
+  title: System Status
+  kind: built_in
+  capture_mode: print_parse
+  open_command: System.state
+  capture_command: WinPrint.System.state
+  notes: Debugger and target system state
+
+window nexus_trace
+  title: Nexus Trace
+  kind: built_in
+  capture_mode: print_parse
+  open_command: Trace.List /Nexus
+  capture_command: WinPrint.Trace.List
+  notes: Nexus-oriented trace listing
 
 window coverage_list
   title: Code Coverage

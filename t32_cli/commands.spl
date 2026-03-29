@@ -1,0 +1,228 @@
+# T32 CLI — Canonical command registry
+# Single source of truth for all CLI commands, MCP tool mappings, and usage text.
+# Used by mod.spl, cli_shell.spl, error_codes.spl, and parity_guard_spec.spl.
+
+# A CLI command descriptor mapping to one MCP tool
+class T32CliCommand:
+    name: text              # top-level command: "sessions", "cmd", "jobs", etc.
+    subcmd: text            # subcommand: "list", "open", "run", "" for none
+    mcp_tool: text          # MCP tool name: "t32_sessions_list", etc.
+    usage: text             # usage string: "cmd run <command> [--force]"
+    example: text           # example: "cmd run \"Break.Set main\""
+    min_args: i64           # minimum positional args after subcmd
+    description: text       # one-line description
+    shell_verb: text        # shell verb if different from name, "" = same as name
+
+impl T32CliCommand:
+    static fn create(name: text, subcmd: text, mcp_tool: text, usage: text, example: text, min_args: i64, description: text, shell_verb: text) -> T32CliCommand:
+        T32CliCommand(
+            name: name, subcmd: subcmd, mcp_tool: mcp_tool,
+            usage: usage, example: example, min_args: min_args,
+            description: description, shell_verb: shell_verb
+        )
+
+# Complete registry of all 36 MCP tool → CLI command mappings
+fn all_cli_commands() -> [T32CliCommand]:
+    var cmds: [T32CliCommand] = []
+
+    # --- Session tools (9) ---
+    cmds.push(T32CliCommand.create("sessions", "", "t32_sessions_list",
+        "sessions", "", 0, "List all sessions", "sessions"))
+    cmds.push(T32CliCommand.create("sessions", "open", "t32_session_open",
+        "sessions open <host> <port> <name> <arch>", "sessions open localhost 20000 T32_ARM ARM", 4,
+        "Open new session", ""))
+    cmds.push(T32CliCommand.create("sessions", "use", "t32_session_resume",
+        "sessions use <id>", "sessions use s1", 1, "Switch to existing session", "use"))
+    cmds.push(T32CliCommand.create("sessions", "close", "t32_session_close",
+        "sessions close <id>", "sessions close s1", 1, "Close a session", ""))
+    cmds.push(T32CliCommand.create("sessions", "info", "t32_session_info",
+        "sessions info <id>", "sessions info s1", 1, "Show session details", ""))
+    cmds.push(T32CliCommand.create("cores", "", "t32_core_list",
+        "cores", "", 0, "List cores in current session", "cores"))
+    cmds.push(T32CliCommand.create("cores", "select", "t32_core_select",
+        "cores select <core_id>", "cores select c0", 1, "Select active core", "core"))
+    cmds.push(T32CliCommand.create("cmd", "run", "t32_cmd_run",
+        "cmd run <command> [--force]", "cmd run \"Break.Set main\"", 1,
+        "Run raw PRACTICE command", "cmd"))
+    cmds.push(T32CliCommand.create("cmm", "", "t32_cmm_run",
+        "cmm <script_path> [--wait] [--timeout=<ms>] [--capture-area] [--force]",
+        "cmm startup.cmm --wait", 1, "Run CMM script", "cmm"))
+    # Note: t32_eval is the 10th session tool but listed separately below
+
+    # --- Eval (from session group) ---
+    cmds.push(T32CliCommand.create("eval", "", "t32_eval",
+        "eval <expression>", "eval Register.PP(PC)", 1,
+        "Evaluate TRACE32 expression", "eval"))
+
+    # --- Window tools (5) ---
+    cmds.push(T32CliCommand.create("windows", "", "t32_window_list",
+        "windows", "", 0, "List available windows", "windows"))
+    cmds.push(T32CliCommand.create("window", "open", "t32_window_open",
+        "window open <key>", "window open register", 1, "Open a TRACE32 window", "open"))
+    cmds.push(T32CliCommand.create("window", "show", "t32_window_capture",
+        "window show <key>", "window show register", 1, "Capture window content", "show"))
+    cmds.push(T32CliCommand.create("window", "describe", "t32_window_describe",
+        "window describe <key>", "window describe register", 1,
+        "Describe window actions/fields", "describe"))
+    cmds.push(T32CliCommand.create("screenshot", "", "t32_screenshot",
+        "screenshot <window_key> [output_path]", "screenshot register reg.png", 1,
+        "Save window screenshot", "screenshot"))
+
+    # --- Action/Field tools (6) ---
+    cmds.push(T32CliCommand.create("action", "do", "t32_action_invoke",
+        "action do <key> [args]", "action do step_into", 1, "Execute an action", "do"))
+    cmds.push(T32CliCommand.create("action", "list", "t32_action_list",
+        "action list [window_key]", "action list register", 0,
+        "List actions (optionally by window)", ""))
+    cmds.push(T32CliCommand.create("field", "get", "t32_field_get",
+        "field get <key>", "field get pc", 1, "Get field value", ""))
+    cmds.push(T32CliCommand.create("field", "set", "t32_field_set",
+        "field set <key> <value>", "field set symbol main", 2, "Set field value", "set"))
+    cmds.push(T32CliCommand.create("history", "", "t32_history_tail",
+        "history [count]", "history 20", 0, "Show command history", "history"))
+    cmds.push(T32CliCommand.create("resources", "list", "t32_resources_list",
+        "resources list", "", 0, "List MCP resources", "resources"))
+    cmds.push(T32CliCommand.create("resource", "read", "t32_resource_read",
+        "resource read <uri>", "resource read t32:///sessions", 1,
+        "Read resource by URI", "resource"))
+
+    # --- Headless/AREA/Command tools (3) ---
+    cmds.push(T32CliCommand.create("headless", "setup", "t32_setup_headless",
+        "headless setup [--area=<name>] [--no-semihost] [--no-error-handler]",
+        "headless setup", 0, "One-shot headless setup", "headless"))
+    cmds.push(T32CliCommand.create("area", "read", "t32_area_read",
+        "area read [name] [--clear]", "area read A000 --clear", 0,
+        "Read AREA buffer", "area"))
+    cmds.push(T32CliCommand.create("cmm-commands", "", "t32_cmm_commands",
+        "cmm-commands [--group=<group>] [--search=<pattern>]",
+        "cmm-commands --group=Break", 0,
+        "Query PRACTICE command database", "cmm-commands"))
+
+    # --- Gap closure tools (4) ---
+    # t32_session_info already mapped to "sessions info" above
+    # t32_action_list already mapped to "action list" above
+    cmds.push(T32CliCommand.create("status", "", "t32_status_snapshot",
+        "status", "", 0, "Show CPU run state", "status"))
+    cmds.push(T32CliCommand.create("cmm-validate", "", "t32_cmm_validate",
+        "cmm-validate <source> [--mode=<headless|interactive>]",
+        "cmm-validate script.cmm", 1,
+        "Validate CMM for headless safety", "cmm-validate"))
+
+    # --- Job tools (4) ---
+    cmds.push(T32CliCommand.create("jobs", "list", "t32_job_list",
+        "jobs list [--session=<id>]", "jobs list", 0, "List async jobs", "jobs"))
+    cmds.push(T32CliCommand.create("jobs", "get", "t32_job_get",
+        "jobs get <job_id>", "jobs get j1", 1, "Get job status", ""))
+    cmds.push(T32CliCommand.create("jobs", "cancel", "t32_job_cancel",
+        "jobs cancel <job_id>", "jobs cancel j1", 1, "Cancel a job", ""))
+    cmds.push(T32CliCommand.create("jobs", "result", "t32_job_result",
+        "jobs result <job_id>", "jobs result j1", 1, "Get job result", ""))
+
+    # --- Dialog tools (4) ---
+    cmds.push(T32CliCommand.create("dialog", "parse", "t32_dialog_parse",
+        "dialog parse <source>", "dialog parse my_dialog.cmm", 1,
+        "Parse CMM for dialog elements", "dialog"))
+    cmds.push(T32CliCommand.create("dialog", "get", "t32_dialog_get",
+        "dialog get <label> [--type=<bool|string|value>]", "dialog get MyCheckbox", 1,
+        "Read dialog element state", ""))
+    cmds.push(T32CliCommand.create("dialog", "set", "t32_dialog_set",
+        "dialog set <label> [value] [--action=<set|select|deselect|disable|enable>]",
+        "dialog set MyEdit \"hello\"", 1, "Set dialog element", ""))
+    cmds.push(T32CliCommand.create("dialog", "click", "t32_dialog_click",
+        "dialog click <label> [--capture-area] [--timeout=<ms>]",
+        "dialog click MyButton", 1, "Click dialog button", ""))
+
+    # --- Error check (1) ---
+    cmds.push(T32CliCommand.create("error-check", "", "t32_error_check",
+        "error-check", "", 0, "Check TRACE32 error state", "error-check"))
+
+    cmds
+
+# Extract all MCP tool names from the registry
+fn all_mcp_tool_names() -> [text]:
+    var names: [text] = []
+    val cmds = all_cli_commands()
+    for cmd in cmds:
+        if cmd.mcp_tool != "":
+            # Deduplicate (some tools map to both top-level and gap closure)
+            var found = false
+            for n in names:
+                if n == cmd.mcp_tool:
+                    found = true
+                    break
+            if not found:
+                names.push(cmd.mcp_tool)
+    names
+
+# Find a command by name and optional subcommand
+fn find_cli_command(name: text, subcmd: text) -> Option<T32CliCommand>:
+    val cmds = all_cli_commands()
+    for cmd in cmds:
+        if cmd.name == name and cmd.subcmd == subcmd:
+            return Some(cmd)
+    # Try matching name only (for commands with no subcommand)
+    if subcmd != "":
+        for cmd in cmds:
+            if cmd.name == name and cmd.subcmd == "":
+                return Some(cmd)
+    nil
+
+# Get all unique top-level command names
+fn all_top_level_names() -> [text]:
+    var names: [text] = []
+    val cmds = all_cli_commands()
+    for cmd in cmds:
+        var found = false
+        for n in names:
+            if n == cmd.name:
+                found = true
+                break
+        if not found:
+            names.push(cmd.name)
+    names
+
+# Get all subcommands for a given top-level command
+fn subcmds_for(name: text) -> [text]:
+    var subs: [text] = []
+    val cmds = all_cli_commands()
+    for cmd in cmds:
+        if cmd.name == name and cmd.subcmd != "":
+            subs.push(cmd.subcmd)
+    subs
+
+# Get all unique shell verbs
+fn all_shell_verbs() -> [text]:
+    var verbs: [text] = []
+    val cmds = all_cli_commands()
+    for cmd in cmds:
+        val verb = cmd.shell_verb
+        if verb == "":
+            continue
+        var found = false
+        for v in verbs:
+            if v == verb:
+                found = true
+                break
+        if not found:
+            verbs.push(verb)
+    # Add built-in shell verbs not tied to MCP tools
+    verbs.push("quit")
+    verbs.push("exit")
+    verbs.push("help")
+    verbs
+
+# Generate usage text for a command
+fn command_usage_text(cmd: T32CliCommand) -> text:
+    var msg = "  {cmd.usage}"
+    if cmd.description != "":
+        # Pad to column 40
+        var padding = 40 - cmd.usage.len() - 2
+        if padding < 2:
+            padding = 2
+        var spaces = ""
+        var pi = 0
+        while pi < padding:
+            spaces = spaces + " "
+            pi = pi + 1
+        msg = msg + spaces + cmd.description
+    msg

@@ -1,7 +1,8 @@
 # T32 MCP Server — TRACE32 debug session control via MCP protocol
 #
-# Tools: 26 tools for session management, lifecycle management, window capture,
-#        action invocation, headless setup, AREA buffer, and command database
+# Tools: 36 tools for session management, window capture, action invocation,
+#        headless setup, AREA buffer, command database, CMM validation, async jobs,
+#        and dialog interaction
 # Protocol: MCP 2025-06-18 (Content-Length framing + JSON-Lines auto-detect)
 #
 # Architecture: Zero stdlib imports, inline JSON helpers, direct extern fn calls
@@ -12,6 +13,9 @@
 #   - session_tools.spl   — Session/core/command tool handlers
 #   - window_tools.spl    — Window tool handlers
 #   - action_tools.spl    — Action/field/history/resource handlers + dispatcher
+#   - gap_tools.spl       — Gap closure tools: session_info, action_list, status_snapshot, cmm_validate
+#   - job_manager.spl     — Async job manager: create, get, list, cancel, cleanup
+#   - snapshot_store.spl  — Window snapshot store: hash, diff (structured/table/text), capture-with-diff
 #   - headless_tools.spl  — Headless setup, AREA read, CMM command database
 
 extern fn rt_file_read_text(path: text) -> text
@@ -21,20 +25,21 @@ extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_exists(path: text) -> bool
 extern fn stderr_write(data: text) -> i64
 extern fn stderr_flush() -> i64
-extern fn rt_time_now_unix_micros() -> i64
 
 use app.mcp_t32.json_helpers
 use app.mcp_t32.protocol
 use app.mcp_t32.session_tools
 use app.mcp_t32.window_tools
-use app.mcp_t32.window_parsers
 use app.mcp_t32.action_tools
+use app.mcp_t32.gap_tools
+use app.mcp_t32.job_manager
+use app.mcp_t32.snapshot_store
 use app.mcp_t32.headless_tools
-use app.mcp_t32.run_guard
-use app.mcp_t32.lifecycle_tools
+use app.mcp_t32.dialog_tools
+use app.mcp_t32.ctypes_bridge
 
 val T32_SERVER_NAME = "simple-mcp-t32"
-val T32_SERVER_VERSION = "0.2.0"
+val T32_SERVER_VERSION = "0.1.2"
 val T32_NL = "\n"
 
 # Protocol auto-detection
@@ -74,13 +79,96 @@ var MCP_T32_AREA_READY = false
 var MCP_T32_AREA_NAME = ""
 var T32_SEEN_FIRST_MESSAGE = false
 
+# --- Default connection config ---
+var T32_DEFAULT_PORT: i64 = 20000
+var T32_DEFAULT_HOST = "localhost"
+var T32_RCL_PORT: i64 = 20000
+var T32_RCL_HOST = "localhost"
+var T32_BACKEND_PREFERENCE = ""
+var T32_PYTHON_BINARY = "python3"
+var T32_API_LIB_PATH = ""
+var T32_PYTHON_BRIDGE_PATH = ""
+
 fn t32_startup_diag(message: text):
     stderr_write("[t32-mcp] " + message + "\n")
     stderr_flush()
 
+fn t32_load_default_config():
+    # 1. Config file
+    val config_candidates = ["config/t32/t32_mcp.sdn", "../config/t32/t32_mcp.sdn", "../../config/t32/t32_mcp.sdn"]
+    for config_path in config_candidates:
+        if rt_file_exists(config_path):
+            val content = rt_file_read_text(config_path) ?? ""
+            if content == "":
+                continue
+            val lines = content.split("\n")
+            for line in lines:
+                val trimmed = line.trim()
+                if trimmed.starts_with("default_port:"):
+                    val port_str = trimmed[13:trimmed.len()].trim()
+                    T32_DEFAULT_PORT = int(port_str)
+                if trimmed.starts_with("default_host:"):
+                    T32_DEFAULT_HOST = trimmed[13:trimmed.len()].trim()
+                if trimmed.starts_with("rcl_port:"):
+                    val port_str = trimmed[9:trimmed.len()].trim()
+                    T32_RCL_PORT = int(port_str)
+                if trimmed.starts_with("rcl_host:"):
+                    T32_RCL_HOST = trimmed[9:trimmed.len()].trim()
+                if trimmed.starts_with("backend_preference:"):
+                    T32_BACKEND_PREFERENCE = trimmed[19:trimmed.len()].trim()
+                if trimmed.starts_with("python_binary:"):
+                    T32_PYTHON_BINARY = trimmed[14:trimmed.len()].trim()
+                if trimmed.starts_with("python_bridge:"):
+                    T32_PYTHON_BRIDGE_PATH = trimmed[14:trimmed.len()].trim()
+                if trimmed.starts_with("api_lib_path:"):
+                    T32_API_LIB_PATH = trimmed[13:trimmed.len()].trim()
+            break
+    # 2. Environment variables (override config file)
+    val env_port = rt_env_get("T32_DEFAULT_PORT") ?? ""
+    if env_port != "":
+        T32_DEFAULT_PORT = int(env_port)
+    val env_host = rt_env_get("T32_DEFAULT_HOST") ?? ""
+    if env_host != "":
+        T32_DEFAULT_HOST = env_host
+    val env_rcl_port = rt_env_get("T32_RCL_PORT") ?? ""
+    if env_rcl_port != "":
+        T32_RCL_PORT = int(env_rcl_port)
+    val env_rcl_host = rt_env_get("T32_RCL_HOST") ?? ""
+    if env_rcl_host != "":
+        T32_RCL_HOST = env_rcl_host
+    val env_backend = rt_env_get("T32_BACKEND_PREFERENCE") ?? ""
+    if env_backend != "":
+        T32_BACKEND_PREFERENCE = env_backend
+    val env_python = rt_env_get("T32_PYTHON") ?? ""
+    if env_python != "":
+        T32_PYTHON_BINARY = env_python
+    val env_api_lib = rt_env_get("T32_API_LIB") ?? ""
+    if env_api_lib != "":
+        T32_API_LIB_PATH = env_api_lib
+    val env_bridge = rt_env_get("T32_PYTHON_BRIDGE") ?? ""
+    if env_bridge != "":
+        T32_PYTHON_BRIDGE_PATH = env_bridge
+    if T32_DEFAULT_HOST == "":
+        T32_DEFAULT_HOST = T32_RCL_HOST
+    if T32_DEFAULT_PORT == 0:
+        T32_DEFAULT_PORT = T32_RCL_PORT
+
+extern fn sys_get_args() -> [text]
+
 # --- Entry point ---
 
 fn main():
+    t32_load_default_config()
+    # CLI args (highest priority)
+    val args = sys_get_args()
+    var ai = 0
+    while ai < args.len():
+        val arg = args[ai]
+        if arg.starts_with("--port="):
+            T32_DEFAULT_PORT = int(arg[7:arg.len()])
+        if arg.starts_with("--host="):
+            T32_DEFAULT_HOST = arg[7:arg.len()]
+        ai = ai + 1
     if rt_env_get("SIMPLE_LIB") == "":
         t32_startup_diag("startup warning: SIMPLE_LIB is not set; relative imports/resources may fail in some launch modes")
     t32_start_server()
@@ -104,9 +192,6 @@ fn t32_start_server():
                 response = ""
             elif method == "shutdown":
                 response = t32_make_json_result(id, "null")
-                t32_write_stdout_message(response)
-                t32_shutdown_cleanup()
-                return
             elif method == "tools/list":
                 response = t32_make_tools_list(id)
             elif method == "tools/call":
@@ -126,20 +211,3 @@ fn t32_start_server():
                     response = t32_make_error(id, -32601, "Method not found: " + method)
             if response != "":
                 t32_write_stdout_message(response)
-
-fn t32_shutdown_cleanup():
-    # Clean up AREA buffer if set up
-    if MCP_T32_AREA_READY:
-        val session_opt = t32_find_current_session()
-        match session_opt:
-            Some(session):
-                t32_run_remote(session, "AREA.CLEAR " + MCP_T32_AREA_NAME)
-                t32_run_remote(session, "SCREEN.ON")
-            nil:
-                pass_dn
-    # Close all sessions (best-effort)
-    for s in MCP_T32_SESSIONS:
-        t32_startup_diag("shutdown: closing session " + s.id)
-    MCP_T32_SESSIONS = []
-    MCP_T32_CURRENT_SESSION = ""
-    t32_startup_diag("shutdown complete")

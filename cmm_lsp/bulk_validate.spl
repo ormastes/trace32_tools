@@ -9,6 +9,7 @@
 
 use cmm_parser.{parse_cmm_source}
 use cmm_analyzer.{analyze_program}
+use cmm_text_helpers.{is_cmm_file}
 
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_exists(path: text) -> bool
@@ -20,83 +21,105 @@ extern fn sys_get_args() -> [text]
 # ---------------------------------------------------------------------------
 
 fn categorize_error(msg: text) -> text:
-    if contains(msg, "Unterminated block"):
+    if msg.contains("Unterminated block"):
         return "Unterminated block"
-    if contains(msg, "Expected expression"):
+    if msg.contains("Expected expression"):
         return "Expected expression"
-    if contains(msg, "Expected command"):
+    if msg.contains("Expected command"):
         return "Expected command"
-    if contains(msg, "Unterminated string"):
+    if msg.contains("Unterminated string"):
         return "Unterminated string"
-    if contains(msg, "Unexpected token"):
+    if msg.contains("Unexpected token"):
         return "Unexpected token"
-    if contains(msg, "Expected"):
+    if msg.contains("Expected"):
         return "Expected (other)"
     "Other"
-
-fn contains(haystack: text, needle: text) -> bool:
-    if needle.len() > haystack.len():
-        return false
-    var i = 0
-    while i <= haystack.len() - needle.len():
-        if haystack[i:i + needle.len()] == needle:
-            return true
-        i = i + 1
-    false
 
 # ---------------------------------------------------------------------------
 # File collection
 # ---------------------------------------------------------------------------
 
 fn collect_cmm_files(dir: text, results: [text]):
-    val entries = rt_dir_list(dir)
+    val clean_dir = normalize_path(dir)
+    val entries = rt_dir_list(clean_dir)
     var i = 0
     while i < entries.len():
         val entry = entries[i]
-        if entry == "." or entry == "..":
+        # rt_dir_list already filters "." and ".." in the C runtime,
+        # but guard against edge cases and skip hidden dotfiles/dotdirs.
+        if entry == "." or entry == ".." or entry.len() == 0:
             i = i + 1
             continue
 
-        val full_path = dir + "/" + entry
+        val full_path = clean_dir + "/" + entry
 
         if is_cmm_file(entry):
             results.push(full_path)
-        else if not has_extension(entry):
+        else if is_likely_directory(entry):
             collect_cmm_files(full_path, results)
 
         i = i + 1
 
-fn is_cmm_file(name: text) -> bool:
-    if name.len() < 5:
+# Determine if a directory entry is likely a directory (not a regular file).
+# Heuristic: files have an extension (dot followed by 1-4 alphanumeric chars at end).
+# Hidden entries (starting with dot) are skipped — they are neither recursed nor collected.
+fn is_likely_directory(name: text) -> bool:
+    # Skip hidden dotfiles/dotdirs (e.g. .git, .svn)
+    if name.len() > 0 and name[0:1] == ".":
         return false
-    val ext = name[name.len() - 4:name.len()]
-    val lower_ext = to_lower_simple(ext)
-    lower_ext == ".cmm"
-
-fn has_extension(name: text) -> bool:
-    var i = 1
+    # Look for a file extension: last dot followed by 1-4 alnum chars to end
+    var last_dot = -1
+    var i = 0
     while i < name.len():
         if name[i:i + 1] == ".":
-            return true
+            last_dot = i
         i = i + 1
-    false
+    if last_dot < 0:
+        return true   # No dot at all → likely a directory
+    val ext_len = name.len() - last_dot - 1
+    if ext_len >= 1 and ext_len <= 4:
+        return false  # Looks like a file extension
+    true              # Dot but extension too long → likely a directory
 
-fn to_lower_simple(s: text) -> text:
-    var result = ""
+# Normalize a path: collapse "//", resolve "." and ".." components, strip trailing slash.
+fn normalize_path(p: text) -> text:
+    if p.len() == 0:
+        return "."
+    # Split on "/" into components
+    var parts: [text] = []
+    var start = 0
     var i = 0
-    while i < s.len():
-        val ch = s[i:i + 1]
-        if ch >= "A" and ch <= "Z":
-            result = result + ch.to_lower()
-        else:
-            result = result + ch
+    while i < p.len():
+        if p[i:i + 1] == "/":
+            if i > start:
+                val part = p[start:i]
+                if part == "..":
+                    if parts.len() > 0 and parts[parts.len() - 1] != "..":
+                        parts.pop()
+                    else:
+                        parts.push(part)
+                else if part != ".":
+                    parts.push(part)
+            else if i == 0:
+                parts.push("")  # Leading slash marker
+            start = i + 1
         i = i + 1
-    result
-
-fn starts_with(s: text, prefix: text) -> bool:
-    if prefix.len() > s.len():
-        return false
-    s[0:prefix.len()] == prefix
+    # Handle last component
+    if start < p.len():
+        val part = p[start:p.len()]
+        if part == "..":
+            if parts.len() > 0 and parts[parts.len() - 1] != "..":
+                parts.pop()
+            else:
+                parts.push(part)
+        else if part != ".":
+            parts.push(part)
+    # Rejoin
+    if parts.len() == 0:
+        return "."
+    if parts.len() == 1 and parts[0] == "":
+        return "/"
+    parts.join("/")
 
 # ---------------------------------------------------------------------------
 # Error category tracking
@@ -153,7 +176,7 @@ else:
         total = total + 1
 
         val content = rt_file_read_text(path) ?? ""
-        if starts_with(content, "trace32 encrypted cmm file"):
+        if content.starts_with("trace32 encrypted cmm file"):
             skipped = skipped + 1
             i = i + 1
             continue

@@ -178,12 +178,16 @@ class DiagnosticCollector:
         false
 
     # Format all diagnostics as newline-separated text.
+    # Uses array collection to avoid O(n²) concatenation.
     fn format_all() -> text:
-        var result = ""
+        val n = self.diagnostics.len()
+        if n == 0: return ""
+        if n == 1: return format_diagnostic(self.diagnostics[0])
+        var parts: [text] = []
         var i = 0
-        while i < self.diagnostics.len():
+        while i < n:
             if i > 0:
-                result = result + "\n"
-            result = result + format_diagnostic(self.diagnostics[i])
+                parts.push("\n")
+            parts.push(format_diagnostic(self.diagnostics[i]))
             i = i + 1
-        result
+        parts.join("")

@@ -1,4 +1,4 @@
-#![allow(unnamed_duplicate_typed_args)]
+@allow(unnamed_duplicate_typed_args)
 # T32 MCP Server — JSON helpers
 # Inlined for zero-import startup. All functions prefixed t32_ to avoid name collisions.
 
@@ -48,36 +48,18 @@ fn t32_jo3(p1: text, p2: text, p3: text) -> text:
 fn t32_jo4(p1: text, p2: text, p3: text, p4: text) -> text:
     t32_LB() + p1 + "," + p2 + "," + p3 + "," + p4 + t32_RB()
 
-# Helper: extract substring using for-ch-in iteration (workaround for broken .slice())
-fn t32_substr(s: text, start: i64, end_pos: i64) -> text:
-    var buf: [text] = []
-    var idx = 0
-    for ch in s:
-        if idx >= start and idx < end_pos:
-            buf.push(ch)
-        idx = idx + 1
-    buf.join("")
-
 fn t32_find_text(haystack: text, needle: text) -> i64:
     if needle == "":
         return 0
     if haystack.len() < needle.len():
         return -1
-    var i = 0
-    while i <= haystack.len() - needle.len():
-        if t32_substr(haystack, i, i + needle.len()) == needle:
-            return i
-        i = i + 1
-    return -1
+    val result = haystack.index_of(needle)
+    if val idx = result:
+        return idx
+    -1
 
 fn t32_char_at(s: text, index: i64) -> text:
-    # Build char-indexed array for reliable random access
-    var idx = 0
-    for ch in s:
-        if idx == index:
-            return ch
-        idx = idx + 1
-    ""
+    s.substring(index, index + 1)
 
 fn t32_skip_ws(s: text, start: i64) -> i64:
     var i = start
@@ -135,49 +117,44 @@ fn t32_extract_field(json: text, key: text) -> text:
     if raw == "null":
         return ""
     if raw.len() >= 2 and raw.starts_with(t32_Q()) and raw.ends_with(t32_Q()):
-        return t32_substr(raw, 1, raw.len() - 1)
+        return raw[1:raw.len() - 1]
     return raw
 
 fn t32_extract_field_raw(json: text, key: text) -> text:
-    var i = 0
-    while i < json.len():
-        if t32_char_at(json, i) != t32_Q():
-            i = i + 1
-            continue
-
-        val key_end = t32_read_string_end(json, i)
-        if key_end < 0:
+    val search = t32_Q() + key + t32_Q() + ":"
+    val idx_result = json.index_of(search)
+    var idx = -1
+    match idx_result:
+        Some(i): idx = i
+        nil: return "null"
+    if idx < 0:
+        return "null"
+    var start = idx + search.len()
+    if start >= json.len():
+        return "null"
+    var rest = json.substring(start)
+    rest = rest.trim()
+    if rest == "":
+        return "null"
+    if rest.starts_with(t32_Q()):
+        val end_idx = t32_read_string_end(rest, 0)
+        if end_idx < 0:
             return "null"
-        val current_key = t32_substr(json, i + 1, key_end)
-        i = t32_skip_ws(json, key_end + 1)
-        if i >= json.len() or t32_char_at(json, i) != ":":
-            continue
-        i = t32_skip_ws(json, i + 1)
-        if current_key != key or i >= json.len():
-            continue
-
-        val ch = t32_char_at(json, i)
-        if ch == t32_Q():
-            val value_end = t32_read_string_end(json, i)
-            if value_end < 0:
-                return "null"
-            return t32_substr(json, i, value_end + 1)
-        if ch == t32_LB() or ch == t32_SB_L():
-            val value_end = t32_read_nested_end(json, i)
-            if value_end < 0:
-                return "null"
-            return t32_substr(json, i, value_end + 1)
-
-        var end = i
-        while end < json.len():
-            val end_ch = t32_char_at(json, end)
-            if end_ch == "," or end_ch == t32_RB() or end_ch == t32_SB_R() or end_ch == " " or end_ch == "\n" or end_ch == "\r" or end_ch == "\t":
-                break
-            end = end + 1
-        if end == i:
+        return rest[0:end_idx + 1]
+    if rest.starts_with(t32_LB()) or rest.starts_with(t32_SB_L()):
+        val end_idx = t32_read_nested_end(rest, 0)
+        if end_idx < 0:
             return "null"
-        return t32_substr(json, i, end)
-    return "null"
+        return rest[0:end_idx + 1]
+    var parts: [text] = []
+    for ch in rest:
+        if ch == "," or ch == t32_RB() or ch == t32_SB_R() or ch == " " or ch == "\n" or ch == "\r" or ch == "\t":
+            break
+        parts.push(ch)
+    val raw = parts.join("")
+    if raw == "":
+        return "null"
+    raw
 
 fn t32_extract_id(json: text) -> text:
     t32_extract_field_raw(json, "id")
@@ -199,17 +176,142 @@ fn t32_make_error(id: text, code: i64, message: text) -> text:
 
 # --- MCP Tool Result helpers ---
 
+fn t32_tool_output_has_key(output: text, key: text) -> bool:
+    output.contains(t32_Q() + key + t32_Q() + ":")
+
+fn t32_normalize_tool_output(output: text) -> text:
+    val trimmed = output.trim()
+    var normalized = trimmed
+    if trimmed.starts_with(t32_LB()) and trimmed.ends_with(t32_RB()):
+        normalized = trimmed
+    elif trimmed.starts_with(t32_SB_L()) and trimmed.ends_with(t32_SB_R()):
+        normalized = t32_jo1(t32_jp("items", trimmed))
+    else:
+        normalized = t32_jo1(t32_jp("value", t32_js(trimmed)))
+    if t32_tool_output_has_key(normalized, "gui_status"):
+        return normalized
+    val gui_status = t32_current_gui_status_json()
+    val msg = t32_extract_field(gui_status, "message_line")
+    val msg_type = t32_extract_field(gui_status, "message_type")
+    val target_state = t32_extract_field(gui_status, "target_state")
+    var body = normalized
+    if body.starts_with(t32_LB()) and body.ends_with(t32_RB()):
+        body = body.substring(1, body.len() - 1)
+    var parts: [text] = []
+    if body != "":
+        parts.push(body)
+    parts.push(t32_jp("gui_status", gui_status))
+    if not t32_tool_output_has_key(normalized, "status_bar"):
+        val status_bar = t32_jo2(t32_jp("message", t32_js(msg)), t32_jp("type", t32_js(msg_type)))
+        parts.push(t32_jp("status_bar", status_bar))
+    if not t32_tool_output_has_key(normalized, "target_state"):
+        parts.push(t32_jp("target_state", t32_js(target_state)))
+    var wrapped = t32_LB() + parts.join(",") + t32_RB()
+    val session_opt = t32_find_current_session()
+    match session_opt:
+        Some(session):
+            return t32_append_errors_json(wrapped, session)
+        nil:
+            return wrapped
+
 fn t32_make_tool_result(id: text, output: text) -> text:
-    val escaped = t32_escape_json(output)
+    val normalized = t32_normalize_tool_output(output)
+    val escaped = t32_escape_json(normalized)
     val quoted = t32_Q() + escaped + t32_Q()
     val content = t32_SB_L() + t32_jo2(t32_jp("type", t32_js("text")), t32_jp("text", quoted)) + t32_SB_R()
     val result = t32_jo1(t32_jp("content", content))
     t32_make_json_result(id, result)
 
 fn t32_make_tool_error(id: text, code: i64, msg: text) -> text:
-    val content = t32_SB_L() + t32_jo2(t32_jp("type", t32_js("text")), t32_jp("text", t32_js("ERROR " + str(code) + ": " + msg))) + t32_SB_R()
+    val err_payload = t32_jo1(t32_jp("error", t32_jo2(t32_jp("code", str(code)), t32_jp("message", t32_js(msg)))))
+    val normalized = t32_normalize_tool_output(err_payload)
+    val content = t32_SB_L() + t32_jo2(t32_jp("type", t32_js("text")), t32_jp("text", t32_js(normalized))) + t32_SB_R()
     var err_result = t32_LB() + t32_jp("content", content) + "," + t32_jp("isError", "true") + t32_RB()
     t32_make_json_result(id, err_result)
+
+# --- Validation helpers ---
+
+fn t32_validate_identifier(name: text) -> bool:
+    """Validate that a string is a safe T32 identifier (no injection).
+    Allows alphanumeric, underscores, and dots. Rejects empty, spaces,
+    semicolons, quotes, backticks, dollar signs, pipes, and other shell metacharacters."""
+    if name.len() == 0:
+        return false
+    var i = 0
+    while i < name.len():
+        val ch = t32_char_at(name, i)
+        if ch == " " or ch == "\t" or ch == ";" or ch == "|" or ch == "&":
+            return false
+        if ch == "`" or ch == "'" or ch == "\"":
+            return false
+        if ch == "$" or ch == "(" or ch == ")" or ch == "<" or ch == ">":
+            return false
+        i = i + 1
+    return true
+
+fn t32_is_all_digits(s: text) -> bool:
+    """Check if a string contains only ASCII digits."""
+    if s.len() == 0:
+        return false
+    var i = 0
+    while i < s.len():
+        val ch = t32_char_at(s, i)
+        if ch < "0" or ch > "9":
+            return false
+        i = i + 1
+    return true
+
+fn t32_is_hex_address(s: text) -> bool:
+    """Check if a string is a valid hex address (0x prefix optional, T32 dot terminator allowed)."""
+    if s.len() == 0:
+        return false
+    var start = 0
+    var input = s
+    # Strip trailing dot (T32 address notation)
+    if input.ends_with("."):
+        input = input.substring(0, input.len() - 1)
+    # Strip 0x/0X prefix
+    if input.starts_with("0x") or input.starts_with("0X"):
+        start = 2
+    if start >= input.len():
+        return false
+    var i = start
+    while i < input.len():
+        val ch = t32_char_at(input, i)
+        val is_digit = (ch >= "0" and ch <= "9")
+        val is_upper = (ch >= "A" and ch <= "F")
+        val is_lower = (ch >= "a" and ch <= "f")
+        if not is_digit and not is_upper and not is_lower:
+            return false
+        i = i + 1
+    return true
+
+fn t32_has_shell_meta(s: text) -> bool:
+    """Check if a string contains any shell metacharacters."""
+    var i = 0
+    while i < s.len():
+        val ch = t32_char_at(s, i)
+        if ch == ";" or ch == "|" or ch == "&" or ch == "`":
+            return true
+        if ch == "$" or ch == "(" or ch == ")" or ch == "<" or ch == ">":
+            return true
+        i = i + 1
+    return false
+
+fn t32_shell_escape(s: text) -> text:
+    """Escape a string for safe use in shell commands by wrapping in single quotes.
+    Embedded single quotes are escaped as '\\''."""
+    var result = "'"
+    var i = 0
+    while i < s.len():
+        val ch = t32_char_at(s, i)
+        if ch == "'":
+            result = result + "'\\''"
+        else:
+            result = result + ch
+        i = i + 1
+    result = result + "'"
+    return result
 
 # --- Shell helper ---
 
@@ -228,75 +330,3 @@ fn t32_file_read(path: text) -> text:
 
 fn t32_file_write(path: text, content: text) -> bool:
     rt_file_write_text(path, content) ?? false
-
-# --- Shell escaping ---
-
-# Wrap a string in single quotes for safe shell interpolation.
-# Embedded single quotes become: '\''
-fn t32_shell_escape(s: text) -> text:
-    var result = "'"
-    var i = 0
-    while i < s.len():
-        val ch = t32_char_at(s, i)
-        if ch == "'":
-            result = result + "'\\''"
-        else:
-            result = result + ch
-        i = i + 1
-    result = result + "'"
-    result
-
-# --- Input validation ---
-
-# Returns true if s contains only alphanumeric chars and underscores.
-fn t32_validate_identifier(s: text) -> bool:
-    if s == "":
-        return false
-    var i = 0
-    while i < s.len():
-        val ch = t32_char_at(s, i)
-        if not ((ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_"):
-            return false
-        i = i + 1
-    true
-
-# Returns true if s contains only digit characters.
-fn t32_is_all_digits(s: text) -> bool:
-    if s == "":
-        return false
-    var i = 0
-    while i < s.len():
-        val ch = t32_char_at(s, i)
-        if ch < "0" or ch > "9":
-            return false
-        i = i + 1
-    true
-
-# Returns true if s looks like a valid hex address (0x prefix + hex digits, or plain hex digits).
-fn t32_is_hex_address(s: text) -> bool:
-    if s == "":
-        return false
-    var start = 0
-    if s.len() >= 2 and t32_substr(s, 0, 2) == "0x":
-        start = 2
-    if s.len() >= 2 and t32_substr(s, 0, 2) == "0X":
-        start = 2
-    if start >= s.len():
-        return false
-    var i = start
-    while i < s.len():
-        val ch = t32_char_at(s, i)
-        if not ((ch >= "0" and ch <= "9") or (ch >= "a" and ch <= "f") or (ch >= "A" and ch <= "F") or ch == "."):
-            return false
-        i = i + 1
-    true
-
-# Returns true if s contains shell metacharacters that could enable injection.
-fn t32_has_shell_meta(s: text) -> bool:
-    var i = 0
-    while i < s.len():
-        val ch = t32_char_at(s, i)
-        if (ch == ";" or ch == "|" or ch == "&" or ch == "`" or ch == "$" or ch == "(" or ch == ")" or ch == ">" or ch == "<"):
-            return true
-        i = i + 1
-    false

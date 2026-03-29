@@ -109,6 +109,14 @@ fn build_command_db() -> CmmCommandDB:
     # --- DIALOG commands ---
     cmds.push(CmmCommandInfo(full_name: "DIALOG.OK", short_name: "DIALOG.OK", group: "DIALOG", description: "Show OK dialog", min_version: "all"))
     cmds.push(CmmCommandInfo(full_name: "DIALOG.YESNO", short_name: "DIALOG.YESNO", group: "DIALOG", description: "Show Yes/No dialog", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "DIALOG.Set", short_name: "DIALOG.Set", group: "DIALOG", description: "Set/select dialog element by label", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "DIALOG.Disable", short_name: "DIALOG.Disable", group: "DIALOG", description: "Disable dialog element by label", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "DIALOG.Enable", short_name: "DIALOG.Enable", group: "DIALOG", description: "Enable dialog element by label", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "DIALOG.EXECUTE", short_name: "DIALOG.EXECUTE", group: "DIALOG", description: "Execute button handler by label", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "DIALOG.BOOLEAN", short_name: "DIALOG.BOOLEAN", group: "DIALOG", description: "Query dialog checkbox boolean state", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "DIALOG.STRING", short_name: "DIALOG.STRING", group: "DIALOG", description: "Query dialog edit field string value", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "DIALOG.VALUE", short_name: "DIALOG.VALUE", group: "DIALOG", description: "Query dialog element numeric value", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "DIALOG.EXIST", short_name: "DIALOG.EXIST", group: "DIALOG", description: "Check if dialog element label exists", min_version: "all"))
 
     # --- Misc commands ---
     cmds.push(CmmCommandInfo(full_name: "TOOLBAR", short_name: "TOOLBAR", group: "Misc", description: "Show/hide toolbar", min_version: "all"))
@@ -231,7 +239,8 @@ fn build_command_db() -> CmmCommandDB:
     cmds.push(CmmCommandInfo(full_name: "TASK.List", short_name: "TASK.List", group: "TASK", description: "List RTOS tasks/threads", min_version: "all"))
     cmds.push(CmmCommandInfo(full_name: "TASK.DTask", short_name: "TASK.DTask", group: "TASK", description: "Display task details", min_version: "all"))
     cmds.push(CmmCommandInfo(full_name: "TASK.ORTI", short_name: "TASK.ORTI", group: "TASK", description: "Load ORTI RTOS description", min_version: "all"))
-    cmds.push(CmmCommandInfo(full_name: "MENU.ReProgram", short_name: "MENU.ReProgram", group: "TASK", description: "Load RTOS menu extension", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "MENU.ReProgram", short_name: "MENU.ReProgram", group: "MENU", description: "Reprogram menu from script", min_version: "all"))
+    cmds.push(CmmCommandInfo(full_name: "MENU.RESet", short_name: "MENU.RESet", group: "MENU", description: "Reset menu to default", min_version: "all"))
 
     # --- Symbol extended commands ---
     cmds.push(CmmCommandInfo(full_name: "sYmbol.AutoLOAD.CHECK", short_name: "sYmbol.AutoLOAD.CHECK", group: "Symbol", description: "Check and auto-load symbols", min_version: "all"))
@@ -272,7 +281,6 @@ fn build_command_db() -> CmmCommandDB:
     cmds.push(CmmCommandInfo(full_name: "autostore", short_name: "autostore", group: "Misc", description: "Auto-store window positions", min_version: "all"))
     cmds.push(CmmCommandInfo(full_name: "menu.rp", short_name: "menu.rp", group: "Misc", description: "Reprogram menu", min_version: "all"))
     cmds.push(CmmCommandInfo(full_name: "DIALOG.END", short_name: "DIALOG.END", group: "DIALOG", description: "Close/end dialog", min_version: "all"))
-    cmds.push(CmmCommandInfo(full_name: "DIALOG.OK", short_name: "DIALOG.OK", group: "DIALOG", description: "Show OK dialog box", min_version: "all"))
     cmds.push(CmmCommandInfo(full_name: "Var.Frame", short_name: "V.Frame", group: "Var", description: "Show variable frame", min_version: "all"))
 
     # --- JTAG commands ---
@@ -294,31 +302,17 @@ fn build_command_db() -> CmmCommandDB:
 # Lookup helpers
 # ---------------------------------------------------------------------------
 
-# Convert text to lower case for case-insensitive comparison.
-# Simple implementation covering ASCII A-Z.
-fn to_lower(s: text) -> text:
-    var result = ""
-    var i = 0
-    while i < s.len():
-        val ch = s[i:i + 1]
-        if ch >= "A" and ch <= "Z":
-            result = result + ch.to_lower()
-        else:
-            result = result + ch
-        i = i + 1
-    result
-
 # Look up a command by full_name or short_name (case-insensitive).
 #
 # Returns the first matching CmmCommandInfo, or nil if not found.
 fn lookup_command(db: CmmCommandDB, name: text) -> CmmCommandInfo?:
-    val lower_name = to_lower(name)
+    val lower_name = name.to_lower()
     var i = 0
     while i < db.commands.len():
         val cmd = db.commands[i]
-        if to_lower(cmd.full_name) == lower_name:
+        if cmd.full_name.to_lower() == lower_name:
             return cmd
-        if to_lower(cmd.short_name) == lower_name:
+        if cmd.short_name.to_lower() == lower_name:
             return cmd
         i = i + 1
     nil
@@ -326,36 +320,26 @@ fn lookup_command(db: CmmCommandDB, name: text) -> CmmCommandInfo?:
 # Return all commands whose full_name or short_name starts with prefix
 # (case-insensitive).  Used for auto-completion.
 fn get_completions(db: CmmCommandDB, prefix: text) -> [CmmCommandInfo]:
-    val lower_prefix = to_lower(prefix)
+    val lower_prefix = prefix.to_lower()
     var results: [CmmCommandInfo] = []
     var i = 0
     while i < db.commands.len():
         val cmd = db.commands[i]
-        val lower_full = to_lower(cmd.full_name)
-        val lower_short = to_lower(cmd.short_name)
-        if starts_with(lower_full, lower_prefix) or starts_with(lower_short, lower_prefix):
+        val lower_full = cmd.full_name.to_lower()
+        val lower_short = cmd.short_name.to_lower()
+        if lower_full.starts_with(lower_prefix) or lower_short.starts_with(lower_prefix):
             results.push(cmd)
         i = i + 1
     results
 
 # Return all commands belonging to a given group (case-insensitive).
 fn get_group_commands(db: CmmCommandDB, group: text) -> [CmmCommandInfo]:
-    val lower_group = to_lower(group)
+    val lower_group = group.to_lower()
     var results: [CmmCommandInfo] = []
     var i = 0
     while i < db.commands.len():
         val cmd = db.commands[i]
-        if to_lower(cmd.group) == lower_group:
+        if cmd.group.to_lower() == lower_group:
             results.push(cmd)
         i = i + 1
     results
-
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
-
-# Check if text starts with a given prefix
-fn starts_with(haystack: text, prefix: text) -> bool:
-    if prefix.len() > haystack.len():
-        return false
-    haystack.starts_with(prefix)

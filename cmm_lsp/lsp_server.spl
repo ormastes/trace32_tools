@@ -37,15 +37,15 @@ var _func_db = build_function_db()
 
 # Read exactly `count` characters from stdin.
 fn read_n_chars(count: i64) -> text:
-    var result = ""
+    var parts: [text] = []
     var i = 0
     while i < count:
         val ch = stdin_read_char()
         if ch == "":
             break
-        result = result + ch
+        parts.push(ch)
         i = i + 1
-    result
+    parts.join("")
 
 # ---------------------------------------------------------------------------
 # Content-Length header parsing

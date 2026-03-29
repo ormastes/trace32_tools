@@ -8,6 +8,7 @@
 #   (default dir: /opt/t32/demo)
 
 use cmm_parser.{parse_cmm_source}
+use cmm_text_helpers.{is_cmm_file, has_extension}
 
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_exists(path: text) -> bool
@@ -15,88 +16,33 @@ extern fn rt_dir_list(path: text) -> [text]
 extern fn rt_file_write_text(path: text, content: text)
 extern fn sys_get_args() -> [text]
 
-# ---------------------------------------------------------------------------
-# Text helpers
-# ---------------------------------------------------------------------------
-
-fn contains(haystack: text, needle: text) -> bool:
-    if needle.len() > haystack.len():
-        return false
-    var i = 0
-    while i <= haystack.len() - needle.len():
-        if haystack[i:i + needle.len()] == needle:
-            return true
-        i = i + 1
-    false
-
-fn starts_with(s: text, prefix: text) -> bool:
-    if prefix.len() > s.len():
-        return false
-    s[0:prefix.len()] == prefix
-
-fn char_to_lower(ch: text) -> text:
-    if ch == "A": return "a"
-    if ch == "B": return "b"
-    if ch == "C": return "c"
-    if ch == "D": return "d"
-    if ch == "E": return "e"
-    if ch == "F": return "f"
-    if ch == "G": return "g"
-    if ch == "H": return "h"
-    if ch == "I": return "i"
-    if ch == "J": return "j"
-    if ch == "K": return "k"
-    if ch == "L": return "l"
-    if ch == "M": return "m"
-    if ch == "N": return "n"
-    if ch == "O": return "o"
-    if ch == "P": return "p"
-    if ch == "Q": return "q"
-    if ch == "R": return "r"
-    if ch == "S": return "s"
-    if ch == "T": return "t"
-    if ch == "U": return "u"
-    if ch == "V": return "v"
-    if ch == "W": return "w"
-    if ch == "X": return "x"
-    if ch == "Y": return "y"
-    if ch == "Z": return "z"
-    ch
-
-fn to_lower_simple(s: text) -> text:
-    var result = ""
-    var i = 0
-    while i < s.len():
-        result = result + char_to_lower(s[i:i + 1])
-        i = i + 1
-    result
 
 # ---------------------------------------------------------------------------
 # Error categorization (extended)
 # ---------------------------------------------------------------------------
 
 fn categorize_error(msg: text) -> text:
-    if contains(msg, "Unterminated block"):
+    if msg.contains("Unterminated block"):
         return "Unterminated block"
-    if contains(msg, "Unterminated string"):
+    if msg.contains("Unterminated string"):
         return "Unterminated string"
-    if contains(msg, "Expected expression"):
+    if msg.contains("Expected expression"):
         return "Expected expression"
-    if contains(msg, "Expected command"):
+    if msg.contains("Expected command"):
         return "Expected command"
-    if contains(msg, "Unexpected token"):
+    if msg.contains("Unexpected token"):
         return "Unexpected token"
-    if contains(msg, "ELSE without"):
+    if msg.contains("ELSE without"):
         return "ELSE without IF"
-    if contains(msg, "DIALOG"):
+    if msg.contains("DIALOG"):
         return "DIALOG issue"
-    if contains(msg, "macro"):
+    if msg.contains("macro"):
         return "Macro issue"
-    if contains(msg, "Expected ')'"):
+    if msg.contains("Expected ')'"):
         return "Missing RParen"
-    if contains(msg, "Expected '}'"):
+    if msg.contains("Expected '}'"):
         return "Missing RBrace"
-    if contains(msg, "Expected"):
+    if msg.contains("Expected"):
         return "Expected (other)"
     "Other"
 
@@ -112,23 +58,23 @@ fn extract_first_dir(path: text, root: text) -> text:
     var i = 0
     while i < rest.len():
         if rest[i:i + 1] == "/":
-            return to_lower_simple(rest[0:i])
+            return rest[0:i].to_lower()
         i = i + 1
-    to_lower_simple(rest)
+    rest.to_lower()
 
 fn assign_group(path: text, root: text) -> i64:
     val dir = extract_first_dir(path, root)
     if dir == "arm" or dir == "arm64":
         return 1
-    if starts_with(dir, "powerpc"):
+    if dir.starts_with("powerpc"):
         return 2
-    if starts_with(dir, "mips"):
+    if dir.starts_with("mips"):
         return 3
     if dir == "tricore" or dir == "c166":
         return 4
     if dir == "m68k" or dir == "x86" or dir == "coldfire":
         return 5
-    if starts_with(dir, "m68hc"):
+    if dir.starts_with("m68hc"):
         return 5
     6
 
@@ -143,20 +89,6 @@ fn group_name(g: i64) -> text:
 # ---------------------------------------------------------------------------
 # File collection — BFS
 # ---------------------------------------------------------------------------
-
-fn is_cmm_file(name: text) -> bool:
-    if name.len() < 5:
-        return false
-    val ext = name[name.len() - 4:name.len()]
-    to_lower_simple(ext) == ".cmm"
-
-fn has_extension(name: text) -> bool:
-    var i = 1
-    while i < name.len():
-        if name[i:i + 1] == ".":
-            return true
-        i = i + 1
-    false
 
 fn collect_cmm_files(root_dir: text) -> [text]:
     var result: [text] = []
@@ -201,12 +133,9 @@ fn push_error(grp: i64, line: text):
     if grp == 6: errors_g6.push(line)
 
 fn join_lines(lines: [text]) -> text:
-    var result = ""
-    var i = 0
-    while i < lines.len():
-        result = result + lines[i] + "\n"
-        i = i + 1
-    result
+    if lines.len() == 0:
+        return ""
+    lines.join("\n") + "\n"
 
 fn write_group_report(grp: i64, ok_count: i64, total_count: i64, skip_count: i64):
     var err_lines: [text] = []
@@ -289,7 +218,7 @@ if rt_file_exists(target_dir):
         if grp == 6: gt6 = gt6 + 1
 
         val content = rt_file_read_text(path) ?? ""
-        if starts_with(to_lower_simple(content[0:40]), "trace32 encrypted"):
+        if content[0:40].to_lower().starts_with("trace32 encrypted"):
             skipped = skipped + 1
             if grp == 1: gs1 = gs1 + 1
             if grp == 2: gs2 = gs2 + 1

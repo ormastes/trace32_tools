@@ -1,0 +1,614 @@
+@allow(unnamed_duplicate_typed_args)
+# T32 MCP — Window Snapshot Store and Diff
+# Diff-aware window capture with three diff layers:
+#   Layer 1: Structured row diff (register, status, variable windows)
+#   Layer 2: Table diff (memory, stack, breakpoint windows)
+#   Layer 3: Text fallback (source, area windows)
+#
+# REQ-F2-001..F2-008: snapshot store, structured diff, table diff,
+# text fallback, strategy selection, capture-and-diff pipeline
+
+use app.mcp_t32.json_helpers.{t32_Q, t32_js, t32_jp, t32_jo1, t32_jo2, t32_escape_json, t32_stderr, t32_LB, t32_RB, t32_SB_L, t32_SB_R}
+
+extern fn rt_time_ms() -> i64
+
+# =============================================================================
+# Data types
+# =============================================================================
+
+class T32WindowSnapshot:
+    window_key: text
+    session_id: text
+    core_id: text
+    title: text
+    content: text
+    content_hash: text
+    captured_at: i64
+
+class T32DiffEntry:
+    label: text
+    old_value: text
+    new_value: text
+    diff_type: text  # "changed" | "added" | "removed"
+
+class T32WindowDiff:
+    window_key: text
+    changed: bool
+    change_count: i64
+    entries: [T32DiffEntry]
+    content_preview: text
+    full_resource_uri: text
+
+# =============================================================================
+# Module-level state
+# =============================================================================
+
+var T32_SNAPSHOTS: [T32WindowSnapshot] = []
+val T32_SNAPSHOT_MAX: i64 = 200
+val T32_SNAPSHOT_TTL_MS: i64 = 300000  # 5 minutes
+
+# =============================================================================
+# Hash — djb2
+# =============================================================================
+
+fn t32_snapshot_hash(content: text) -> text:
+    """Compute djb2 hash of content, returned as text (decimal string).
+    Matches the pattern used in mcp_t32_state_diff_spec."""
+    var hash: i64 = 5381
+    var i = 0
+    while i < content.len():
+        hash = hash * 33 + content[i].bytes()[0]
+        i = i + 1
+    str(hash)
+
+# =============================================================================
+# Store operations
+# =============================================================================
+
+fn t32_snapshot_make_key(session_id: text, core_id: text, window_key: text) -> text:
+    "{session_id}/{core_id}/{window_key}"
+
+fn t32_snapshot_find_index(key: text) -> i64:
+    var i = 0
+    while i < T32_SNAPSHOTS.len():
+        val snap = T32_SNAPSHOTS[i]
+        val snap_key = t32_snapshot_make_key(snap.session_id, snap.core_id, snap.window_key)
+        if snap_key == key:
+            return i
+        i = i + 1
+    -1
+
+fn t32_snapshot_store(session_id: text, core_id: text, window_key: text, title: text, content: text) -> T32WindowSnapshot:
+    """Store or update a window snapshot. Returns the stored snapshot."""
+    val key = t32_snapshot_make_key(session_id, core_id, window_key)
+    val hash = t32_snapshot_hash(content)
+    val now = rt_time_ms()
+    val snap = T32WindowSnapshot(
+        window_key: window_key,
+        session_id: session_id,
+        core_id: core_id,
+        title: title,
+        content: content,
+        content_hash: hash,
+        captured_at: now
+    )
+    val idx = t32_snapshot_find_index(key)
+    if idx >= 0:
+        # Update existing entry
+        T32_SNAPSHOTS[idx] = snap
+        return snap
+    # Evict oldest if at capacity
+    if T32_SNAPSHOTS.len() >= T32_SNAPSHOT_MAX:
+        t32_snapshot_evict_oldest()
+    T32_SNAPSHOTS.push(snap)
+    snap
+
+fn t32_snapshot_get(session_id: text, core_id: text, window_key: text) -> T32WindowSnapshot:
+    """Retrieve a snapshot by key, or return sentinel with empty content."""
+    val key = t32_snapshot_make_key(session_id, core_id, window_key)
+    val idx = t32_snapshot_find_index(key)
+    if idx >= 0:
+        return T32_SNAPSHOTS[idx]
+    # Return sentinel
+    T32WindowSnapshot(
+        window_key: window_key,
+        session_id: session_id,
+        core_id: core_id,
+        title: "",
+        content: "",
+        content_hash: "",
+        captured_at: 0
+    )
+
+fn t32_snapshot_cleanup():
+    """Remove expired entries (older than TTL)."""
+    val now = rt_time_ms()
+    var kept: [T32WindowSnapshot] = []
+    var removed_count: i64 = 0
+    for snap in T32_SNAPSHOTS:
+        val age = now - snap.captured_at
+        if age <= T32_SNAPSHOT_TTL_MS:
+            kept.push(snap)
+        else:
+            removed_count = removed_count + 1
+    if removed_count > 0:
+        t32_stderr("[snapshot_store] cleanup: removed {removed_count} expired snapshots")
+    T32_SNAPSHOTS = kept
+
+fn t32_snapshot_evict_oldest():
+    """Remove the oldest snapshot when at capacity."""
+    if T32_SNAPSHOTS.len() == 0:
+        return
+    var oldest_idx: i64 = 0
+    var oldest_ts = T32_SNAPSHOTS[0].captured_at
+    var i = 1
+    while i < T32_SNAPSHOTS.len():
+        if T32_SNAPSHOTS[i].captured_at < oldest_ts:
+            oldest_ts = T32_SNAPSHOTS[i].captured_at
+            oldest_idx = i
+        i = i + 1
+    # Rebuild without the oldest
+    var kept: [T32WindowSnapshot] = []
+    var j = 0
+    while j < T32_SNAPSHOTS.len():
+        if j != oldest_idx:
+            kept.push(T32_SNAPSHOTS[j])
+        j = j + 1
+    T32_SNAPSHOTS = kept
+
+# =============================================================================
+# Diff — Layer 1: Structured row diff
+# =============================================================================
+
+fn t32_diff_parse_label_value(line: text) -> (text, text):
+    """Parse a line of 'label value' or 'label: value' into (label, value)."""
+    # Try "label: value" first
+    var colon_idx: i64 = -1
+    var ci = 0
+    while ci < line.len():
+        if line.substring(ci, ci + 1) == ":":
+            colon_idx = ci
+            break
+        ci = ci + 1
+    if colon_idx > 0:
+        val label = line.substring(0, colon_idx).trim()
+        var value = ""
+        if colon_idx + 1 < line.len():
+            value = line.substring(colon_idx + 1, line.len()).trim()
+        return (label, value)
+    # Fall back to "label value" (first space)
+    var sp_idx: i64 = -1
+    var si = 0
+    while si < line.len():
+        if line.substring(si, si + 1) == " ":
+            sp_idx = si
+            break
+        si = si + 1
+    if sp_idx > 0:
+        val label = line.substring(0, sp_idx).trim()
+        val value = line.substring(sp_idx + 1, line.len()).trim()
+        return (label, value)
+    # No separator found: entire line is the label
+    (line.trim(), "")
+
+fn t32_diff_structured_rows(old_content: text, new_content: text) -> [T32DiffEntry]:
+    """Layer 1: Compare label-value pairs line by line.
+    For register windows, status windows, variable windows."""
+    var diffs: [T32DiffEntry] = []
+    val old_lines = old_content.split("\n")
+    val new_lines = new_content.split("\n")
+
+    # Build old label->value map (parallel arrays)
+    var old_labels: [text] = []
+    var old_values: [text] = []
+    for line in old_lines:
+        if line.trim().len() == 0:
+            continue
+        var lbl = ""
+        var val_str = ""
+        (lbl, val_str) = t32_diff_parse_label_value(line)
+        if lbl != "":
+            old_labels.push(lbl)
+            old_values.push(val_str)
+
+    # Build new label->value map
+    var new_labels: [text] = []
+    var new_values: [text] = []
+    for line in new_lines:
+        if line.trim().len() == 0:
+            continue
+        var lbl = ""
+        var val_str = ""
+        (lbl, val_str) = t32_diff_parse_label_value(line)
+        if lbl != "":
+            new_labels.push(lbl)
+            new_values.push(val_str)
+
+    # Check changed and removed (old labels)
+    var oi = 0
+    while oi < old_labels.len():
+        val old_lbl = old_labels[oi]
+        val old_val = old_values[oi]
+        var found = false
+        var ni = 0
+        while ni < new_labels.len():
+            if new_labels[ni] == old_lbl:
+                found = true
+                if new_values[ni] != old_val:
+                    diffs.push(T32DiffEntry(
+                        label: old_lbl,
+                        old_value: old_val,
+                        new_value: new_values[ni],
+                        diff_type: "changed"
+                    ))
+                break
+            ni = ni + 1
+        if not found:
+            diffs.push(T32DiffEntry(
+                label: old_lbl,
+                old_value: old_val,
+                new_value: "",
+                diff_type: "removed"
+            ))
+        oi = oi + 1
+
+    # Check added (new labels not in old)
+    var ni2 = 0
+    while ni2 < new_labels.len():
+        val new_lbl = new_labels[ni2]
+        var found = false
+        var oi2 = 0
+        while oi2 < old_labels.len():
+            if old_labels[oi2] == new_lbl:
+                found = true
+                break
+            oi2 = oi2 + 1
+        if not found:
+            diffs.push(T32DiffEntry(
+                label: new_lbl,
+                old_value: "",
+                new_value: new_values[ni2],
+                diff_type: "added"
+            ))
+        ni2 = ni2 + 1
+
+    diffs
+
+# =============================================================================
+# Diff — Layer 2: Table diff
+# =============================================================================
+
+fn t32_diff_split_table_row(line: text) -> [text]:
+    """Split a table row by whitespace (spaces/tabs) into columns."""
+    var cols: [text] = []
+    var current = ""
+    var in_word = false
+    var i = 0
+    while i < line.len():
+        val ch = line.substring(i, i + 1)
+        if ch == " " or ch == "\t":
+            if in_word:
+                cols.push(current)
+                current = ""
+                in_word = false
+        else:
+            current = current + ch
+            in_word = true
+        i = i + 1
+    if in_word:
+        cols.push(current)
+    cols
+
+fn t32_diff_table(old_content: text, new_content: text) -> [T32DiffEntry]:
+    """Layer 2: Compare tabular data row-by-row.
+    For memory dumps, stack frames, breakpoint lists."""
+    var diffs: [T32DiffEntry] = []
+    val old_lines = old_content.split("\n")
+    val new_lines = new_content.split("\n")
+
+    # Filter non-empty lines
+    var old_rows: [text] = []
+    for line in old_lines:
+        if line.trim().len() > 0:
+            old_rows.push(line)
+
+    var new_rows: [text] = []
+    for line in new_lines:
+        if line.trim().len() > 0:
+            new_rows.push(line)
+
+    val min_rows = if old_rows.len() < new_rows.len(): old_rows.len() else: new_rows.len()
+
+    # Compare common rows cell-by-cell
+    var r = 0
+    while r < min_rows:
+        val old_cols = t32_diff_split_table_row(old_rows[r])
+        val new_cols = t32_diff_split_table_row(new_rows[r])
+        val min_cols = if old_cols.len() < new_cols.len(): old_cols.len() else: new_cols.len()
+        var c = 0
+        while c < min_cols:
+            if old_cols[c] != new_cols[c]:
+                diffs.push(T32DiffEntry(
+                    label: "row{r}_col{c}",
+                    old_value: old_cols[c],
+                    new_value: new_cols[c],
+                    diff_type: "changed"
+                ))
+            c = c + 1
+        # Extra cols in new
+        while c < new_cols.len():
+            diffs.push(T32DiffEntry(
+                label: "row{r}_col{c}",
+                old_value: "",
+                new_value: new_cols[c],
+                diff_type: "added"
+            ))
+            c = c + 1
+        # Extra cols in old
+        var oc = min_cols
+        while oc < old_cols.len():
+            diffs.push(T32DiffEntry(
+                label: "row{r}_col{oc}",
+                old_value: old_cols[oc],
+                new_value: "",
+                diff_type: "removed"
+            ))
+            oc = oc + 1
+        r = r + 1
+
+    # Added rows
+    var ar = min_rows
+    while ar < new_rows.len():
+        diffs.push(T32DiffEntry(
+            label: "row{ar}",
+            old_value: "",
+            new_value: new_rows[ar],
+            diff_type: "added"
+        ))
+        ar = ar + 1
+
+    # Removed rows
+    var rr = min_rows
+    while rr < old_rows.len():
+        diffs.push(T32DiffEntry(
+            label: "row{rr}",
+            old_value: old_rows[rr],
+            new_value: "",
+            diff_type: "removed"
+        ))
+        rr = rr + 1
+
+    diffs
+
+# =============================================================================
+# Diff — Layer 3: Text fallback
+# =============================================================================
+
+fn t32_diff_text(old_content: text, new_content: text) -> [T32DiffEntry]:
+    """Layer 3: Line-by-line comparison with context.
+    For source, area, and any other window types."""
+    var diffs: [T32DiffEntry] = []
+    if old_content == new_content:
+        return diffs
+
+    val old_lines = old_content.split("\n")
+    val new_lines = new_content.split("\n")
+    val max_lines = if old_lines.len() > new_lines.len(): old_lines.len() else: new_lines.len()
+
+    var i = 0
+    while i < max_lines:
+        val old_line = if i < old_lines.len(): old_lines[i] else: ""
+        val new_line = if i < new_lines.len(): new_lines[i] else: ""
+        if old_line != new_line:
+            var dtype = "changed"
+            if i >= old_lines.len():
+                dtype = "added"
+            elif i >= new_lines.len():
+                dtype = "removed"
+            diffs.push(T32DiffEntry(
+                label: "line{i}",
+                old_value: old_line,
+                new_value: new_line,
+                diff_type: dtype
+            ))
+        i = i + 1
+
+    diffs
+
+# =============================================================================
+# Strategy selection
+# =============================================================================
+
+fn t32_diff_strategy_for_window(window_key: text) -> text:
+    """Select diff strategy based on window type.
+    Returns: 'structured', 'table', or 'text'."""
+    # Structured: register, status, variable windows
+    if window_key == "register_view" or window_key == "riscv_csr_view":
+        return "structured"
+    if window_key == "system_status" or window_key == "flash_status":
+        return "structured"
+    if window_key == "var_local" or window_key == "var_watch":
+        return "structured"
+    if window_key == "per_view":
+        return "structured"
+    # Table: memory, stack, breakpoint, task, coverage, trace, symbol windows
+    if window_key == "data_dump":
+        return "table"
+    if window_key == "stack_frame":
+        return "table"
+    if window_key == "break_list":
+        return "table"
+    if window_key == "task_list":
+        return "table"
+    if window_key == "coverage_list":
+        return "table"
+    if window_key == "trace_list" or window_key == "nexus_trace":
+        return "table"
+    if window_key == "symbol_browse":
+        return "table"
+    if window_key == "perf_list":
+        return "table"
+    if window_key == "mmu_list":
+        return "table"
+    # Text: source, area, and anything else
+    "text"
+
+# =============================================================================
+# Capture-and-diff pipeline
+# =============================================================================
+
+fn t32_capture_with_diff(session_id: text, core_id: text, window_key: text, title: text, new_content: text, mode: text) -> text:
+    """Capture new content and diff against previous snapshot.
+    mode: 'summary' | 'diff' | 'full'
+    Returns JSON response string."""
+    val prev = t32_snapshot_get(session_id, core_id, window_key)
+    val is_first = prev.content_hash == ""
+
+    # Store the new snapshot
+    val snap = t32_snapshot_store(session_id, core_id, window_key, title, new_content)
+    val resource_uri = t32_window_resource_uri(session_id, window_key)
+
+    # First capture: always return full content
+    if is_first:
+        val diff = T32WindowDiff(
+            window_key: window_key,
+            changed: true,
+            change_count: 0,
+            entries: [],
+            content_preview: new_content,
+            full_resource_uri: resource_uri
+        )
+        return t32_diff_to_json(diff)
+
+    # Check if content changed via hash
+    val new_hash = t32_snapshot_hash(new_content)
+    if prev.content_hash == new_hash:
+        # No change
+        if mode == "full":
+            val diff = T32WindowDiff(
+                window_key: window_key,
+                changed: false,
+                change_count: 0,
+                entries: [],
+                content_preview: new_content,
+                full_resource_uri: resource_uri
+            )
+            return t32_diff_to_json(diff)
+        val diff = T32WindowDiff(
+            window_key: window_key,
+            changed: false,
+            change_count: 0,
+            entries: [],
+            content_preview: t32_snapshot_summary(window_key, false, 0),
+            full_resource_uri: resource_uri
+        )
+        return t32_diff_to_json(diff)
+
+    # Content changed
+    if mode == "full":
+        val diff = T32WindowDiff(
+            window_key: window_key,
+            changed: true,
+            change_count: 1,
+            entries: [],
+            content_preview: new_content,
+            full_resource_uri: resource_uri
+        )
+        return t32_diff_to_json(diff)
+
+    if mode == "summary":
+        val diff = T32WindowDiff(
+            window_key: window_key,
+            changed: true,
+            change_count: 1,
+            entries: [],
+            content_preview: t32_snapshot_summary(window_key, true, 1),
+            full_resource_uri: resource_uri
+        )
+        return t32_diff_to_json(diff)
+
+    # mode == "diff": run appropriate diff strategy
+    val strategy = t32_diff_strategy_for_window(window_key)
+    var entries: [T32DiffEntry] = []
+    if strategy == "structured":
+        entries = t32_diff_structured_rows(prev.content, new_content)
+    elif strategy == "table":
+        entries = t32_diff_table(prev.content, new_content)
+    else:
+        entries = t32_diff_text(prev.content, new_content)
+
+    # Token budget: if diff has >50 entries, fall back to full content
+    if entries.len() > 50:
+        t32_stderr("[snapshot_store] diff has {entries.len()} entries, exceeding budget of 50; falling back to full content")
+        val diff = T32WindowDiff(
+            window_key: window_key,
+            changed: true,
+            change_count: entries.len(),
+            entries: [],
+            content_preview: new_content,
+            full_resource_uri: resource_uri
+        )
+        return t32_diff_to_json(diff)
+
+    val diff = T32WindowDiff(
+        window_key: window_key,
+        changed: true,
+        change_count: entries.len(),
+        entries: entries,
+        content_preview: "",
+        full_resource_uri: resource_uri
+    )
+    t32_diff_to_json(diff)
+
+# =============================================================================
+# Response formatting
+# =============================================================================
+
+fn t32_diff_entry_to_json(entry: T32DiffEntry) -> text:
+    """Serialize a single diff entry to JSON."""
+    var r = t32_LB()
+    r = r + t32_jp("label", t32_js(entry.label))
+    r = r + "," + t32_jp("old_value", t32_js(entry.old_value))
+    r = r + "," + t32_jp("new_value", t32_js(entry.new_value))
+    r = r + "," + t32_jp("diff_type", t32_js(entry.diff_type))
+    r = r + t32_RB()
+    r
+
+fn t32_diff_to_json(diff: T32WindowDiff) -> text:
+    """Serialize a T32WindowDiff to JSON."""
+    var r = t32_LB()
+    r = r + t32_jp("window_key", t32_js(diff.window_key))
+    var changed_str = "false"
+    if diff.changed:
+        changed_str = "true"
+    r = r + "," + t32_jp("changed", changed_str)
+    r = r + "," + t32_jp("change_count", str(diff.change_count))
+
+    # Entries array
+    var entries_arr = t32_SB_L()
+    var first = true
+    for entry in diff.entries:
+        if not first:
+            entries_arr = entries_arr + ","
+        first = false
+        entries_arr = entries_arr + t32_diff_entry_to_json(entry)
+    entries_arr = entries_arr + t32_SB_R()
+    r = r + "," + t32_jp("entries", entries_arr)
+
+    if diff.content_preview != "":
+        r = r + "," + t32_jp("content_preview", t32_js(diff.content_preview))
+    if diff.full_resource_uri != "":
+        r = r + "," + t32_jp("full_resource_uri", t32_js(diff.full_resource_uri))
+
+    r = r + t32_RB()
+    r
+
+fn t32_snapshot_summary(window_key: text, changed: bool, change_count: i64) -> text:
+    """One-line summary of window state."""
+    if not changed:
+        return "{window_key}: no changes"
+    "{window_key}: {change_count} change(s) detected"
+
+fn t32_window_resource_uri(session_id: text, window_key: text) -> text:
+    """Build resource URI: t32://windows/{session}/{window}"""
+    "t32://windows/{session_id}/{window_key}"

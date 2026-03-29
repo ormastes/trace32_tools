@@ -1,31 +1,31 @@
-#![allow(unnamed_duplicate_typed_args)]
+@allow(unnamed_duplicate_typed_args)
 # T32 LSP MCP Protocol — I/O, initialize, tools list, schemas
 # Protocol: MCP 2025-06-18 (Content-Length framing + JSON-Lines auto-detect)
 
 extern fn stdin_read_char() -> text
 
 fn lsp_read_line() -> text:
-    var result = ""
+    var parts: [text] = []
     while true:
         val ch = stdin_read_char()
         if ch == "":
-            if result == "":
+            if parts.len() == 0:
                 return ""
-            return result
-        result = result + ch
+            return parts.join("")
+        parts.push(ch)
         if ch == "\n":
-            return result
+            return parts.join("")
 
 fn lsp_read_chars(count: i64) -> text:
-    var result = ""
+    var parts: [text] = []
     var i = 0
     while i < count:
         val ch = stdin_read_char()
         if ch == "":
             break
-        result = result + ch
+        parts.push(ch)
         i = i + 1
-    return result
+    return parts.join("")
 
 # --- Protocol I/O ---
 
@@ -42,7 +42,7 @@ fn lsp_read_stdin_message() -> text:
                 break
             continue
         if line.ends_with("\r"):
-            line = lsp_substr(line, 0, line.len() - 1)
+            line = line.substring(0, line.len() - 1)
         if line.starts_with(lsp_LB()):
             LSP_USE_JSON_LINES = true
             return line
@@ -157,5 +157,5 @@ fn lsp_make_tool_schema(name: text, description: text) -> text:
         lsp_jp("description", lsp_js(description)),
         lsp_jp("inputSchema", schema)
     )
-    tool_obj = lsp_substr(tool_obj, 0, tool_obj.len() - 1) + "," + lsp_jp("annotations", annotations) + lsp_RB()
+    tool_obj = tool_obj.substring(0, tool_obj.len() - 1) + "," + lsp_jp("annotations", annotations) + lsp_RB()
     tool_obj

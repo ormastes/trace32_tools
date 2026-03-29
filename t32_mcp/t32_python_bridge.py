@@ -94,6 +94,28 @@ def run_command(t32, command):
             except OSError:
                 pass
 
+    # DIALOG action commands (explicit recognition for better error handling)
+    if upper.startswith("DIALOG.SET ") or upper.startswith("DIALOG.DESELECT ") or upper.startswith("DIALOG.DISABLE ") or \
+       upper.startswith("DIALOG.ENABLE ") or upper.startswith("DIALOG.EXECUTE ") or \
+       upper == "DIALOG.END":
+        t32.cmd(command)
+        return "OK"
+
+    # DO command (explicit recognition)
+    if upper.startswith("DO "):
+        t32.cmd(command)
+        return ""
+
+    # CD / CHDIR command
+    if upper.startswith("CD ") or upper.startswith("CD.DO ") or upper.startswith("CHDIR "):
+        t32.cmd(command)
+        return ""
+
+    # MENU commands
+    if upper.startswith("MENU."):
+        t32.cmd(command)
+        return ""
+
     # All other PRACTICE commands
     t32.cmd(command)
     return ""

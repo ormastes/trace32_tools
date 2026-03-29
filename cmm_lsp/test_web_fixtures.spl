@@ -8,6 +8,7 @@
 
 use cmm_parser.{parse_cmm_source, parse_cmm_file}
 use cmm_analyzer.{analyze_program}
+use cmm_text_helpers.{is_cmm_file, has_dot, dir_of}
 
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_exists(path: text) -> bool
@@ -140,7 +141,7 @@ fn collect_cmm_files_recursive(dir: text) -> [text]:
         val entry = entries[i]
         if entry != "." and entry != "..":
             val full_path = dir + "/" + entry
-            if is_cmm(entry):
+            if is_cmm_file(entry):
                 results.push(full_path)
             else if not has_dot(entry):
                 # Likely a directory — recurse
@@ -151,44 +152,6 @@ fn collect_cmm_files_recursive(dir: text) -> [text]:
                     si = si + 1
         i = i + 1
     results
-
-fn is_cmm(name: text) -> bool:
-    if name.len() < 5:
-        return false
-    val ext = name[name.len() - 4:name.len()]
-    to_lower_ext(ext) == ".cmm"
-
-fn has_dot(name: text) -> bool:
-    var i = 1
-    while i < name.len():
-        if name[i:i + 1] == ".":
-            return true
-        i = i + 1
-    false
-
-fn to_lower_ext(s: text) -> text:
-    var result = ""
-    var i = 0
-    while i < s.len():
-        val ch = s[i:i + 1]
-        if ch >= "A" and ch <= "Z":
-            result = result + ch.to_lower()
-        else:
-            result = result + ch
-        i = i + 1
-    result
-
-# Extract directory part from a file path
-fn dir_of(path: text) -> text:
-    var last_slash = -1
-    var i = 0
-    while i < path.len():
-        if path[i:i + 1] == "/":
-            last_slash = i
-        i = i + 1
-    if last_slash >= 0:
-        return path[0:last_slash]
-    ""
 
 # Shorten path for display by removing base_dir prefix
 fn short_name(path: text, base: text) -> text:

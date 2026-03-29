@@ -1,4 +1,4 @@
-#![allow(unnamed_duplicate_typed_args)]
+@allow(unnamed_duplicate_typed_args)
 # T32 MCP — Action and field tool handlers
 # Handles: action_invoke, field_get, field_set, screenshot, history_tail,
 #          resources_list, resource_read, dispatch_tool
@@ -6,41 +6,99 @@
 use app.t32_cli.error_codes.{T4050, T4082, T4090, t32_err_action_not_found, t32_err_missing_param, t32_err_no_session_mcp, t32_err_unknown_tool, t32_err_missing_tool_name, t32_err_resource_not_found}
 
 # --- Action/field state ---
-# Field state is stored per-session in a flat Dict<text, text>
+# Field state is stored per-session in a T32FieldDict
 # keyed as "session_id:field_key"
+# Uses hash-bucket approach for O(1)-ish lookup
 
-class FieldEntry:
-    key: text
-    value: text
+val T32_FIELD_DICT_BUCKETS: i64 = 64
 
-var MCP_T32_FIELD_ENTRIES: [FieldEntry] = []
+class T32FieldDict:
+    bucket_keys: [[text]]
+    bucket_values: [[text]]
+
+    static fn create() -> T32FieldDict:
+        var bk: [[text]] = []
+        var bv: [[text]] = []
+        var i: i64 = 0
+        while i < T32_FIELD_DICT_BUCKETS:
+            bk.push([])
+            bv.push([])
+            i = i + 1
+        T32FieldDict(bucket_keys: bk, bucket_values: bv)
+
+    fn hash_key(key: text) -> i64:
+        var h: i64 = 5381
+        var i: i64 = 0
+        while i < key.len():
+            h = ((h * 33) + key.char_at(i)) % 1000000007
+            i = i + 1
+        if h < 0:
+            h = 0 - h
+        h % T32_FIELD_DICT_BUCKETS
+
+    fn get(key: text) -> text:
+        val b = self.hash_key(key)
+        val keys = self.bucket_keys[b]
+        var idx: i64 = 0
+        for k in keys:
+            if k == key:
+                return self.bucket_values[b][idx]
+            idx = idx + 1
+        ""
+
+    me set(key: text, value: text):
+        val b = self.hash_key(key)
+        var keys = self.bucket_keys[b]
+        var idx: i64 = 0
+        for k in keys:
+            if k == key:
+                self.bucket_values[b][idx] = value
+                return
+            idx = idx + 1
+        self.bucket_keys[b].push(key)
+        self.bucket_values[b].push(value)
+
+    me delete(key: text):
+        val b = self.hash_key(key)
+        var keys = self.bucket_keys[b]
+        var idx: i64 = 0
+        for k in keys:
+            if k == key:
+                # Remove by swapping with last element
+                val last_idx = keys.len() - 1
+                if idx != last_idx:
+                    self.bucket_keys[b][idx] = self.bucket_keys[b][last_idx]
+                    self.bucket_values[b][idx] = self.bucket_values[b][last_idx]
+                self.bucket_keys[b].pop()
+                self.bucket_values[b].pop()
+                return
+            idx = idx + 1
+
+var MCP_T32_FIELD_DICT: T32FieldDict = T32FieldDict.create()
+
+fn t32_resolve_field_alias(key: text) -> text:
+    if key == "pc": return "register.PC"
+    if key == "sp": return "register.SP"
+    if key == "lr": return "register.LR"
+    if key == "cpsr": return "register.CPSR"
+    key
 
 fn t32_field_state_get(session_id: text, field_key: text) -> text:
     val lookup = session_id + ":" + field_key
-    for entry in MCP_T32_FIELD_ENTRIES:
-        if entry.key == lookup:
-            return entry.value
-    ""
+    MCP_T32_FIELD_DICT.get(lookup)
 
 fn t32_field_state_set(session_id: text, field_key: text, value: text):
     val lookup = session_id + ":" + field_key
-    var idx = 0
-    for entry in MCP_T32_FIELD_ENTRIES:
-        if entry.key == lookup:
-            MCP_T32_FIELD_ENTRIES[idx] = FieldEntry(key: lookup, value: value)
-            return
-        idx = idx + 1
-    MCP_T32_FIELD_ENTRIES = MCP_T32_FIELD_ENTRIES + [FieldEntry(key: lookup, value: value)]
+    MCP_T32_FIELD_DICT.set(lookup, value)
+
+fn t32_field_state_delete(session_id: text, field_key: text):
+    val lookup = session_id + ":" + field_key
+    MCP_T32_FIELD_DICT.delete(lookup)
 
 # --- Helpers for error suggestions ---
 
 fn t32_key_before_pipe(entry: text) -> text:
-    var i = 0
-    for ch in entry:
-        if ch == "|":
-            return t32_substr(entry, 0, i)
-        i = i + 1
-    entry
+    entry.split("|")[0]
 
 fn t32_mcp_action_keys() -> [text]:
     val catalog = t32_get_window_catalog()
@@ -83,30 +141,19 @@ fn handle_t32_action_invoke(id: text, body: text) -> text:
                 (key, title, kind, open_cmd, capture_cmd) = t32_parse_catalog_entry(entry)
                 val action_entries = t32_get_window_actions(key)
                 for aentry in action_entries:
-                    var aparts: [text] = []
-                    var acurrent: [text] = []
-                    for ch in aentry:
-                        if ch == "|":
-                            aparts.push(acurrent.join(""))
-                            acurrent = []
-                        else:
-                            acurrent.push(ch)
-                    aparts.push(acurrent.join(""))
+                    val aparts = aentry.split("|")
                     var akey = ""
                     var alabel = ""
                     var atype = ""
                     var atemplate = ""
-                    var aidx = 0
-                    for ap in aparts:
-                        if aidx == 0:
-                            akey = ap
-                        elif aidx == 1:
-                            alabel = ap
-                        elif aidx == 2:
-                            atype = ap
-                        elif aidx == 3:
-                            atemplate = ap
-                        aidx = aidx + 1
+                    if aparts.len() > 0:
+                        akey = aparts[0]
+                    if aparts.len() > 1:
+                        alabel = aparts[1]
+                    if aparts.len() > 2:
+                        atype = aparts[2]
+                    if aparts.len() > 3:
+                        atemplate = aparts[3]
                     if akey == action_key:
                         found_template = atemplate
                         found_label = alabel
@@ -154,25 +201,17 @@ fn t32_field_to_eval(field_key: text) -> text:
         return "Register(R3)"
     # register.NAME -> Register(NAME)
     if field_key.starts_with("register."):
-        val reg_name = t32_substr(field_key, 9, field_key.len())
-        if not t32_validate_identifier(reg_name):
-            return ""
+        val reg_name = field_key.substring(9)
         return "Register(" + reg_name + ")"
     # var.NAME -> Var.VALUE(NAME)
     if field_key.starts_with("var."):
-        val var_name = t32_substr(field_key, 4, field_key.len())
-        if t32_has_shell_meta(var_name):
-            return ""
+        val var_name = field_key.substring(4)
         return "Var.VALUE(" + var_name + ")"
     # memory.ADDR -> Data.Long(ADDR)
     if field_key.starts_with("memory."):
-        val addr = t32_substr(field_key, 7, field_key.len())
-        if not t32_is_hex_address(addr):
-            return ""
+        val addr = field_key.substring(7)
         return "Data.Long(" + addr + ")"
-    # Fallback: reject if contains shell metacharacters
-    if t32_has_shell_meta(field_key):
-        return ""
+    # Fallback: use field_key as raw EVAL expression
     field_key
 
 fn handle_t32_field_get(id: text, body: text) -> text:
@@ -185,8 +224,6 @@ fn handle_t32_field_get(id: text, body: text) -> text:
         Some(session):
             # Map field key to T32 EVAL expression
             val eval_expr = t32_field_to_eval(field_key)
-            if eval_expr == "":
-                return t32_make_tool_error(id, -32602, "Invalid field key: contains invalid characters. Key: " + field_key)
             val eval_cmd = "EVAL " + eval_expr
             var stdout = ""
             var rc: i64 = 0
@@ -208,9 +245,6 @@ fn handle_t32_field_get(id: text, body: text) -> text:
             return t32_make_tool_result(id, r)
 
 fn t32_field_to_set_cmd(field_key: text, value: text) -> text:
-    # Reject value with shell metacharacters
-    if t32_has_shell_meta(value):
-        return ""
     # Map common field keys to T32 set commands
     if field_key == "pc":
         return "Register.Set PC " + value
@@ -230,21 +264,15 @@ fn t32_field_to_set_cmd(field_key: text, value: text) -> text:
         return "Register.Set R3 " + value
     # register.NAME -> Register.Set NAME value
     if field_key.starts_with("register."):
-        val reg_name = t32_substr(field_key, 9, field_key.len())
-        if not t32_validate_identifier(reg_name):
-            return ""
+        val reg_name = field_key.substring(9)
         return "Register.Set " + reg_name + " " + value
     # var.NAME -> Var.Set NAME = value
     if field_key.starts_with("var."):
-        val var_name = t32_substr(field_key, 4, field_key.len())
-        if t32_has_shell_meta(var_name):
-            return ""
+        val var_name = field_key.substring(4)
         return "Var.Set " + var_name + " = " + value
     # memory.ADDR -> Data.Set ADDR %Long value
     if field_key.starts_with("memory."):
-        val addr = t32_substr(field_key, 7, field_key.len())
-        if not t32_is_hex_address(addr):
-            return ""
+        val addr = field_key.substring(7)
         return "Data.Set " + addr + " %Long " + value
     # Fallback: raw command
     ""
@@ -339,23 +367,19 @@ fn handle_t32_history_tail(id: text, body: text) -> text:
     var start_idx: i64 = 0
     if total > count:
         start_idx = total - count
-    var arr = t32_SB_L()
-    var first = true
+    var entries: [text] = []
     var idx: i64 = 0
     for h in MCP_T32_HISTORY:
         if idx >= start_idx:
-            if not first:
-                arr = arr + ","
-            first = false
             var obj = t32_LB()
             obj = obj + t32_jp("command", t32_js(h.command))
             obj = obj + "," + t32_jp("result", t32_js(h.result))
             obj = obj + "," + t32_jp("session_id", t32_js(h.session_id))
             obj = obj + "," + t32_jp("core_id", t32_js(h.core_id))
             obj = obj + t32_RB()
-            arr = arr + obj
+            entries.push(obj)
         idx = idx + 1
-    arr = arr + t32_SB_R()
+    val arr = t32_SB_L() + entries.join(",") + t32_SB_R()
     t32_make_tool_result(id, arr)
 
 # --- Resources ---
@@ -422,7 +446,10 @@ fn t32_handle_resource_read(id: text, body: text) -> text:
             var kind = ""
             var open_cmd = ""
             var capture_cmd = ""
-            (key, title, kind, open_cmd, capture_cmd) = t32_parse_catalog_entry(entry)
+            var capture_mode = ""
+            var arch = ""
+            var notes = ""
+            (key, title, kind, open_cmd, capture_cmd, capture_mode, arch, notes) = t32_parse_catalog_entry_with_meta(entry)
             if not first:
                 arr = arr + ","
             first = false
@@ -430,6 +457,12 @@ fn t32_handle_resource_read(id: text, body: text) -> text:
             obj = obj + t32_jp("window_key", t32_js(key))
             obj = obj + "," + t32_jp("title", t32_js(title))
             obj = obj + "," + t32_jp("kind", t32_js(kind))
+            if capture_mode != "":
+                obj = obj + "," + t32_jp("capture_mode", t32_js(capture_mode))
+            if arch != "":
+                obj = obj + "," + t32_jp("arch", t32_js(arch))
+            if notes != "":
+                obj = obj + "," + t32_jp("notes", t32_js(notes))
             obj = obj + t32_RB()
             arr = arr + obj
         arr = arr + t32_SB_R()
@@ -450,49 +483,6 @@ fn t32_dispatch_tool(id: text, body: text) -> text:
     if tool_name == "":
         return t32_make_error(id, -32602, t32_err_missing_tool_name())
 
-    # --- Run-state guard ---
-    val session_for_guard = t32_find_current_session()
-    match session_for_guard:
-        Some(session):
-            val guard_result = t32_check_run_guard(tool_name, session, args_raw)
-            match guard_result:
-                Some(err_msg):
-                    return t32_make_tool_error(id, -32000, err_msg)
-                nil:
-                    pass_dn
-        nil:
-            pass_dn
-
-    # --- Pre-state capture for state-changing tools ---
-    var pre_state: [T32StepState] = []
-    if t32_is_state_changing_tool(tool_name):
-        val pre_session = t32_find_current_session()
-        match pre_session:
-            Some(s):
-                if not t32_is_target_running(s):
-                    pre_state = [t32_capture_step_state(s)]
-            nil:
-                pass_dn
-
-    # --- Dispatch tool ---
-    val result = t32_dispatch_tool_inner(id, tool_name, args_raw, body)
-
-    # --- Post-state capture and diff ---
-    if pre_state.len() > 0:
-        val post_session = t32_find_current_session()
-        match post_session:
-            Some(s):
-                if not t32_is_target_running(s):
-                    val post_state = t32_capture_step_state(s)
-                    t32_record_step_state(post_state)
-                    # Invalidate run-state cache after state-changing tool
-                    t32_invalidate_run_state_cache()
-            nil:
-                pass_dn
-
-    result
-
-fn t32_dispatch_tool_inner(id: text, tool_name: text, args_raw: text, body: text) -> text:
     # Session tools
     if tool_name == "t32_sessions_list":
         return handle_t32_sessions_list(id, args_raw)
@@ -547,12 +537,59 @@ fn t32_dispatch_tool_inner(id: text, tool_name: text, args_raw: text, body: text
     elif tool_name == "t32_cmm_commands":
         return handle_t32_cmm_commands(id, args_raw)
 
-    # Lifecycle tools
-    elif tool_name == "t32_launch":
-        return handle_t32_launch(id, args_raw)
-    elif tool_name == "t32_shutdown":
-        return handle_t32_shutdown(id, args_raw)
-    elif tool_name == "t32_status":
-        return handle_t32_status(id, args_raw)
+    # Gap closure tools
+    elif tool_name == "t32_session_info":
+        return handle_t32_session_info(id, args_raw)
+    elif tool_name == "t32_action_list":
+        return handle_t32_action_list(id, args_raw)
+    elif tool_name == "t32_status_snapshot":
+        return handle_t32_status_snapshot(id, args_raw)
+    elif tool_name == "t32_cmm_validate":
+        return handle_t32_cmm_validate(id, args_raw)
+
+    # Job tools
+    elif tool_name == "t32_job_list":
+        val session_filter = t32_extract_field(args_raw, "session_id")
+        val jobs = t32_job_list(session_filter)
+        var parts: [text] = []
+        for job in jobs:
+            parts.push(t32_job_to_json(job))
+        val result = t32_SB_L() + parts.join(",") + t32_SB_R()
+        return t32_make_tool_result(id, result)
+    elif tool_name == "t32_job_get":
+        val job_id = t32_extract_field(args_raw, "job_id")
+        val job = t32_job_get(job_id)
+        if job.status == "not_found":
+            return t32_make_tool_error(id, "Job not found: " + job_id)
+        return t32_make_tool_result(id, t32_job_to_json(job))
+    elif tool_name == "t32_job_cancel":
+        val job_id = t32_extract_field(args_raw, "job_id")
+        val ok = t32_job_cancel(job_id)
+        if ok:
+            return t32_make_tool_result(id, t32_jo1(t32_jp("cancelled", "true")))
+        return t32_make_tool_error(id, "Cannot cancel job: " + job_id + " (not found or already terminal)")
+    elif tool_name == "t32_job_result":
+        val job_id = t32_extract_field(args_raw, "job_id")
+        val job = t32_job_get(job_id)
+        if job.status == "not_found":
+            return t32_make_tool_error(id, "Job not found: " + job_id)
+        if job.status == "completed":
+            return t32_make_tool_result(id, t32_jo2(t32_jp("job_id", t32_js(job_id)), t32_jp("result", job.result)))
+        if job.status == "failed":
+            return t32_make_tool_error(id, "Job failed: " + job.error)
+        return t32_make_tool_error(id, "Job not yet complete (status: " + job.status + ")")
+
+    # Dialog tools
+    elif tool_name == "t32_dialog_parse":
+        return handle_t32_dialog_parse(id, args_raw)
+    elif tool_name == "t32_dialog_get":
+        return handle_t32_dialog_get(id, args_raw)
+    elif tool_name == "t32_dialog_set":
+        return handle_t32_dialog_set(id, args_raw)
+    elif tool_name == "t32_dialog_click":
+        return handle_t32_dialog_click(id, args_raw)
+    # Error check
+    elif tool_name == "t32_error_check":
+        return handle_t32_error_check(id, args_raw)
 
     t32_make_error(id, -32602, t32_err_unknown_tool(tool_name))

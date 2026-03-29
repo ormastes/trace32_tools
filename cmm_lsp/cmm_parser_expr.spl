@@ -23,7 +23,7 @@
 
 use cmm_tokens.{CmmTokenKind, CmmToken}
 use cmm_ast.{CmmExpr, CmmBinOp, CmmUnaryOp, CmmLiteral, CmmSpan, span}
-use cmm_parser.{CmmParser, CmmParseError, to_upper_cmm}
+use cmm_parser_core.{CmmParser, CmmParseError, to_upper_cmm}
 
 # ---------------------------------------------------------------------------
 # Access class detection helper
@@ -62,6 +62,7 @@ fn is_access_class(name: text) -> bool:
     name == "APB" or name == "apb" or
     name == "C15" or name == "c15")
 
+
 # ---------------------------------------------------------------------------
 # Expression parsing methods — added to CmmParser via impl block
 # ---------------------------------------------------------------------------
@@ -71,7 +72,7 @@ impl CmmParser:
     # ===== Top-level entry point =====
 
     # Parse a full CMM expression starting at the lowest precedence.
-    me parse_expression() -> Result<CmmExpr, CmmParseError>:
+    me parse_expression_impl() -> Result<CmmExpr, CmmParseError>:
         self.parse_logical_or()
 
     # ===== Level 13: || (Logical OR) =====
@@ -1024,3 +1025,6 @@ impl CmmParser:
             case CmmTokenKind.ShiftLeft: CmmBinOp.Shl
             case CmmTokenKind.ShiftRight: CmmBinOp.Shr
             case _: CmmBinOp.Shl
+
+fn parse_expression_entry(parser: CmmParser) -> Result<CmmExpr, CmmParseError>:
+    parser.parse_expression_impl()

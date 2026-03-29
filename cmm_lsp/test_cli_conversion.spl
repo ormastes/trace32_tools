@@ -7,6 +7,7 @@
 #   bin/release/simple examples/10_tooling/trace32_tools/cmm_lsp/test_cli_conversion.spl
 
 use cmm_parser.{parse_cmm_source}
+use cmm_text_helpers.{is_cmm_file, has_dot, dir_of, check_gui_keywords, check_has_command}
 
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_exists(path: text) -> bool
@@ -16,63 +17,6 @@ extern fn sys_get_args() -> [text]
 # ---------------------------------------------------------------------------
 # String utilities
 # ---------------------------------------------------------------------------
-
-fn to_lower_char(ch: text) -> text:
-    if ch == "A": return "a"
-    if ch == "B": return "b"
-    if ch == "C": return "c"
-    if ch == "D": return "d"
-    if ch == "E": return "e"
-    if ch == "F": return "f"
-    if ch == "G": return "g"
-    if ch == "H": return "h"
-    if ch == "I": return "i"
-    if ch == "J": return "j"
-    if ch == "K": return "k"
-    if ch == "L": return "l"
-    if ch == "M": return "m"
-    if ch == "N": return "n"
-    if ch == "O": return "o"
-    if ch == "P": return "p"
-    if ch == "Q": return "q"
-    if ch == "R": return "r"
-    if ch == "S": return "s"
-    if ch == "T": return "t"
-    if ch == "U": return "u"
-    if ch == "V": return "v"
-    if ch == "W": return "w"
-    if ch == "X": return "x"
-    if ch == "Y": return "y"
-    if ch == "Z": return "z"
-    ch
-
-fn to_lower(s: text) -> text:
-    var r = ""
-    var i = 0
-    while i < s.len():
-        r = r + to_lower_char(s[i:i + 1])
-        i = i + 1
-    r
-
-fn starts_with(s: text, prefix: text) -> bool:
-    if prefix.len() > s.len():
-        return false
-    s[0:prefix.len()] == prefix
-
-fn ends_with(s: text, suffix: text) -> bool:
-    if suffix.len() > s.len():
-        return false
-    s[s.len() - suffix.len():s.len()] == suffix
-
-fn contains_substr(hay: text, needle: text) -> bool:
-    if needle.len() > hay.len():
-        return false
-    var i = 0
-    while i <= hay.len() - needle.len():
-        if hay[i:i + needle.len()] == needle:
-            return true
-        i = i + 1
-    false
 
 fn count_lines(content: text) -> i64:
     if content.len() == 0:
@@ -85,52 +29,9 @@ fn count_lines(content: text) -> i64:
         i = i + 1
     count
 
-fn split_lines(content: text) -> [text]:
-    var lines: [text] = []
-    var start = 0
-    var i = 0
-    while i < content.len():
-        if content[i:i + 1] == "\n":
-            lines.push(content[start:i])
-            start = i + 1
-        i = i + 1
-    if start <= content.len():
-        lines.push(content[start:content.len()])
-    lines
-
-fn trim_start(s: text) -> text:
-    var i = 0
-    while i < s.len():
-        val ch = s[i:i + 1]
-        if ch != " " and ch != "\t":
-            return s[i:s.len()]
-        i = i + 1
-    ""
-
-fn has_no_spaces(s: text) -> bool:
-    var i = 0
-    while i < s.len():
-        if s[i:i + 1] == " ":
-            return false
-        i = i + 1
-    true
-
 # ---------------------------------------------------------------------------
 # File collection helpers
 # ---------------------------------------------------------------------------
-
-fn is_cmm(name: text) -> bool:
-    if name.len() < 5:
-        return false
-    to_lower(name[name.len() - 4:name.len()]) == ".cmm"
-
-fn has_dot(name: text) -> bool:
-    var i = 1
-    while i < name.len():
-        if name[i:i + 1] == ".":
-            return true
-        i = i + 1
-    false
 
 fn collect_cmm_files_recursive(dir: text) -> [text]:
     var results: [text] = []
@@ -140,7 +41,7 @@ fn collect_cmm_files_recursive(dir: text) -> [text]:
         val entry = entries[i]
         if entry != "." and entry != "..":
             val full_path = dir + "/" + entry
-            if is_cmm(entry):
+            if is_cmm_file(entry):
                 results.push(full_path)
             else if not has_dot(entry):
                 val sub = collect_cmm_files_recursive(full_path)
@@ -151,17 +52,6 @@ fn collect_cmm_files_recursive(dir: text) -> [text]:
         i = i + 1
     results
 
-fn dir_of(path: text) -> text:
-    var last_slash = -1
-    var i = 0
-    while i < path.len():
-        if path[i:i + 1] == "/":
-            last_slash = i
-        i = i + 1
-    if last_slash >= 0:
-        return path[0:last_slash]
-    ""
-
 fn short_name(path: text, base: text) -> text:
     val prefix = base + "/"
     if path.len() > prefix.len():
@@ -170,59 +60,20 @@ fn short_name(path: text, base: text) -> text:
     path
 
 # ---------------------------------------------------------------------------
-# Check 2: GUI keyword absence
-# ---------------------------------------------------------------------------
-
-fn check_gui_keywords(content: text) -> [text]:
-    val banned: [text] = ["dialog", "winpos", "winclear", "winpage", "wintabs", "framepos", "toolbar", "statusbar", "screen.always", "screen.alw", "menu.reprogram", "area.view", "autostore", "menu.rp", "toolitem", "winresume", "winfocus"]
-    var violations: [text] = []
-    val lines = split_lines(content)
-    var li = 0
-    while li < lines.len():
-        val trimmed = trim_start(lines[li])
-        if trimmed.len() == 0:
-            li = li + 1
-            continue
-        val lowered = to_lower(trimmed)
-        # Skip comments
-        if starts_with(lowered, ";"):
-            li = li + 1
-            continue
-        # Skip labels (e.g. dialog_closed:) — ends with : and no spaces before :
-        if ends_with(trimmed, ":") and has_no_spaces(trimmed):
-            li = li + 1
-            continue
-        # Check each banned keyword
-        var bi = 0
-        while bi < banned.len():
-            val kw = banned[bi]
-            if starts_with(lowered, kw):
-                # Must be followed by space, dot, tab, ( or be exact match
-                if lowered.len() == kw.len():
-                    violations.push(kw)
-                else:
-                    val next_ch = lowered[kw.len():kw.len() + 1]
-                    if next_ch == " " or next_ch == "." or next_ch == "\t" or next_ch == "(":
-                        violations.push(kw)
-            bi = bi + 1
-        li = li + 1
-    violations
-
-# ---------------------------------------------------------------------------
 # Check 4: Labels extraction
 # ---------------------------------------------------------------------------
 
 fn extract_labels(content: text) -> [text]:
     var labels: [text] = []
-    val lines = split_lines(content)
+    val lines = content.split("\n")
     var li = 0
     while li < lines.len():
-        val trimmed = trim_start(lines[li])
-        if trimmed.len() > 1 and ends_with(trimmed, ":"):
+        val trimmed = lines[li].trim_start()
+        if trimmed.len() > 1 and trimmed.ends_with(":"):
             # Not a comment
-            if not starts_with(trimmed, ";"):
+            if not trimmed.starts_with(";"):
                 val name = trimmed[0:trimmed.len() - 1]
-                if has_no_spaces(name):
+                if not name.contains(" "):
                     labels.push(name)
         li = li + 1
     labels
@@ -233,12 +84,12 @@ fn extract_labels(content: text) -> [text]:
 
 fn count_prefix(content: text, prefix: text) -> i64:
     var count = 0
-    val lines = split_lines(content)
+    val lines = content.split("\n")
     var li = 0
     while li < lines.len():
-        val trimmed = trim_start(lines[li])
-        val lowered = to_lower(trimmed)
-        if starts_with(lowered, prefix):
+        val trimmed = lines[li].trim_start()
+        val lowered = trimmed.to_lower()
+        if lowered.starts_with(prefix):
             count = count + 1
         li = li + 1
     count
@@ -262,47 +113,31 @@ fn derive_original_path(expected_path: text, fixtures_dir: text) -> text:
     expected_path
 
 # ---------------------------------------------------------------------------
-# Check 6: SCREEN.OFF command detection
-# ---------------------------------------------------------------------------
-
-fn check_has_command(content: text, cmd: text) -> bool:
-    val lines = split_lines(content)
-    var li = 0
-    while li < lines.len():
-        val trimmed = trim_start(lines[li])
-        if trimmed.len() > 0 and not starts_with(trimmed, ";"):
-            val lowered = to_lower(trimmed)
-            if starts_with(lowered, cmd):
-                return true
-        li = li + 1
-    false
-
-# ---------------------------------------------------------------------------
 # Check 7: Bare GUI window command detection
 # ---------------------------------------------------------------------------
 
 fn check_bare_gui_commands(content: text) -> [text]:
     val bare_cmds: [text] = ["data.list", "register.view", "var.frame", "trace.list", "task.list", "data.dump", "var.view", "task.dtask", "per.view"]
     var violations: [text] = []
-    val lines = split_lines(content)
+    val lines = content.split("\n")
     var li = 0
     while li < lines.len():
-        val trimmed = trim_start(lines[li])
+        val trimmed = lines[li].trim_start()
         if trimmed.len() == 0:
             li = li + 1
             continue
-        val lowered = to_lower(trimmed)
-        if starts_with(lowered, ";"):
+        val lowered = trimmed.to_lower()
+        if lowered.starts_with(";"):
             li = li + 1
             continue
         # Skip if it's a WinPrint command
-        if starts_with(lowered, "winprint."):
+        if lowered.starts_with("winprint."):
             li = li + 1
             continue
         var bi = 0
         while bi < bare_cmds.len():
             val cmd = bare_cmds[bi]
-            if starts_with(lowered, cmd):
+            if lowered.starts_with(cmd):
                 if lowered.len() == cmd.len():
                     violations.push(cmd)
                 else:
@@ -401,7 +236,7 @@ fn run_cli_conversion_tests():
 
         # --- Check 4: ENDDO + labels preserved ---
         file_checks = file_checks + 1
-        val has_enddo = contains_substr(expected_content, "ENDDO")
+        val has_enddo = expected_content.contains("ENDDO")
         val orig_labels = extract_labels(original_content)
         val expected_labels = extract_labels(expected_content)
         var labels_ok = has_enddo
@@ -464,7 +299,8 @@ fn run_cli_conversion_tests():
 
         # --- Check 8: Error handler present ---
         file_checks = file_checks + 1
-        val has_error_handler = (contains_substr(to_lower(expected_content), "on error") or contains_substr(to_lower(expected_content), "on.error") or contains_substr(to_lower(expected_content), "globalon error"))
+        val lower_expected = expected_content.to_lower()
+        val has_error_handler = (lower_expected.contains("on error") or lower_expected.contains("on.error") or lower_expected.contains("globalon error"))
         if has_error_handler:
             file_pass = file_pass + 1
         else:
@@ -472,8 +308,8 @@ fn run_cli_conversion_tests():
 
         # --- Check 9: Metadata header ---
         file_checks = file_checks + 1
-        val has_target = contains_substr(expected_content, "@target:")
-        val has_purpose = contains_substr(expected_content, "@purpose:")
+        val has_target = expected_content.contains("@target:")
+        val has_purpose = expected_content.contains("@purpose:")
         if has_target and has_purpose:
             file_pass = file_pass + 1
         else:
@@ -484,8 +320,8 @@ fn run_cli_conversion_tests():
 
         # --- Check 10: ENDDO with return value ---
         file_checks = file_checks + 1
-        val has_enddo_true = contains_substr(expected_content, "ENDDO TRUE()")
-        val has_enddo_false = contains_substr(expected_content, "ENDDO FALSE()")
+        val has_enddo_true = expected_content.contains("ENDDO TRUE()")
+        val has_enddo_false = expected_content.contains("ENDDO FALSE()")
         if has_enddo_true or has_enddo_false:
             file_pass = file_pass + 1
         else:
@@ -493,8 +329,8 @@ fn run_cli_conversion_tests():
 
         # --- Check 11: AREA channel setup ---
         file_checks = file_checks + 1
-        val has_area_create = contains_substr(to_lower(expected_content), "area.create")
-        val has_area_select = contains_substr(to_lower(expected_content), "area.select")
+        val has_area_create = lower_expected.contains("area.create")
+        val has_area_select = lower_expected.contains("area.select")
         if has_area_create and has_area_select:
             file_pass = file_pass + 1
         else:

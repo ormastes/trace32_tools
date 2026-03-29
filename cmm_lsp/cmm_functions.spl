@@ -206,28 +206,15 @@ fn build_function_db() -> CmmFuncDB:
 # Lookup helpers
 # ---------------------------------------------------------------------------
 
-# Convert text to lower case for case-insensitive comparison (ASCII)
-fn to_lower(s: text) -> text:
-    var result = ""
-    var i = 0
-    while i < s.len():
-        val ch = s[i:i + 1]
-        if ch >= "A" and ch <= "Z":
-            result = result + ch.to_lower()
-        else:
-            result = result + ch
-        i = i + 1
-    result
-
 # Look up a function by name (case-insensitive).
 #
 # Returns the first matching CmmFuncInfo, or nil if not found.
 fn lookup_function(db: CmmFuncDB, name: text) -> CmmFuncInfo?:
-    val lower_name = to_lower(name)
+    val lower_name = name.to_lower()
     var i = 0
     while i < db.functions.len():
         val func = db.functions[i]
-        if to_lower(func.name) == lower_name:
+        if func.name.to_lower() == lower_name:
             return func
         i = i + 1
     nil
@@ -235,35 +222,25 @@ fn lookup_function(db: CmmFuncDB, name: text) -> CmmFuncInfo?:
 # Return all functions whose name starts with prefix (case-insensitive).
 # Used for auto-completion when the user types a partial function name.
 fn get_function_completions(db: CmmFuncDB, prefix: text) -> [CmmFuncInfo]:
-    val lower_prefix = to_lower(prefix)
+    val lower_prefix = prefix.to_lower()
     var results: [CmmFuncInfo] = []
     var i = 0
     while i < db.functions.len():
         val func = db.functions[i]
-        val lower_name = to_lower(func.name)
-        if starts_with(lower_name, lower_prefix):
+        val lower_name = func.name.to_lower()
+        if lower_name.starts_with(lower_prefix):
             results.push(func)
         i = i + 1
     results
 
 # Return all functions belonging to a given group (case-insensitive).
 fn get_function_group(db: CmmFuncDB, group: text) -> [CmmFuncInfo]:
-    val lower_group = to_lower(group)
+    val lower_group = group.to_lower()
     var results: [CmmFuncInfo] = []
     var i = 0
     while i < db.functions.len():
         val func = db.functions[i]
-        if to_lower(func.group) == lower_group:
+        if func.group.to_lower() == lower_group:
             results.push(func)
         i = i + 1
     results
-
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
-
-# Check if text starts with a given prefix
-fn starts_with(haystack: text, prefix: text) -> bool:
-    if prefix.len() > haystack.len():
-        return false
-    haystack.starts_with(prefix)

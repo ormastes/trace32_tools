@@ -1,0 +1,1186 @@
+@allow(unnamed_duplicate_typed_args)
+# T32 CLI — Bridge layer
+# Shared execution layer connecting CLI commands to MCP tool logic
+# without JSON-RPC framing. All functions return Result<T32BridgeResult, text>.
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+use app.t32_cli.types.{T32BridgeResult}
+use app.t32_cli.session.{
+    CLI_SESSIONS, CLI_CURRENT_SESSION, CLI_CURRENT_CORE, CliSessionInfo,
+    cli_current_session_info, cli_sessions_list, cli_session_open,
+    cli_session_close, cli_session_use, cli_session_info, cli_run_t32rem,
+    session_id_list
+}
+
+# MCP imports — session/execution layer
+use app.mcp_t32.session_tools.{
+    t32_find_backend, t32_get_backend_type, t32_run_remote,
+    t32_find_current_session, t32_add_history, t32_check_blocking,
+    t32_has_blocking, t32_query_gui_status_json, t32_query_errors,
+    t32_poll_practice_state, t32_scan_cmm_file,
+    MCP_T32_SESSIONS, MCP_T32_CURRENT_SESSION, MCP_T32_CURRENT_CORE,
+    MCP_T32_HISTORY, MCP_T32_AREA_READY, MCP_T32_AREA_NAME
+}
+
+# MCP imports — action/field layer
+use app.mcp_t32.action_tools.{
+    t32_field_to_eval, t32_field_to_set_cmd, t32_field_state_set,
+    t32_get_window_catalog, t32_get_window_actions,
+    t32_parse_catalog_entry, t32_parse_catalog_entry_with_meta,
+    t32_key_before_pipe, t32_mcp_session_ids
+}
+
+# MCP imports — gap tools
+use app.mcp_t32.gap_tools.{t32_validate_cmm_source}
+
+# MCP imports — headless tools
+use app.mcp_t32.headless_tools.{t32_build_cmm_command_db}
+
+# MCP imports — job manager
+use app.mcp_t32.job_manager.{t32_job_list, t32_job_get, t32_job_cancel, T32Job}
+
+# MCP imports — dialog tools
+use app.mcp_t32.dialog_tools.{
+    t32_collect_dialogs, T32_PARSED_DIALOG_ELEMENTS,
+    t32_find_parsed_dialog_element, t32_dialog_query_command,
+    t32_dialog_set_command, t32_dialog_detect_query,
+    t32_dialog_has_query_type, t32_dialog_has_action,
+    t32_dialog_action_allowed, t32_dialog_execute_command,
+    t32_dialog_parse_exist_result, t32_validate_identifier
+}
+
+use cmm_lsp.cmm_parser.{parse_cmm_source}
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+# Require an active MCP session, returning it or an error message
+fn bridge_require_session() -> Result<McpT32Session, text>:
+    val session_opt = t32_find_current_session()
+    match session_opt:
+        Some(session): Ok(session)
+        nil: Err("No active session. Use 'session open' first.")
+
+# Run a command on the active session and return (stdout, rc)
+fn bridge_exec(session: McpT32Session, cmd: text) -> (text, i64):
+    t32_run_remote(session, cmd)
+
+# Build a gui_status string from the active session, or empty
+fn bridge_gui_status(session: McpT32Session) -> text:
+    t32_query_gui_status_json(session)
+
+# ============================================================================
+# Session functions (5)
+# ============================================================================
+
+fn bridge_sessions_list() -> Result<T32BridgeResult, text>:
+    if MCP_T32_SESSIONS.len() == 0:
+        return Ok(T32BridgeResult.scalar("No sessions registered."))
+    var rows: [[text]] = [["ID", "Host", "Port", "Name", "Arch", "Connected"]]
+    for s in MCP_T32_SESSIONS:
+        var conn = "yes"
+        if not s.connected:
+            conn = "no"
+        var marker = ""
+        if s.id == MCP_T32_CURRENT_SESSION:
+            marker = "* "
+        rows.push([marker + s.id, s.host, str(s.port), s.intercom_name, s.architecture, conn])
+    Ok(T32BridgeResult.table("Sessions", rows))
+
+fn bridge_session_open(host: text, port: i64, name: text, arch: text) -> Result<T32BridgeResult, text>:
+    # Ensure backend is available
+    val backend = t32_find_backend()
+    if backend == "":
+        return Err("No TRACE32 backend found (t32rem / python-rcl / ctypes). Install TRACE32 or set T32REM env var.")
+    var actual_host = host
+    if actual_host == "":
+        actual_host = "localhost"
+    var actual_port = port
+    if actual_port == 0:
+        actual_port = 20000
+    var intercom = name
+    if intercom == "":
+        intercom = "t32_" + str(MCP_T32_SESSIONS.len() + 1)
+    var architecture = arch
+    if architecture == "":
+        architecture = "unknown"
+    # Create MCP session and attempt connection
+    val session_id = "t32_" + str(MCP_T32_SESSIONS.len() + 1)
+    val session = McpT32Session(
+        id: session_id,
+        host: actual_host,
+        port: actual_port,
+        intercom_name: intercom,
+        architecture: architecture,
+        connected: false,
+        cores: []
+    )
+    # PING to verify connection
+    var ping_out = ""
+    var ping_rc: i64 = 0
+    (ping_out, ping_rc) = t32_run_remote(session, "PING")
+    if ping_rc != 0:
+        return Err("Connection failed to {actual_host}:{actual_port} — {ping_out.trim()}")
+    val connected_session = McpT32Session(
+        id: session_id,
+        host: actual_host,
+        port: actual_port,
+        intercom_name: intercom,
+        architecture: architecture,
+        connected: true,
+        cores: []
+    )
+    MCP_T32_SESSIONS = MCP_T32_SESSIONS + [connected_session]
+    MCP_T32_CURRENT_SESSION = session_id
+    t32_add_history("session_open {actual_host}:{actual_port}", "ok", session_id, "")
+    val pairs = [
+        ["session_id", session_id],
+        ["host", actual_host],
+        ["port", str(actual_port)],
+        ["name", intercom],
+        ["architecture", architecture],
+        ["backend", t32_get_backend_type()]
+    ]
+    Ok(T32BridgeResult.kv("Session Opened", pairs))
+
+fn bridge_session_resume(session_id: text) -> Result<T32BridgeResult, text>:
+    if session_id == "":
+        return Err("session_id is required.")
+    var found = false
+    for s in MCP_T32_SESSIONS:
+        if s.id == session_id:
+            found = true
+    if not found:
+        return Err("Session not found: {session_id}")
+    MCP_T32_CURRENT_SESSION = session_id
+    Ok(T32BridgeResult.scalar_titled("Session Resumed", session_id))
+
+fn bridge_session_close(session_id: text) -> Result<T32BridgeResult, text>:
+    if session_id == "":
+        return Err("session_id is required.")
+    var found = false
+    var kept: [McpT32Session] = []
+    for s in MCP_T32_SESSIONS:
+        if s.id == session_id:
+            found = true
+        else:
+            kept = kept + [s]
+    if not found:
+        return Err("Session not found: {session_id}")
+    MCP_T32_SESSIONS = kept
+    if MCP_T32_CURRENT_SESSION == session_id:
+        MCP_T32_CURRENT_SESSION = ""
+    t32_add_history("session_close", "ok", session_id, "")
+    Ok(T32BridgeResult.scalar_titled("Session Closed", session_id))
+
+fn bridge_session_info(session_id: text) -> Result<T32BridgeResult, text>:
+    var target_session: Option<McpT32Session> = nil
+    if session_id != "":
+        for s in MCP_T32_SESSIONS:
+            if s.id == session_id:
+                target_session = Some(s)
+        if target_session.?:
+            pass_do_nothing
+        else:
+            return Err("Session not found: {session_id}")
+    else:
+        target_session = t32_find_current_session()
+    match target_session:
+        nil: return Err("No active session.")
+        Some(session):
+            var conn = "yes"
+            if not session.connected:
+                conn = "no"
+            var core_count: i64 = 0
+            var core_names: [text] = []
+            for c in session.cores:
+                core_count = core_count + 1
+                core_names.push("{c.core_id} ({c.label})")
+            val pairs = [
+                ["session_id", session.id],
+                ["host", session.host],
+                ["port", str(session.port)],
+                ["intercom_name", session.intercom_name],
+                ["architecture", session.architecture],
+                ["connected", conn],
+                ["core_count", str(core_count)],
+                ["current_core", MCP_T32_CURRENT_CORE]
+            ]
+            var result = T32BridgeResult.kv("Session Info", pairs)
+            if session.connected:
+                result.set_gui_status(bridge_gui_status(session))
+            return Ok(result)
+
+# ============================================================================
+# Core functions (2)
+# ============================================================================
+
+fn bridge_core_list(session_id: text) -> Result<T32BridgeResult, text>:
+    val session = bridge_require_session()?
+    # Query core count from T32
+    var count_out = ""
+    var count_rc: i64 = 0
+    (count_out, count_rc) = bridge_exec(session, "EVAL CORE.NUMBER()")
+    var core_count: i64 = 1
+    if count_rc == 0:
+        val trimmed = count_out.trim().replace(".", "")
+        val parsed = int(trimmed)
+        if parsed > 0:
+            core_count = parsed
+    var rows: [[text]] = [["Index", "Name", "Selected"]]
+    var ci: i64 = 0
+    while ci < core_count:
+        var name_out = ""
+        var name_rc: i64 = 0
+        (name_out, name_rc) = bridge_exec(session, "EVAL CORE.NAME({ci}.)")
+        var core_name = "core{ci}"
+        if name_rc == 0 and name_out.trim() != "":
+            core_name = name_out.trim().replace("\"", "")
+        var sel = ""
+        if MCP_T32_CURRENT_CORE == core_name or (MCP_T32_CURRENT_CORE == "" and ci == 0):
+            sel = "*"
+        rows.push([str(ci), core_name, sel])
+        ci = ci + 1
+    t32_add_history("core_list", "{core_count} cores", session.id, MCP_T32_CURRENT_CORE)
+    Ok(T32BridgeResult.table("Cores", rows))
+
+fn bridge_core_select(core_id: text) -> Result<T32BridgeResult, text>:
+    if core_id == "":
+        return Err("core_id is required.")
+    val session = bridge_require_session()?
+    var stdout = ""
+    var rc: i64 = 0
+    (stdout, rc) = bridge_exec(session, "CORE.select {core_id}.")
+    if rc != 0 and rc != -1:
+        return Err("Core select failed (exit {rc}): {stdout.trim()}")
+    if rc == -1:
+        return Err(stdout.trim())
+    MCP_T32_CURRENT_CORE = core_id
+    t32_add_history("CORE.select {core_id}", "ok", session.id, core_id)
+    Ok(T32BridgeResult.scalar_titled("Core Selected", core_id))
+
+# ============================================================================
+# Execution functions (3)
+# ============================================================================
+
+fn bridge_cmd_run(command: text, force: bool) -> Result<T32BridgeResult, text>:
+    if command == "":
+        return Err("command is required.")
+    # Blocking pattern detection
+    if not force:
+        val warnings = t32_check_blocking(command)
+        if warnings.len() > 0 and t32_has_blocking(warnings):
+            var items: [text] = []
+            for w in warnings:
+                items.push(w)
+            items.push("Use --force to execute anyway.")
+            return Ok(T32BridgeResult.list("Blocked: {command}", items))
+    val session = bridge_require_session()?
+    var stdout = ""
+    var rc: i64 = 0
+    (stdout, rc) = bridge_exec(session, command)
+    t32_add_history(command, stdout.trim(), session.id, MCP_T32_CURRENT_CORE)
+    if rc != 0 and rc != -1:
+        return Err("Command failed (exit {rc}): {stdout.trim()}")
+    if rc == -1:
+        return Err(stdout.trim())
+    var result = T32BridgeResult.scalar_titled(command, stdout.trim())
+    # Attach non-blocking warnings as gui_status hint
+    val cmd_warnings = t32_check_blocking(command)
+    if cmd_warnings.len() > 0:
+        var warn_text = ""
+        for w in cmd_warnings:
+            if warn_text != "":
+                warn_text = warn_text + "; "
+            warn_text = warn_text + w
+        result.set_gui_status(warn_text)
+    else:
+        result.set_gui_status(bridge_gui_status(session))
+    Ok(result)
+
+fn bridge_cmm_run(script: text, wait: bool, timeout_ms: i64, capture_area: bool, force: bool) -> Result<T32BridgeResult, text>:
+    if script == "":
+        return Err("script path is required.")
+    # Blocking pattern detection
+    if not force:
+        var scan_text = script
+        if not script.contains("\n") and not script.contains(";"):
+            val file_content = rt_file_read_text(script) ?? ""
+            if file_content != "":
+                scan_text = file_content
+        val warnings = t32_check_blocking(scan_text)
+        if warnings.len() > 0 and t32_has_blocking(warnings):
+            var items: [text] = []
+            for w in warnings:
+                items.push(w)
+            items.push("Use --force to execute anyway.")
+            return Ok(T32BridgeResult.list("Blocked: DO {script}", items))
+    val session = bridge_require_session()?
+    var actual_timeout = timeout_ms
+    if actual_timeout < 1000:
+        actual_timeout = 30000
+    # Auto-setup AREA if capture requested and not yet ready
+    if capture_area and not MCP_T32_AREA_READY:
+        var area_name = MCP_T32_AREA_NAME
+        if area_name == "":
+            area_name = "MCP_OUT"
+        bridge_exec(session, "SCREEN.OFF")
+        bridge_exec(session, "AREA.Create {area_name}")
+        bridge_exec(session, "AREA.Select {area_name}")
+        MCP_T32_AREA_READY = true
+        MCP_T32_AREA_NAME = area_name
+    val do_cmd = "DO {script}"
+    var stdout = ""
+    var rc: i64 = 0
+    (stdout, rc) = bridge_exec(session, do_cmd)
+    t32_add_history(do_cmd, stdout.trim(), session.id, MCP_T32_CURRENT_CORE)
+    if rc != 0 and rc != -1:
+        return Err("CMM script failed (exit {rc}): {stdout.trim()}")
+    if rc == -1:
+        return Err(stdout.trim())
+    # Poll PRACTICE.STATE() if wait requested
+    var practice_status = "fired"
+    if wait:
+        practice_status = t32_poll_practice_state(session, actual_timeout)
+    # Capture AREA output if requested
+    var area_output = ""
+    if capture_area and MCP_T32_AREA_READY:
+        var area_name = MCP_T32_AREA_NAME
+        if area_name == "":
+            area_name = "MCP_OUT"
+        var area_stdout = ""
+        var area_rc: i64 = 0
+        (area_stdout, area_rc) = bridge_exec(session, "WinPrint.AREA {area_name}")
+        if area_rc == 0:
+            area_output = area_stdout.trim()
+    val pairs = [
+        ["script", script],
+        ["output", stdout.trim()],
+        ["practice_state", practice_status]
+    ]
+    var final_pairs = pairs
+    if area_output != "":
+        final_pairs = final_pairs + [["area_output", area_output]]
+    var result = T32BridgeResult.kv("CMM Run", final_pairs)
+    result.set_gui_status(bridge_gui_status(session))
+    Ok(result)
+
+fn bridge_eval(expression: text) -> Result<T32BridgeResult, text>:
+    if expression == "":
+        return Err("expression is required.")
+    val session = bridge_require_session()?
+    val eval_cmd = "EVAL {expression}"
+    var stdout = ""
+    var rc: i64 = 0
+    (stdout, rc) = bridge_exec(session, eval_cmd)
+    t32_add_history(eval_cmd, stdout.trim(), session.id, MCP_T32_CURRENT_CORE)
+    if rc != 0 and rc != -1:
+        return Err("Eval failed (exit {rc}): {stdout.trim()}")
+    if rc == -1:
+        return Err(stdout.trim())
+    var result = T32BridgeResult.scalar_titled(expression, stdout.trim())
+    result.set_gui_status(bridge_gui_status(session))
+    Ok(result)
+
+# ============================================================================
+# Window functions (4)
+# ============================================================================
+
+fn bridge_window_list() -> Result<T32BridgeResult, text>:
+    val catalog = t32_get_window_catalog()
+    if catalog.len() == 0:
+        return Ok(T32BridgeResult.scalar("No windows in catalog."))
+    var rows: [[text]] = [["Key", "Title", "Kind", "Capture"]]
+    for entry in catalog:
+        var key = ""
+        var title = ""
+        var kind = ""
+        var open_cmd = ""
+        var capture_cmd = ""
+        var capture_mode = ""
+        var arch = ""
+        var notes = ""
+        (key, title, kind, open_cmd, capture_cmd, capture_mode, arch, notes) = t32_parse_catalog_entry_with_meta(entry)
+        var cap = capture_mode
+        if cap == "":
+            cap = "print_parse"
+        rows.push([key, title, kind, cap])
+    Ok(T32BridgeResult.table("Windows", rows))
+
+fn bridge_window_open(window_key: text) -> Result<T32BridgeResult, text>:
+    if window_key == "":
+        return Err("window_key is required.")
+    val catalog = t32_get_window_catalog()
+    var found_cmd = ""
+    var found_title = ""
+    for entry in catalog:
+        var key = ""
+        var title = ""
+        var kind = ""
+        var open_cmd = ""
+        var capture_cmd = ""
+        (key, title, kind, open_cmd, capture_cmd) = t32_parse_catalog_entry(entry)
+        if key == window_key:
+            found_cmd = open_cmd
+            found_title = title
+    if found_cmd == "":
+        return Err("Window not found: {window_key}")
+    val session = bridge_require_session()?
+    var stdout = ""
+    var rc: i64 = 0
+    (stdout, rc) = bridge_exec(session, found_cmd)
+    t32_add_history(found_cmd, "opened", session.id, MCP_T32_CURRENT_CORE)
+    Ok(T32BridgeResult.scalar_titled("Window Opened", "{found_title} ({window_key})"))
+
+fn bridge_window_capture(window_key: text) -> Result<T32BridgeResult, text>:
+    if window_key == "":
+        return Err("window_key is required.")
+    val catalog = t32_get_window_catalog()
+    var found_capture = ""
+    var found_title = ""
+    for entry in catalog:
+        var key = ""
+        var title = ""
+        var kind = ""
+        var open_cmd = ""
+        var capture_cmd = ""
+        (key, title, kind, open_cmd, capture_cmd) = t32_parse_catalog_entry(entry)
+        if key == window_key:
+            found_capture = capture_cmd
+            found_title = title
+    if found_capture == "":
+        return Err("Window not found: {window_key}")
+    val session = bridge_require_session()?
+    var stdout = ""
+    var rc: i64 = 0
+    (stdout, rc) = bridge_exec(session, found_capture)
+    var content = stdout.trim()
+    # Fallback: if WinPrint result is empty, try PRinTer.FILE
+    if content == "" and rc == 0:
+        val temp_file = "/tmp/t32_capture_{window_key}.txt"
+        val printer_cmd = "PRinTer.FILE {temp_file} {found_capture.replace("WinPrint.", "")}"
+        var stdout2 = ""
+        var rc2: i64 = 0
+        (stdout2, rc2) = bridge_exec(session, printer_cmd)
+        if rc2 == 0:
+            val file_content = rt_file_read_text(temp_file) ?? ""
+            if file_content != "":
+                content = file_content.trim()
+    t32_add_history("capture {window_key}", "captured", session.id, MCP_T32_CURRENT_CORE)
+    Ok(T32BridgeResult.raw(content))
+
+fn bridge_window_describe(window_key: text) -> Result<T32BridgeResult, text>:
+    if window_key == "":
+        return Err("window_key is required.")
+    val catalog = t32_get_window_catalog()
+    var found = false
+    var found_title = ""
+    var found_kind = ""
+    var found_capture_mode = ""
+    var found_arch = ""
+    var found_notes = ""
+    var found_open_cmd = ""
+    var found_capture_cmd = ""
+    for entry in catalog:
+        var key = ""
+        var title = ""
+        var kind = ""
+        var open_cmd = ""
+        var capture_cmd = ""
+        var capture_mode = ""
+        var arch = ""
+        var notes = ""
+        (key, title, kind, open_cmd, capture_cmd, capture_mode, arch, notes) = t32_parse_catalog_entry_with_meta(entry)
+        if key == window_key:
+            found = true
+            found_title = title
+            found_kind = kind
+            found_capture_mode = capture_mode
+            found_arch = arch
+            found_notes = notes
+            found_open_cmd = open_cmd
+            found_capture_cmd = capture_cmd
+    if not found:
+        return Err("Window not found: {window_key}")
+    var pairs: [[text]] = [
+        ["window_key", window_key],
+        ["title", found_title],
+        ["kind", found_kind],
+        ["open_command", found_open_cmd],
+        ["capture_command", found_capture_cmd]
+    ]
+    if found_capture_mode != "":
+        pairs = pairs + [["capture_mode", found_capture_mode]]
+    if found_arch != "":
+        pairs = pairs + [["arch", found_arch]]
+    if found_notes != "":
+        pairs = pairs + [["notes", found_notes]]
+    # Attach actions
+    val action_entries = t32_get_window_actions(window_key)
+    if action_entries.len() > 0:
+        var action_list: [text] = []
+        for aentry in action_entries:
+            val parts = aentry.split("|")
+            var akey = ""
+            var alabel = ""
+            if parts.len() > 0:
+                akey = parts[0]
+            if parts.len() > 1:
+                alabel = parts[1]
+            action_list.push("{akey}: {alabel}")
+        pairs = pairs + [["actions", action_list.join(", ")]]
+    Ok(T32BridgeResult.kv("Window: {found_title}", pairs))
+
+# ============================================================================
+# Screenshot (1)
+# ============================================================================
+
+fn bridge_screenshot(window_key: text, output_path: text) -> Result<T32BridgeResult, text>:
+    if window_key == "":
+        return Err("window_key is required.")
+    val session = bridge_require_session()?
+    var out_file = output_path
+    if out_file == "":
+        out_file = "/tmp/t32_{window_key}.bmp"
+    # Position window
+    bridge_exec(session, "WinPOS 0. 0. 80. 40.")
+    # Capture via SCREEN.DUMP
+    val screen_cmd = "SCREEN.DUMP {out_file} /BMP"
+    var stdout = ""
+    var rc: i64 = 0
+    (stdout, rc) = bridge_exec(session, screen_cmd)
+    t32_add_history("screenshot {window_key} -> {out_file}", "ok", session.id, MCP_T32_CURRENT_CORE)
+    if rc != 0 and rc != -1:
+        return Err("Screenshot failed: {stdout.trim()}")
+    if rc == -1:
+        return Err(stdout.trim())
+    var status = "ok"
+    val file_exists = rt_file_exists(out_file) ?? false
+    if not file_exists:
+        # Fallback: text-mode capture
+        val printer_cmd = "PRinTer.FILE {out_file}.txt"
+        bridge_exec(session, printer_cmd)
+        status = "text_fallback"
+        out_file = out_file + ".txt"
+    val pairs = [
+        ["window", window_key],
+        ["output_path", out_file],
+        ["status", status]
+    ]
+    Ok(T32BridgeResult.kv("Screenshot", pairs))
+
+# ============================================================================
+# Action/Field functions (4)
+# ============================================================================
+
+fn bridge_action_invoke(action_key: text, args: text) -> Result<T32BridgeResult, text>:
+    if action_key == "":
+        return Err("action_key is required.")
+    val session = bridge_require_session()?
+    # Search for action in window catalogs
+    val catalog = t32_get_window_catalog()
+    var found_template = ""
+    var found_label = ""
+    for entry in catalog:
+        val wkey = t32_key_before_pipe(entry)
+        val action_entries = t32_get_window_actions(wkey)
+        for aentry in action_entries:
+            val aparts = aentry.split("|")
+            var akey = ""
+            var alabel = ""
+            var atemplate = ""
+            if aparts.len() > 0:
+                akey = aparts[0]
+            if aparts.len() > 1:
+                alabel = aparts[1]
+            if aparts.len() > 3:
+                atemplate = aparts[3]
+            if akey == action_key:
+                found_template = atemplate
+                found_label = alabel
+    if found_template == "":
+        return Err("Action not found: {action_key}")
+    var final_cmd = found_template
+    if args != "":
+        final_cmd = final_cmd.replace("%0", args)
+    var stdout = ""
+    var rc: i64 = 0
+    (stdout, rc) = bridge_exec(session, final_cmd)
+    t32_add_history("action:{action_key} {final_cmd}", stdout.trim(), session.id, MCP_T32_CURRENT_CORE)
+    if rc != 0 and rc != -1:
+        return Err("Action failed (exit {rc}): {stdout.trim()}")
+    if rc == -1:
+        return Err(stdout.trim())
+    val pairs = [
+        ["action_key", action_key],
+        ["label", found_label],
+        ["command", final_cmd],
+        ["output", stdout.trim()]
+    ]
+    Ok(T32BridgeResult.kv("Action: {found_label}", pairs))
+
+fn bridge_action_list(window_key: text) -> Result<T32BridgeResult, text>:
+    var rows: [[text]] = [["Key", "Label", "Type", "Window"]]
+    if window_key != "":
+        val actions = t32_get_window_actions(window_key)
+        for aentry in actions:
+            val parts = aentry.split("|")
+            var akey = ""
+            var alabel = ""
+            var atype = ""
+            if parts.len() > 0:
+                akey = parts[0]
+            if parts.len() > 1:
+                alabel = parts[1]
+            if parts.len() > 2:
+                atype = parts[2]
+            rows.push([akey, alabel, atype, window_key])
+    else:
+        val catalog = t32_get_window_catalog()
+        for entry in catalog:
+            val wkey = t32_key_before_pipe(entry)
+            val actions = t32_get_window_actions(wkey)
+            for aentry in actions:
+                val parts = aentry.split("|")
+                var akey = ""
+                var alabel = ""
+                var atype = ""
+                if parts.len() > 0:
+                    akey = parts[0]
+                if parts.len() > 1:
+                    alabel = parts[1]
+                if parts.len() > 2:
+                    atype = parts[2]
+                rows.push([akey, alabel, atype, wkey])
+    Ok(T32BridgeResult.table("Actions", rows))
+
+fn bridge_field_get(field_key: text) -> Result<T32BridgeResult, text>:
+    if field_key == "":
+        return Err("field_key is required.")
+    val session = bridge_require_session()?
+    val eval_expr = t32_field_to_eval(field_key)
+    val eval_cmd = "EVAL {eval_expr}"
+    var stdout = ""
+    var rc: i64 = 0
+    (stdout, rc) = bridge_exec(session, eval_cmd)
+    t32_add_history("field_get:{field_key} -> {eval_cmd}", stdout.trim(), session.id, MCP_T32_CURRENT_CORE)
+    var value = stdout.trim()
+    if rc != 0 and rc != -1:
+        value = "error: {stdout.trim()}"
+    if rc == -1:
+        return Err(stdout.trim())
+    t32_field_state_set(session.id, field_key, value)
+    val pairs = [
+        ["field_key", field_key],
+        ["value", value],
+        ["eval_expression", eval_expr]
+    ]
+    var result = T32BridgeResult.kv("Field: {field_key}", pairs)
+    result.set_gui_status(bridge_gui_status(session))
+    Ok(result)
+
+fn bridge_field_set(field_key: text, value: text) -> Result<T32BridgeResult, text>:
+    if field_key == "" or value == "":
+        return Err("field_key and value are required.")
+    val session = bridge_require_session()?
+    val set_cmd = t32_field_to_set_cmd(field_key, value)
+    if set_cmd == "":
+        return Err("Unknown field key for set: {field_key}. Use register.NAME, var.NAME, memory.ADDR, or pc/sp/lr/cpsr/r0-r3")
+    var stdout = ""
+    var rc: i64 = 0
+    (stdout, rc) = bridge_exec(session, set_cmd)
+    t32_add_history("field_set:{field_key}={value} -> {set_cmd}", stdout.trim(), session.id, MCP_T32_CURRENT_CORE)
+    if rc != 0 and rc != -1:
+        return Err("Field set failed (exit {rc}): {stdout.trim()}")
+    if rc == -1:
+        return Err(stdout.trim())
+    t32_field_state_set(session.id, field_key, value)
+    val pairs = [
+        ["field_key", field_key],
+        ["value", value],
+        ["command", set_cmd]
+    ]
+    Ok(T32BridgeResult.kv("Field Set", pairs))
+
+# ============================================================================
+# History/Resource functions (3)
+# ============================================================================
+
+fn bridge_history_tail(count: i64) -> Result<T32BridgeResult, text>:
+    var actual_count = count
+    if actual_count < 1:
+        actual_count = 20
+    var total: i64 = 0
+    for _h in MCP_T32_HISTORY:
+        total = total + 1
+    var start_idx: i64 = 0
+    if total > actual_count:
+        start_idx = total - actual_count
+    var rows: [[text]] = [["Command", "Result", "Session", "Core"]]
+    var idx: i64 = 0
+    for h in MCP_T32_HISTORY:
+        if idx >= start_idx:
+            # Truncate result to keep table readable
+            var result_text = h.result
+            if result_text.len() > 60:
+                result_text = result_text.substring(0, 57) + "..."
+            rows.push([h.command, result_text, h.session_id, h.core_id])
+        idx = idx + 1
+    Ok(T32BridgeResult.table("History (last {actual_count})", rows))
+
+fn bridge_resources_list() -> Result<T32BridgeResult, text>:
+    val items = [
+        "t32:///sessions  - T32 Session Manifest",
+        "t32:///windows   - T32 Window Catalog",
+        "t32:///history   - T32 Command History"
+    ]
+    Ok(T32BridgeResult.list("Resources", items))
+
+fn bridge_resource_read(uri: text) -> Result<T32BridgeResult, text>:
+    if uri == "":
+        return Err("uri is required.")
+    if uri == "t32:///sessions":
+        return bridge_sessions_list()
+    if uri == "t32:///windows":
+        return bridge_window_list()
+    if uri == "t32:///history":
+        return bridge_history_tail(50)
+    Err("Resource not found: {uri}")
+
+# ============================================================================
+# Headless/CMM functions (4)
+# ============================================================================
+
+fn bridge_setup_headless(area_name: text, semihost: bool, error_handler: bool) -> Result<T32BridgeResult, text>:
+    val session = bridge_require_session()?
+    var actual_area = area_name
+    if actual_area == "":
+        actual_area = "MCP_OUT"
+    # SCREEN.OFF
+    bridge_exec(session, "SCREEN.OFF")
+    # Create and select AREA
+    bridge_exec(session, "AREA.Create {actual_area}")
+    bridge_exec(session, "AREA.Select {actual_area}")
+    # Semihosting
+    if semihost:
+        bridge_exec(session, "SYStem.Option SemiHost ON")
+    # Error handler
+    if error_handler:
+        bridge_exec(session, "ON ERROR GOSUB mcp_error_handler")
+    MCP_T32_AREA_READY = true
+    MCP_T32_AREA_NAME = actual_area
+    t32_add_history("setup_headless area={actual_area} semihost={semihost}", "ok", session.id, MCP_T32_CURRENT_CORE)
+    val pairs = [
+        ["area_name", actual_area],
+        ["screen", "off"],
+        ["semihost", str(semihost)],
+        ["error_handler", str(error_handler)]
+    ]
+    Ok(T32BridgeResult.kv("Headless Setup", pairs))
+
+fn bridge_area_read(area_name: text, clear: bool) -> Result<T32BridgeResult, text>:
+    val session = bridge_require_session()?
+    var actual_area = area_name
+    if actual_area == "":
+        actual_area = MCP_T32_AREA_NAME
+    if actual_area == "":
+        actual_area = "MCP_OUT"
+    var stdout = ""
+    var rc: i64 = 0
+    (stdout, rc) = bridge_exec(session, "WinPrint.AREA {actual_area}")
+    if clear:
+        bridge_exec(session, "AREA.CLEAR {actual_area}")
+    t32_add_history("area_read {actual_area}", stdout.trim(), session.id, MCP_T32_CURRENT_CORE)
+    var result = T32BridgeResult.raw(stdout.trim())
+    Ok(result)
+
+fn bridge_cmm_commands(group: text, search: text) -> Result<T32BridgeResult, text>:
+    val db = t32_build_cmm_command_db()
+    var rows: [[text]] = [["Name", "Short", "Group", "Description"]]
+    for cmd in db:
+        val parts = cmd.split("|")
+        var cmd_name = ""
+        var cmd_short = ""
+        var cmd_group = ""
+        var cmd_desc = ""
+        if parts.len() > 0:
+            cmd_name = parts[0]
+        if parts.len() > 1:
+            cmd_short = parts[1]
+        if parts.len() > 2:
+            cmd_group = parts[2]
+        if parts.len() > 3:
+            cmd_desc = parts[3]
+        # Filter by group
+        if group != "":
+            if cmd_group.to_lower() != group.to_lower():
+                continue
+        # Filter by search
+        if search != "":
+            val lower_search = search.to_lower()
+            if not cmd_name.to_lower().contains(lower_search) and not cmd_desc.to_lower().contains(lower_search):
+                continue
+        rows.push([cmd_name, cmd_short, cmd_group, cmd_desc])
+    var count = rows.len() - 1
+    Ok(T32BridgeResult.table("CMM Commands ({count} matches)", rows))
+
+fn bridge_cmm_validate(source: text, mode: text) -> Result<T32BridgeResult, text>:
+    if source == "":
+        return Err("source is required.")
+    var actual_mode = mode
+    if actual_mode == "":
+        actual_mode = "check"
+    if actual_mode != "check" and actual_mode != "report" and actual_mode != "suggest":
+        return Err("Invalid mode: {actual_mode}. Must be one of: check, report, suggest")
+    # If source looks like a file path, read it
+    var cmm_source = source
+    if not source.contains("\n") and not source.contains(";"):
+        val file_content = rt_file_read_text(source) ?? ""
+        if file_content != "":
+            cmm_source = file_content
+    # Run validation
+    val lines = cmm_source.split("\n")
+    var findings: [[text]] = [["Line", "Command", "Severity", "Message"]]
+    var block_count: i64 = 0
+    var line_num: i64 = 1
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.len() == 0 or trimmed.starts_with(";"):
+            line_num = line_num + 1
+            continue
+        val lower = trimmed.to_lower()
+        # Check blocking patterns
+        if lower.contains("dialog.ok"):
+            findings.push([str(line_num), "DIALOG.OK", "BLOCK", "Waits for user click"])
+            block_count = block_count + 1
+        if lower.contains("dialog.yesno"):
+            findings.push([str(line_num), "DIALOG.YESNO", "BLOCK", "Waits for user choice"])
+            block_count = block_count + 1
+        if lower.contains("dialog.file"):
+            findings.push([str(line_num), "DIALOG.FILE", "BLOCK", "Opens file picker"])
+            block_count = block_count + 1
+        if lower.contains("dialog.dir"):
+            findings.push([str(line_num), "DIALOG.DIR", "BLOCK", "Opens directory picker"])
+            block_count = block_count + 1
+        if lower.contains("dialog.string"):
+            findings.push([str(line_num), "DIALOG.STRING", "BLOCK", "Opens text input"])
+            block_count = block_count + 1
+        if lower.contains("inkey"):
+            findings.push([str(line_num), "INKEY", "BLOCK", "Waits for keypress"])
+            block_count = block_count + 1
+        if lower.contains("screen.wait"):
+            findings.push([str(line_num), "SCREEN.WAIT", "BLOCK", "Waits for screen update"])
+            block_count = block_count + 1
+        if lower.contains("menu.reprogram"):
+            findings.push([str(line_num), "MENU.ReProgram", "WARN", "UI-driven menu state"])
+        if lower.contains("dialog.view"):
+            findings.push([str(line_num), "DIALOG.view", "WARN", "May block if script waits"])
+        line_num = line_num + 1
+    var classification = "safe"
+    if block_count > 3:
+        classification = "unsafe_for_headless"
+    elif block_count > 0:
+        classification = "needs_manual_rewrite"
+    var finding_count = findings.len() - 1
+    var result = T32BridgeResult.table("CMM Validation ({classification})", findings)
+    result.set_gui_status("classification: {classification}, findings: {finding_count}, mode: {actual_mode}")
+    Ok(result)
+
+# ============================================================================
+# Gap functions (2)
+# ============================================================================
+
+fn bridge_status_snapshot() -> Result<T32BridgeResult, text>:
+    val session = bridge_require_session()?
+    # Query STATE.RUN()
+    var stdout = ""
+    var rc: i64 = 0
+    (stdout, rc) = bridge_exec(session, "EVAL STATE.RUN()")
+    var run_state = "unknown"
+    var status_summary = "Could not determine target state"
+    if rc == 0:
+        val trimmed = stdout.trim().to_lower()
+        if trimmed == "true" or trimmed == "true.":
+            run_state = "running"
+            status_summary = "Target CPU is running"
+        elif trimmed == "false" or trimmed == "false.":
+            run_state = "stopped"
+            status_summary = "Target CPU is stopped (halted)"
+        else:
+            status_summary = "STATE.RUN() returned: {stdout.trim()}"
+    else:
+        status_summary = "STATE.RUN() query failed (exit {rc})"
+    var conn = "yes"
+    if not session.connected:
+        conn = "no"
+    val pairs = [
+        ["session_id", session.id],
+        ["core_id", MCP_T32_CURRENT_CORE],
+        ["run_state", run_state],
+        ["connected", conn],
+        ["status_summary", status_summary]
+    ]
+    var result = T32BridgeResult.status(pairs, bridge_gui_status(session))
+    Ok(result)
+
+fn bridge_error_check() -> Result<T32BridgeResult, text>:
+    val session = bridge_require_session()?
+    var err_msg = ""
+    var err_type = ""
+    var last_stderr = ""
+    (err_msg, err_type, last_stderr) = t32_query_errors(session)
+    # Query PRACTICE state
+    var practice_state_str = "unknown"
+    var ps_out = ""
+    var ps_rc: i64 = 0
+    (ps_out, ps_rc) = bridge_exec(session, "EVAL PRACTICE.STATE()")
+    if ps_rc == 0:
+        practice_state_str = ps_out.trim().replace(".", "")
+    val has_error = (err_type == "warning" or err_type == "error" or last_stderr != "")
+    var error_flag = "no"
+    if has_error:
+        error_flag = "yes"
+    val pairs = [
+        ["message", err_msg],
+        ["type", err_type],
+        ["stderr", last_stderr],
+        ["practice_state", practice_state_str],
+        ["has_error", error_flag],
+        ["session_id", session.id]
+    ]
+    Ok(T32BridgeResult.kv("Error Check", pairs))
+
+# ============================================================================
+# Job functions (4)
+# ============================================================================
+
+fn bridge_job_list(session_id: text) -> Result<T32BridgeResult, text>:
+    val jobs = t32_job_list(session_id)
+    if jobs.len() == 0:
+        return Ok(T32BridgeResult.scalar("No jobs."))
+    var rows: [[text]] = [["ID", "Tool", "Session", "Status", "Summary"]]
+    for job in jobs:
+        rows.push([job.job_id, job.tool_name, job.session_id, job.status, job.summary])
+    Ok(T32BridgeResult.table("Jobs", rows))
+
+fn bridge_job_get(job_id: text) -> Result<T32BridgeResult, text>:
+    if job_id == "":
+        return Err("job_id is required.")
+    val job = t32_job_get(job_id)
+    if job.status == "not_found":
+        return Err("Job not found: {job_id}")
+    val pairs = [
+        ["job_id", job.job_id],
+        ["tool_name", job.tool_name],
+        ["session_id", job.session_id],
+        ["core_id", job.core_id],
+        ["status", job.status],
+        ["started_at", str(job.started_at)],
+        ["updated_at", str(job.updated_at)],
+        ["timeout_ms", str(job.timeout_ms)],
+        ["summary", job.summary]
+    ]
+    var final_pairs = pairs
+    if job.result != "":
+        final_pairs = final_pairs + [["result", job.result]]
+    if job.error != "":
+        final_pairs = final_pairs + [["error", job.error]]
+    Ok(T32BridgeResult.kv("Job: {job_id}", final_pairs))
+
+fn bridge_job_cancel(job_id: text) -> Result<T32BridgeResult, text>:
+    if job_id == "":
+        return Err("job_id is required.")
+    val ok = t32_job_cancel(job_id)
+    if ok:
+        return Ok(T32BridgeResult.scalar_titled("Job Cancelled", job_id))
+    Err("Cannot cancel job: {job_id} (not found or already terminal)")
+
+fn bridge_job_result(job_id: text) -> Result<T32BridgeResult, text>:
+    if job_id == "":
+        return Err("job_id is required.")
+    val job = t32_job_get(job_id)
+    if job.status == "not_found":
+        return Err("Job not found: {job_id}")
+    if job.status == "completed":
+        return Ok(T32BridgeResult.scalar_titled("Job Result: {job_id}", job.result))
+    if job.status == "failed":
+        return Err("Job failed: {job.error}")
+    Err("Job not yet complete (status: {job.status})")
+
+# ============================================================================
+# Dialog functions (4)
+# ============================================================================
+
+fn bridge_dialog_parse(source: text) -> Result<T32BridgeResult, text>:
+    if source == "":
+        return Err("source is required.")
+    var cmm_source = source
+    if not source.contains("\n") and not source.contains(";"):
+        val file_content = rt_file_read_text(source) ?? ""
+        if file_content != "":
+            cmm_source = file_content
+    val program = parse_cmm_source(cmm_source)
+    T32_PARSED_DIALOG_ELEMENTS = []
+    var elements: [text] = []
+    var labels: [text] = []
+    val dialog_count = t32_collect_dialogs(program.statements, elements, labels)
+    var rows: [[text]] = [["Label", "Type", "Queryable", "Clickable", "Settable"]]
+    for item in T32_PARSED_DIALOG_ELEMENTS:
+        var q = "no"
+        if item.queryable:
+            q = "yes"
+        var c = "no"
+        if item.clickable:
+            c = "yes"
+        var s = "no"
+        if item.settable:
+            s = "yes"
+        rows.push([item.label, item.widget_type, q, c, s])
+    var error_items: [text] = []
+    for e in program.errors:
+        error_items.push(e)
+    var result = T32BridgeResult.table("Dialog Elements ({dialog_count} dialogs)", rows)
+    if error_items.len() > 0:
+        result.set_gui_status("Parse errors: {error_items.join("; ")}")
+    Ok(result)
+
+fn bridge_dialog_get(label: text, query_type: text) -> Result<T32BridgeResult, text>:
+    if label == "":
+        return Err("label is required.")
+    if not t32_validate_identifier(label):
+        return Err("Invalid label: contains disallowed characters")
+    if query_type != "" and not t32_dialog_has_query_type(query_type):
+        return Err("Invalid dialog query type '{query_type}'. Valid types: boolean, string, value")
+    # Check parsed dialog element metadata
+    val parsed_opt = t32_find_parsed_dialog_element(label)
+    var requested_type = query_type
+    match parsed_opt:
+        Some(parsed):
+            if not parsed.queryable:
+                return Err("Dialog element '{label}' is type '{parsed.widget_type}' and is not queryable")
+            if parsed.runtime_access != "label":
+                return Err("Dialog element '{label}' uses a generated label and cannot be queried at runtime")
+            if requested_type != "" and requested_type != parsed.value_type:
+                return Err("Dialog element '{label}' expects type '{parsed.value_type}', not '{requested_type}'")
+            if requested_type == "":
+                requested_type = parsed.value_type
+        nil: pass_do_nothing
+    val session = bridge_require_session()?
+    var detected_type = requested_type
+    var value = ""
+    if detected_type == "":
+        (detected_type, value) = t32_dialog_detect_query(session, label)
+        if detected_type == "":
+            return Err("Dialog element not found: {label}")
+    else:
+        val cmd = t32_dialog_query_command(label, detected_type)
+        var stdout = ""
+        var rc: i64 = 0
+        (stdout, rc) = bridge_exec(session, cmd)
+        if rc != 0:
+            return Err("Dialog query failed for '{label}' with type '{detected_type}'")
+        value = stdout.trim()
+        t32_add_history(cmd, value, session.id, MCP_T32_CURRENT_CORE)
+    val pairs = [
+        ["label", label],
+        ["type", detected_type],
+        ["value", value]
+    ]
+    var result = T32BridgeResult.kv("Dialog: {label}", pairs)
+    result.set_gui_status(bridge_gui_status(session))
+    Ok(result)
+
+fn bridge_dialog_set(label: text, action: text, value: text) -> Result<T32BridgeResult, text>:
+    if label == "":
+        return Err("label is required.")
+    if not t32_validate_identifier(label):
+        return Err("Invalid label: contains disallowed characters")
+    var actual_action = action
+    if actual_action == "":
+        actual_action = "set"
+    if not t32_dialog_has_action(actual_action):
+        return Err("Invalid dialog action '{actual_action}'. Valid actions: set, select, deselect, disable, enable")
+    # Check parsed element metadata
+    val parsed_opt = t32_find_parsed_dialog_element(label)
+    match parsed_opt:
+        Some(parsed):
+            if parsed.runtime_access != "label":
+                return Err("Dialog element '{label}' uses a generated label and cannot be set at runtime")
+            if not t32_dialog_action_allowed(parsed.supported_actions, actual_action):
+                return Err("Dialog element '{label}' is type '{parsed.widget_type}' and does not support action '{actual_action}'")
+        nil: pass_do_nothing
+    val cmd = t32_dialog_set_command(label, actual_action)
+    if cmd == "":
+        return Err("Invalid dialog action: {actual_action}")
+    val session = bridge_require_session()?
+    var stdout = ""
+    var rc: i64 = 0
+    (stdout, rc) = bridge_exec(session, cmd)
+    t32_add_history(cmd, stdout.trim(), session.id, MCP_T32_CURRENT_CORE)
+    if rc != 0 and rc != -1:
+        return Err("Dialog set failed (exit {rc}): {stdout.trim()}")
+    if rc == -1:
+        return Err(stdout.trim())
+    val pairs = [
+        ["label", label],
+        ["action", actual_action],
+        ["command", cmd],
+        ["status", "ok"]
+    ]
+    var result = T32BridgeResult.kv("Dialog Set", pairs)
+    result.set_gui_status(bridge_gui_status(session))
+    Ok(result)
+
+fn bridge_dialog_click(label: text, capture_area: bool, timeout_ms: i64) -> Result<T32BridgeResult, text>:
+    if label == "":
+        return Err("label is required.")
+    if not t32_validate_identifier(label):
+        return Err("Invalid label: contains disallowed characters")
+    val parsed_opt = t32_find_parsed_dialog_element(label)
+    var command = ""
+    var execution_kind = "label"
+    match parsed_opt:
+        Some(parsed):
+            if not parsed.clickable:
+                return Err("Dialog element '{label}' is type '{parsed.widget_type}' and is not clickable")
+            if parsed.runtime_access == "callback" and parsed.callback != "":
+                command = parsed.callback
+                execution_kind = "callback"
+            elif parsed.runtime_access == "label":
+                command = "DIALOG.EXECUTE {label}"
+            else:
+                return Err("Dialog element '{label}' uses a generated label and has no callback fallback for click")
+        nil:
+            command = "DIALOG.EXECUTE {label}"
+    val session = bridge_require_session()?
+    # Verify element exists if using label execution
+    if execution_kind == "label":
+        var exist_out = ""
+        var exist_rc: i64 = 0
+        (exist_out, exist_rc) = bridge_exec(session, "EVAL DIALOG.EXIST({label})")
+        if exist_rc != 0:
+            return Err("No dialog open in TRACE32")
+        if not t32_dialog_parse_exist_result(exist_out):
+            return Err("Dialog element not found: {label}")
+    var actual_timeout = timeout_ms
+    if actual_timeout <= 0:
+        actual_timeout = 5000
+    val exec_result = t32_dialog_execute_command(session, command, true, actual_timeout, capture_area)
+    if exec_result.error_message != "":
+        return Err(exec_result.error_message)
+    var pairs: [[text]] = [
+        ["label", label],
+        ["command", command],
+        ["execution_kind", execution_kind],
+        ["output", exec_result.output],
+        ["completion_state", exec_result.completion_state]
+    ]
+    if exec_result.area_output != "":
+        pairs = pairs + [["area_output", exec_result.area_output]]
+    var result = T32BridgeResult.kv("Dialog Click: {label}", pairs)
+    result.set_gui_status(bridge_gui_status(session))
+    Ok(result)

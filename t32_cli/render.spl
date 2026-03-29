@@ -1,0 +1,198 @@
+# T32 CLI — Output rendering
+# Converts T32BridgeResult into human-readable text output.
+
+use app.t32_cli.types.{T32BridgeResult}
+
+# Auto-dispatch renderer based on result kind
+fn render_result(result: T32BridgeResult) -> text:
+    var body = ""
+    match result.kind:
+        "scalar": body = render_scalar(result)
+        "table": body = render_table(result)
+        "kv": body = render_kv(result)
+        "list": body = render_list(result)
+        "status": body = render_status(result)
+        _: body = render_scalar(result)
+
+    # Append gui_status footer if present
+    if result.gui_status != "":
+        val footer = render_gui_status(result.gui_status)
+        if footer != "":
+            body = body + "\n" + footer
+    body
+
+# Render a scalar value
+fn render_scalar(result: T32BridgeResult) -> text:
+    if result.raw_output != "":
+        if result.title != "":
+            return "{result.title}:\n{result.raw_output}"
+        return result.raw_output
+    if result.title != "":
+        return "{result.title}: {result.scalar_value}"
+    result.scalar_value
+
+# Render key-value pairs
+fn render_kv(result: T32BridgeResult) -> text:
+    var out = ""
+    if result.title != "":
+        out = "{result.title}:\n"
+
+    # Find max key length for alignment
+    var max_key_len = 0
+    for pair in result.kv_pairs:
+        if pair.len() >= 1:
+            val klen = pair[0].len()
+            if klen > max_key_len:
+                max_key_len = klen
+
+    for pair in result.kv_pairs:
+        if pair.len() >= 2:
+            val key = pair[0]
+            val value = pair[1]
+            val padding = pad_right(key, max_key_len + 1)
+            out = out + "  {padding}: {value}\n"
+        elif pair.len() == 1:
+            out = out + "  {pair[0]}\n"
+    # Remove trailing newline
+    if out.len() > 0 and out.ends_with("\n"):
+        out = out.slice(0, out.len() - 1)
+    out
+
+# Render a table with aligned columns
+fn render_table(result: T32BridgeResult) -> text:
+    if result.rows.len() == 0:
+        if result.title != "":
+            return "{result.title}: (empty)"
+        return "(empty)"
+
+    # Compute column widths
+    var col_widths: [i64] = []
+    for row in result.rows:
+        var ci = 0
+        while ci < row.len():
+            val cell_len = row[ci].len()
+            if ci >= col_widths.len():
+                col_widths.push(cell_len)
+            elif cell_len > col_widths[ci]:
+                col_widths[ci] = cell_len
+            ci = ci + 1
+
+    var out = ""
+    if result.title != "":
+        out = "{result.title}:\n"
+
+    var ri = 0
+    for row in result.rows:
+        var line = ""
+        var ci = 0
+        while ci < row.len():
+            val cell = row[ci]
+            var width = cell.len()
+            if ci < col_widths.len():
+                width = col_widths[ci]
+            val padded = pad_right(cell, width)
+            if ci > 0:
+                line = line + "  "
+            line = line + padded
+            ci = ci + 1
+        # Header separator after first row
+        if ri == 0 and result.rows.len() > 1:
+            out = out + "  {line}\n"
+            var sep = ""
+            var si = 0
+            while si < line.len():
+                sep = sep + "-"
+                si = si + 1
+            out = out + "  {sep}\n"
+        else:
+            out = out + "  {line}\n"
+        ri = ri + 1
+
+    # Remove trailing newline
+    if out.len() > 0 and out.ends_with("\n"):
+        out = out.slice(0, out.len() - 1)
+    out
+
+# Render a bulleted list
+fn render_list(result: T32BridgeResult) -> text:
+    var out = ""
+    if result.title != "":
+        out = "{result.title}:\n"
+    for item in result.items:
+        out = out + "  - {item}\n"
+    # Remove trailing newline
+    if out.len() > 0 and out.ends_with("\n"):
+        out = out.slice(0, out.len() - 1)
+    out
+
+# Render status (kv + gui_status)
+fn render_status(result: T32BridgeResult) -> text:
+    render_kv(result)
+
+# Render error message
+fn render_error(message: text) -> text:
+    "Error: {message}"
+
+# Render gui_status footer
+fn render_gui_status(gui_json: text) -> text:
+    # gui_status is a JSON string from MCP; extract key fields for display
+    # Format: compact one-line status bar
+    if gui_json == "" or gui_json == "{}":
+        return ""
+    # Simple extraction — look for common status keys
+    var parts: [text] = []
+    val cpu_state = extract_json_value(gui_json, "cpu_state")
+    if cpu_state != "":
+        parts.push("CPU: {cpu_state}")
+    val practice_state = extract_json_value(gui_json, "practice_state")
+    if practice_state != "":
+        parts.push("PRACTICE: {practice_state}")
+    val system_state = extract_json_value(gui_json, "system_state")
+    if system_state != "":
+        parts.push("System: {system_state}")
+    if parts.len() == 0:
+        return ""
+    var out = "[" + parts[0]
+    var i = 1
+    while i < parts.len():
+        out = out + " | " + parts[i]
+        i = i + 1
+    out + "]"
+
+# --- Helpers ---
+
+# Pad a string to the right with spaces
+fn pad_right(s: text, width: i64) -> text:
+    var result = s
+    while result.len() < width:
+        result = result + " "
+    result
+
+# Simple JSON value extraction (no stdlib dependency)
+fn extract_json_value(json: text, key: text) -> text:
+    val search = "\"" + key + "\""
+    var pos = 0
+    while pos < json.len():
+        val idx = json.index_of(search, pos)
+        if idx < 0:
+            return ""
+        # Find the colon after the key
+        var ci = idx + search.len()
+        while ci < json.len() and (json[ci] == ' ' or json[ci] == ':'):
+            ci = ci + 1
+        if ci >= json.len():
+            return ""
+        # Check if value is quoted
+        if json[ci] == '"':
+            val start = ci + 1
+            var ei = start
+            while ei < json.len() and json[ei] != '"':
+                ei = ei + 1
+            return json.slice(start, ei)
+        # Unquoted value (number, bool, null)
+        val start = ci
+        var ei = ci
+        while ei < json.len() and json[ei] != ',' and json[ei] != '}' and json[ei] != ' ':
+            ei = ei + 1
+        return json.slice(start, ei)
+    ""

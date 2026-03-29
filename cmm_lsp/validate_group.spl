@@ -1,67 +1,13 @@
 # Validate CMM parser on a specific directory group
 # Usage: bin/release/simple .../validate_group.spl <dir> <report_file>
 use cmm_parser.{parse_cmm_source}
+use cmm_text_helpers.{is_cmm_file, has_dot}
 
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_dir_list(path: text) -> [text]
 extern fn rt_file_write_text(path: text, content: text)
 extern fn sys_get_args() -> [text]
-
-fn to_lower_char(ch: text) -> text:
-    if ch == "A": return "a"
-    if ch == "B": return "b"
-    if ch == "C": return "c"
-    if ch == "D": return "d"
-    if ch == "E": return "e"
-    if ch == "F": return "f"
-    if ch == "G": return "g"
-    if ch == "H": return "h"
-    if ch == "I": return "i"
-    if ch == "J": return "j"
-    if ch == "K": return "k"
-    if ch == "L": return "l"
-    if ch == "M": return "m"
-    if ch == "N": return "n"
-    if ch == "O": return "o"
-    if ch == "P": return "p"
-    if ch == "Q": return "q"
-    if ch == "R": return "r"
-    if ch == "S": return "s"
-    if ch == "T": return "t"
-    if ch == "U": return "u"
-    if ch == "V": return "v"
-    if ch == "W": return "w"
-    if ch == "X": return "x"
-    if ch == "Y": return "y"
-    if ch == "Z": return "z"
-    ch
-
-fn to_lower(s: text) -> text:
-    var r = ""
-    var i = 0
-    while i < s.len():
-        r = r + to_lower_char(s[i:i + 1])
-        i = i + 1
-    r
-
-fn is_cmm(name: text) -> bool:
-    if name.len() < 5:
-        return false
-    to_lower(name[name.len() - 4:name.len()]) == ".cmm"
-
-fn starts_with(s: text, prefix: text) -> bool:
-    if prefix.len() > s.len():
-        return false
-    s[0:prefix.len()] == prefix
-
-fn has_dot(name: text) -> bool:
-    var i = 1
-    while i < name.len():
-        if name[i:i + 1] == ".":
-            return true
-        i = i + 1
-    false
 
 fn collect_cmm(root: text) -> [text]:
     var result: [text] = []
@@ -76,9 +22,9 @@ fn collect_cmm(root: text) -> [text]:
             val e = entries[ei]
             if e != "." and e != "..":
                 val full = dir + "/" + e
-                if is_cmm(e):
+                if is_cmm_file(e):
                     result = result + [full]
-                if not is_cmm(e) and not has_dot(e):
+                if not is_cmm_file(e) and not has_dot(e):
                     dirs = dirs + [full]
             ei = ei + 1
     result
@@ -86,8 +32,8 @@ fn collect_cmm(root: text) -> [text]:
 fn parse_file(path: text) -> text:
     val content = rt_file_read_text(path) ?? ""
     if content.len() > 30:
-        val header = to_lower(content[0:30])
-        if starts_with(header, "trace32 encrypted"):
+        val header = content[0:30].to_lower()
+        if header.starts_with("trace32 encrypted"):
             return "SKIP"
     val p = parse_cmm_source(content)
     if p.errors.len() == 0:

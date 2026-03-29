@@ -11,7 +11,7 @@ export lex_cmm_source, lex_cmm_line
 # Handles line continuation (backslash at end of line) by joining lines.
 fn lex_cmm_source(source: text) -> [CmmToken]:
     var tokens: [CmmToken] = []
-    var lines = split_lines(source)
+    var lines = source.split("\n")
     var line_num = 1
 
     while line_num <= lines.len():
@@ -189,27 +189,31 @@ fn is_bin_or_mask(ch: text) -> bool:
 
 # --- Line utilities ---
 
-# Split source text into lines
-fn split_lines(source: text) -> [text]:
-    var lines: [text] = []
-    var start = 0
-    var i = 0
-    while i < source.len():
-        if source[i:i + 1] == "\n":
-            lines.push(source[start:i])
-            start = i + 1
-        i = i + 1
-    # Last line (may not end with newline)
-    if start <= source.len():
-        lines.push(source[start:source.len()])
-    lines
-
 # Check if line ends with backslash (line continuation)
 fn ends_with_continuation(line: text) -> bool:
     val len = line.len()
     if len == 0:
         return false
     line[len - 1:len] == "\\"
+
+fn prev_non_whitespace_char(line: text, pos: i64) -> text:
+    var i = pos
+    while i > 0:
+        val ch = line[i - 1:i]
+        if ch != " " and ch != "\t" and ch != "\r":
+            return ch
+        i = i - 1
+    ""
+
+fn has_left_operand_before_ampersand(line: text, pos: i64) -> bool:
+    val prev = prev_non_whitespace_char(line, pos)
+    if prev == "":
+        return false
+    if is_ident_char(prev) or is_digit(prev):
+        return true
+    if prev == "\"" or prev == "'" or prev == ")" or prev == "]":
+        return true
+    false
 
 # --- Label detection ---
 
@@ -257,28 +261,16 @@ fn lex_macro_ref(line: text, pos: i64, line_num: i64, col: i64) -> LexResult:
         is_recursive = true
         i = i + 1
 
-    # When &&name immediately follows a non-hex-number token, split into & (AND) + &name.
-    # Requires identifier to follow (so &&( stays as LogicalAnd).
-    if is_recursive and pos > 0 and i < length and is_ident_char(line[i:i + 1]):
-        val prev_ch = line[pos - 1:pos]
-        var split_here = false
-        # Split after non-hex identifier chars (g-z, G-Z, _)
-        if is_ident_char(prev_ch) and not is_hex_digit(prev_ch) and not is_digit(prev_ch):
-            split_here = true
-        # Split after closing quote, closing paren, or trailing dot
-        if prev_ch == "\"" or prev_ch == ")" or prev_ch == ".":
-            split_here = true
-        # Split after digits/hex that are part of a macro name (&name ending in digit)
-        # Scan backwards: if we find & before ident chars, it's &macro&&name, so split.
-        if not split_here and (is_digit(prev_ch) or is_hex_digit(prev_ch)):
-            var back = pos - 1
-            while back > 0 and is_ident_char(line[back - 1:back]):
-                back = back - 1
-            # If the character before the identifier is &, this is &macro_name&&
-            if back > 0 and line[back - 1:back] == "&":
-                split_here = true
-        if split_here:
-            return LexResult(token: CmmToken(kind: CmmTokenKind.Ampersand, line: line_num, column: col, text: "&"), new_pos: pos + 1)
+    # When there is already a left operand, &&name is an infix logical operator,
+    # not a recursive macro reference. Recursive macros remain valid at expression
+    # starts, after assignments, and after delimiters such as '('.
+    if is_recursive and i < length and is_ident_char(line[i:i + 1]) and has_left_operand_before_ampersand(line, pos):
+        return LexResult(token: CmmToken(kind: CmmTokenKind.LogicalAnd, line: line_num, column: col, text: "&&"), new_pos: pos + 2)
+
+    # Likewise, &name after an existing left operand is a binary AND followed by
+    # an identifier or dot-command operand, not a macro reference.
+    if not is_recursive and i < length and is_ident_char(line[i:i + 1]) and has_left_operand_before_ampersand(line, pos):
+        return LexResult(token: CmmToken(kind: CmmTokenKind.Ampersand, line: line_num, column: col, text: "&"), new_pos: pos + 1)
 
     # Special case: && as logical AND operator (no identifier follows, or digit follows)
     # Macro names start with letter or _, NOT with digit. &&0xFF = LogicalAnd + hex.
@@ -310,28 +302,55 @@ fn lex_macro_ref(line: text, pos: i64, line_num: i64, col: i64) -> LexResult:
 # --- String literal lexing ---
 
 # Lex a double-quoted string. Inside the string, "" is an escaped double-quote.
+# Uses slice-based extraction to avoid O(n²) character-by-character concatenation.
 fn lex_string_literal(line: text, pos: i64, line_num: i64, col: i64) -> LexResult:
     val length = line.len()
     var i = pos + 1  # skip opening quote
-    var content = ""
 
+    # Fast path: scan for end quote or escaped quote. If no escapes, use single slice.
+    var has_escape = false
+    var scan = i
+    while scan < length:
+        val ch = line[scan:scan + 1]
+        if ch == "\"":
+            if scan + 1 < length and line[scan + 1:scan + 2] == "\"":
+                has_escape = true
+                scan = scan + 2
+            else:
+                break
+        else:
+            scan = scan + 1
+
+    if not has_escape:
+        # No escaped quotes — extract content as single slice
+        val content = line[i:scan]
+        val end_pos = if scan < length: scan + 1 else: scan
+        val full_text = line[pos:end_pos]
+        return LexResult(token: CmmToken(kind: CmmTokenKind.StringLit(content), line: line_num, column: col, text: full_text), new_pos: end_pos)
+
+    # Slow path: has escaped quotes — collect segments between escapes
+    var parts: [text] = []
+    var seg_start = i
     while i < length:
         val ch = line[i:i + 1]
         if ch == "\"":
-            # Check for escaped quote ""
             if i + 1 < length and line[i + 1:i + 2] == "\"":
-                content = content + "\""
+                parts.push(line[seg_start:i])
+                parts.push("\"")
                 i = i + 2
+                seg_start = i
             else:
-                # End of string
+                parts.push(line[seg_start:i])
                 i = i + 1
+                val content = parts.join("")
                 val full_text = line[pos:i]
                 return LexResult(token: CmmToken(kind: CmmTokenKind.StringLit(content), line: line_num, column: col, text: full_text), new_pos: i)
         else:
-            content = content + ch
             i = i + 1
 
     # Unterminated string — PRACTICE extends to EOL, treat as valid string
+    parts.push(line[seg_start:i])
+    val content = parts.join("")
     val full_text = line[pos:i]
     LexResult(token: CmmToken(kind: CmmTokenKind.StringLit(content), line: line_num, column: col, text: full_text), new_pos: i)
 

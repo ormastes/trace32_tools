@@ -11,7 +11,7 @@ CMM (TRACE32 PRACTICE) language server for Claude Code, providing code intellige
 - **Hover** — command and function documentation with syntax descriptions
 - **Go to definition** — jump to label and macro definitions
 - **Document symbols** — labels and macros as outline symbols
-- **Diagnostics** — parse errors, undefined labels/macros, unreachable code, unused macros
+- **Diagnostics** — parse errors, undefined labels/macros, unreachable code, unused macros, duplicate dialog labels
 
 ## Installation
 
@@ -62,6 +62,15 @@ The LSP server runs as a subprocess launched by Claude Code:
 - **In-process parsing:** CMM lexer, parser, and analyzer run in-process — no subprocesses
 - **Command database:** 100+ TRACE32 commands with categories and documentation
 - **Function database:** 50+ PRACTICE built-in functions with signatures
+
+## Dialog Analysis
+
+The parser and analyzer understand dialog modifiers and widget metadata more completely now:
+- `DIALOG (&+)`, `DIALOG (&-)`, and related modifiers are preserved in the parsed dialog block
+- unlabeled `EDIT`, `CHECKBOX`, `CHOOSEBOX`, `PULLDOWN`, `BUTTON`, and `DEFBUTTON` items are still surfaced to tooling
+- duplicate explicit dialog labels produce analyzer warnings
+
+This metadata is shared with the T32 MCP dialog tools so parse-time capabilities and runtime validation stay aligned.
 
 ## Common CMM Mistakes & Gotchas
 

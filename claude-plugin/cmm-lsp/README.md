@@ -17,7 +17,7 @@ claude plugin install cmm-lsp@simple-local
 Release package:
 
 ```text
-cmm-lsp-claude-plugin-0.1.2.tar.gz
+cmm-lsp-claude-plugin-0.9.2.tar.gz
 ```
 
 Current limitation:

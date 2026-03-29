@@ -236,3 +236,60 @@ impl T32HistoryEntry:
             core_id: core_id,
             timestamp: ""
         )
+
+# Bridge result — structured output from bridge functions, rendered by render.spl
+class T32BridgeResult:
+    kind: text              # "scalar" | "table" | "kv" | "list" | "status" | "error"
+    title: text             # optional header/label
+    rows: [[text]]          # table rows (first row = header)
+    kv_pairs: [[text]]      # key-value pairs as [key, value] pairs
+    scalar_value: text      # single value result
+    gui_status: text        # optional gui_status footer
+    raw_output: text        # pass-through raw text
+    items: [text]           # list items for "list" kind
+
+impl T32BridgeResult:
+    static fn scalar(value: text) -> T32BridgeResult:
+        T32BridgeResult(
+            kind: "scalar", title: "", rows: [], kv_pairs: [],
+            scalar_value: value, gui_status: "", raw_output: "", items: []
+        )
+
+    static fn scalar_titled(title: text, value: text) -> T32BridgeResult:
+        T32BridgeResult(
+            kind: "scalar", title: title, rows: [], kv_pairs: [],
+            scalar_value: value, gui_status: "", raw_output: "", items: []
+        )
+
+    static fn table(title: text, rows: [[text]]) -> T32BridgeResult:
+        T32BridgeResult(
+            kind: "table", title: title, rows: rows, kv_pairs: [],
+            scalar_value: "", gui_status: "", raw_output: "", items: []
+        )
+
+    static fn kv(title: text, pairs: [[text]]) -> T32BridgeResult:
+        T32BridgeResult(
+            kind: "kv", title: title, rows: [], kv_pairs: pairs,
+            scalar_value: "", gui_status: "", raw_output: "", items: []
+        )
+
+    static fn list(title: text, items: [text]) -> T32BridgeResult:
+        T32BridgeResult(
+            kind: "list", title: title, rows: [], kv_pairs: [],
+            scalar_value: "", gui_status: "", raw_output: "", items: items
+        )
+
+    static fn raw(output: text) -> T32BridgeResult:
+        T32BridgeResult(
+            kind: "scalar", title: "", rows: [], kv_pairs: [],
+            scalar_value: "", gui_status: "", raw_output: output, items: []
+        )
+
+    static fn status(pairs: [[text]], gui: text) -> T32BridgeResult:
+        T32BridgeResult(
+            kind: "status", title: "Status", rows: [], kv_pairs: pairs,
+            scalar_value: "", gui_status: gui, raw_output: "", items: []
+        )
+
+    me set_gui_status(gui: text):
+        self.gui_status = gui

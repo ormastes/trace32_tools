@@ -158,8 +158,8 @@ enum CmmDialogItem:
     DlgButton(text, text, text)                 # NAME: BUTTON text callback
     DlgDefButton(text, text, text)              # NAME: DEFBUTTON text callback
     DlgCheckbox(text, text, text)               # NAME: CHECKBOX text callback
-    DlgChoosebox(text, text)                    # NAME: CHOOSEBOX text callback
-    DlgPulldown(text, text)                     # NAME: PULLDOWN options callback
+    DlgChoosebox(text, text, text)              # NAME: CHOOSEBOX text callback
+    DlgPulldown(text, text, text)               # NAME: PULLDOWN options callback
     DlgLine(text)                               # LINE "group label"
     DlgClose(text)                              # CLOSE callback
 
@@ -291,8 +291,8 @@ enum CmmStmt:
 
     # --- Dialog -------------------------------------------------------
 
-    # DIALOG ( items... )
-    DialogBlock([CmmDialogItem], CmmSpan)
+    # DIALOG (&modifier items... )
+    DialogBlock(text, [CmmDialogItem], CmmSpan)
 
     # --- Structure ----------------------------------------------------
 

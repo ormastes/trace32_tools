@@ -1,4 +1,4 @@
-#![allow(unnamed_duplicate_typed_args)]
+@allow(unnamed_duplicate_typed_args)
 # T32 MCP — Headless setup and AREA buffer tool handlers
 # Handles: t32_setup_headless, t32_area_read, t32_cmm_commands
 
@@ -13,9 +13,6 @@ fn handle_t32_setup_headless(id: text, body: text) -> text:
     var area_name = area_name_arg
     if area_name == "":
         area_name = "MCP_OUT"
-    # Validate area name — alphanumeric + underscore only
-    if not t32_validate_identifier(area_name):
-        return t32_make_tool_error(id, -32602, "Invalid area_name: must be alphanumeric/underscore only. Got: " + area_name)
     val semihost_str = t32_extract_field(body, "semihost")
     var semihost = true
     if semihost_str == "false":
@@ -73,9 +70,6 @@ fn handle_t32_area_read(id: text, body: text) -> text:
         area_name = MCP_T32_AREA_NAME
     if area_name == "":
         area_name = "MCP_OUT"
-    # Validate area name
-    if not t32_validate_identifier(area_name):
-        return t32_make_tool_error(id, -32602, "Invalid area_name: must be alphanumeric/underscore only. Got: " + area_name)
     val clear_str = t32_extract_field(body, "clear")
     var do_clear = false
     if clear_str == "true":
@@ -112,30 +106,19 @@ fn handle_t32_cmm_commands(id: text, body: text) -> text:
     var filtered: [text] = []
     for cmd in db:
         # cmd format: "full_name|short_name|group|description"
-        var parts: [text] = []
-        var current: [text] = []
-        for ch in cmd:
-            if ch == "|":
-                parts.push(current.join(""))
-                current = []
-            else:
-                current.push(ch)
-        parts.push(current.join(""))
+        val parts = cmd.split("|")
         var cmd_name = ""
         var cmd_short = ""
         var cmd_group = ""
         var cmd_desc = ""
-        var pidx = 0
-        for p in parts:
-            if pidx == 0:
-                cmd_name = p
-            elif pidx == 1:
-                cmd_short = p
-            elif pidx == 2:
-                cmd_group = p
-            elif pidx == 3:
-                cmd_desc = p
-            pidx = pidx + 1
+        if parts.len() > 0:
+            cmd_name = parts[0]
+        if parts.len() > 1:
+            cmd_short = parts[1]
+        if parts.len() > 2:
+            cmd_group = parts[2]
+        if parts.len() > 3:
+            cmd_desc = parts[3]
         # Filter by group
         if group != "":
             if t32_to_lower(cmd_group) != t32_to_lower(group):
@@ -170,26 +153,10 @@ fn handle_t32_cmm_commands(id: text, body: text) -> text:
 # ---------------------------------------------------------------------------
 
 fn t32_to_lower(s: text) -> text:
-    var result = ""
-    var i = 0
-    while i < s.len():
-        val ch = s[i:i + 1]
-        if ch >= "A" and ch <= "Z":
-            result = result + ch.to_lower()
-        else:
-            result = result + ch
-        i = i + 1
-    result
+    s.to_lower()
 
 fn t32_text_contains(hay: text, needle: text) -> bool:
-    if needle.len() > hay.len():
-        return false
-    var i = 0
-    while i <= hay.len() - needle.len():
-        if hay[i:i + needle.len()] == needle:
-            return true
-        i = i + 1
-    false
+    hay.contains(needle)
 
 # Build a flat command database as pipe-delimited strings
 # "full_name|short_name|group|description"

@@ -1,0 +1,5 @@
+use cmm_parser.{parse_cmm_source}
+
+fn main():
+    val p = parse_cmm_source("PRINT \"hi\"\n")
+    print "probe:{p.statements.len()}:{p.errors.len()}"

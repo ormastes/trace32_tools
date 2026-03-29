@@ -1,0 +1,171 @@
+use cmm_ast.{CmmDialogItem}
+
+export cmm_dialog_declared_label, cmm_dialog_effective_label
+export cmm_dialog_has_declared_label, cmm_dialog_item_type
+export cmm_dialog_item_text, cmm_dialog_item_callback
+export cmm_dialog_item_value_type, cmm_dialog_item_query_types
+export cmm_dialog_item_is_clickable, cmm_dialog_item_is_queryable
+export cmm_dialog_item_is_settable, cmm_dialog_item_supported_actions
+export cmm_dialog_item_runtime_access, cmm_dialog_parse_modifier
+
+fn cmm_dialog_item_type(item: CmmDialogItem) -> text:
+    match item:
+        case CmmDialogItem.DlgHeader(_): "header"
+        case CmmDialogItem.DlgPos(_, _, _): "pos"
+        case CmmDialogItem.DlgText(_): "text"
+        case CmmDialogItem.DlgEdit(_, _, _): "edit"
+        case CmmDialogItem.DlgButton(_, _, _): "button"
+        case CmmDialogItem.DlgDefButton(_, _, _): "defbutton"
+        case CmmDialogItem.DlgCheckbox(_, _, _): "checkbox"
+        case CmmDialogItem.DlgChoosebox(_, _, _): "choosebox"
+        case CmmDialogItem.DlgPulldown(_, _, _): "pulldown"
+        case CmmDialogItem.DlgLine(_): "line"
+        case CmmDialogItem.DlgClose(_): "close"
+
+fn cmm_dialog_declared_label(item: CmmDialogItem) -> text:
+    match item:
+        case CmmDialogItem.DlgEdit(name, _, _): name
+        case CmmDialogItem.DlgButton(name, _, _): name
+        case CmmDialogItem.DlgDefButton(name, _, _): name
+        case CmmDialogItem.DlgCheckbox(name, _, _): name
+        case CmmDialogItem.DlgChoosebox(name, _, _): name
+        case CmmDialogItem.DlgPulldown(name, _, _): name
+        case _: ""
+
+fn cmm_dialog_has_declared_label(item: CmmDialogItem) -> bool:
+    cmm_dialog_declared_label(item) != ""
+
+fn cmm_dialog_item_text(item: CmmDialogItem) -> text:
+    match item:
+        case CmmDialogItem.DlgHeader(title): title
+        case CmmDialogItem.DlgText(value): value
+        case CmmDialogItem.DlgEdit(_, default_val, _): default_val
+        case CmmDialogItem.DlgButton(_, btn_text, _): btn_text
+        case CmmDialogItem.DlgDefButton(_, btn_text, _): btn_text
+        case CmmDialogItem.DlgCheckbox(_, cb_text, _): cb_text
+        case CmmDialogItem.DlgChoosebox(_, cb_text, _): cb_text
+        case CmmDialogItem.DlgPulldown(_, options, _): options
+        case CmmDialogItem.DlgLine(group_label): group_label
+        case _: ""
+
+fn cmm_dialog_item_callback(item: CmmDialogItem) -> text:
+    match item:
+        case CmmDialogItem.DlgEdit(_, _, callback): callback
+        case CmmDialogItem.DlgButton(_, _, callback): callback
+        case CmmDialogItem.DlgDefButton(_, _, callback): callback
+        case CmmDialogItem.DlgCheckbox(_, _, callback): callback
+        case CmmDialogItem.DlgChoosebox(_, _, callback): callback
+        case CmmDialogItem.DlgPulldown(_, _, callback): callback
+        case CmmDialogItem.DlgClose(callback): callback
+        case _: ""
+
+fn cmm_dialog_item_value_type(item: CmmDialogItem) -> text:
+    match item:
+        case CmmDialogItem.DlgCheckbox(_, _, _): "boolean"
+        case CmmDialogItem.DlgChoosebox(_, _, _): "boolean"
+        case CmmDialogItem.DlgEdit(_, _, _): "string"
+        case CmmDialogItem.DlgPulldown(_, _, _): "value"
+        case _: ""
+
+fn cmm_dialog_item_query_types(item: CmmDialogItem) -> [text]:
+    val value_type = cmm_dialog_item_value_type(item)
+    if value_type == "":
+        return []
+    [value_type]
+
+fn cmm_dialog_item_is_clickable(item: CmmDialogItem) -> bool:
+    val item_type = cmm_dialog_item_type(item)
+    item_type == "button" or item_type == "defbutton"
+
+fn cmm_dialog_item_is_queryable(item: CmmDialogItem) -> bool:
+    cmm_dialog_item_value_type(item) != ""
+
+fn cmm_dialog_item_is_settable(item: CmmDialogItem) -> bool:
+    val item_type = cmm_dialog_item_type(item)
+    item_type == "checkbox" or item_type == "choosebox"
+
+fn cmm_dialog_item_supported_actions(item: CmmDialogItem) -> [text]:
+    val item_type = cmm_dialog_item_type(item)
+    if item_type == "checkbox" or item_type == "choosebox":
+        return ["set", "select", "deselect", "disable", "enable"]
+    if item_type == "edit" or item_type == "pulldown":
+        return ["disable", "enable"]
+    if item_type == "button" or item_type == "defbutton":
+        return ["click", "disable", "enable"]
+    []
+
+fn cmm_dialog_item_runtime_access(item: CmmDialogItem) -> text:
+    if cmm_dialog_has_declared_label(item):
+        return "label"
+    if cmm_dialog_item_is_clickable(item) and cmm_dialog_item_callback(item) != "":
+        return "callback"
+    "parse_only"
+
+fn cmm_dialog_effective_label(item: CmmDialogItem, item_index: i64) -> text:
+    val declared = cmm_dialog_declared_label(item)
+    if declared != "":
+        return declared
+    val item_type = cmm_dialog_item_type(item)
+    if not (item_type == "edit" or item_type == "button" or item_type == "defbutton" or item_type == "checkbox" or item_type == "choosebox" or item_type == "pulldown"):
+        return ""
+    var base = cmm_dialog_item_text(item)
+    if base == "":
+        base = cmm_dialog_item_callback(item)
+    if base == "":
+        base = item_type
+    "__auto_" + cmm_dialog_slugify(item_type) + "_" + cmm_dialog_slugify(base) + "_" + str(item_index)
+
+fn cmm_dialog_parse_modifier(parser) -> text:
+    if not parser.check_op("&"):
+        return ""
+    parser.advance()
+    var modifier = "&"
+    if parser.check_op("+"):
+        parser.advance()
+        modifier = "&+"
+    elif parser.check_op("-"):
+        parser.advance()
+        modifier = "&-"
+    elif parser.check_op("="):
+        parser.advance()
+        modifier = "&="
+    modifier
+
+fn cmm_dialog_slugify(raw: text) -> text:
+    val lower = raw.trim().to_lower()
+    var out = ""
+    var prev_us = false
+    var i = 0
+    while i < lower.len():
+        val ch = lower.substring(i, i + 1)
+        if cmm_dialog_is_slug_char(ch):
+            out = out + ch
+            prev_us = false
+        elif not prev_us:
+            out = out + "_"
+            prev_us = true
+        i = i + 1
+    out = cmm_dialog_trim_underscores(out)
+    if out == "":
+        return "item"
+    if cmm_dialog_is_digit(out.substring(0, 1)):
+        return "n_" + out
+    out
+
+fn cmm_dialog_trim_underscores(raw: text) -> text:
+    var start = 0
+    var finish = raw.len()
+    while start < finish and raw.substring(start, start + 1) == "_":
+        start = start + 1
+    while finish > start and raw.substring(finish - 1, finish) == "_":
+        finish = finish - 1
+    raw.substring(start, finish)
+
+fn cmm_dialog_is_slug_char(ch: text) -> bool:
+    cmm_dialog_is_digit(ch) or cmm_dialog_is_lower_alpha(ch)
+
+fn cmm_dialog_is_digit(ch: text) -> bool:
+    ch == "0" or ch == "1" or ch == "2" or ch == "3" or ch == "4" or ch == "5" or ch == "6" or ch == "7" or ch == "8" or ch == "9"
+
+fn cmm_dialog_is_lower_alpha(ch: text) -> bool:
+    ch == "a" or ch == "b" or ch == "c" or ch == "d" or ch == "e" or ch == "f" or ch == "g" or ch == "h" or ch == "i" or ch == "j" or ch == "k" or ch == "l" or ch == "m" or ch == "n" or ch == "o" or ch == "p" or ch == "q" or ch == "r" or ch == "s" or ch == "t" or ch == "u" or ch == "v" or ch == "w" or ch == "x" or ch == "y" or ch == "z"

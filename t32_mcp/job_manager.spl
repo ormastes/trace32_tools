@@ -1,0 +1,352 @@
+@allow(unnamed_duplicate_typed_args)
+# T32 MCP — Job Manager
+# Internal async job system for long-running T32 operations.
+# Tracks jobs with state machine transitions, cleanup, and JSON serialization.
+
+extern fn rt_time_ms() -> i64
+
+use app.mcp_t32.json_helpers.{t32_Q, t32_js, t32_jp, t32_jo1, t32_jo2, t32_jo3, t32_jo4, t32_LB, t32_RB, t32_SB_L, t32_SB_R, t32_escape_json}
+use app.mcp_t32.protocol.{t32_stderr}
+
+# --- Job class ---
+
+class T32Job:
+    job_id: text
+    tool_name: text
+    session_id: text
+    core_id: text
+    status: text          # queued|running|waiting_target|waiting_practice|completed|failed|timed_out|cancelled
+    started_at: i64       # timestamp ms
+    updated_at: i64       # timestamp ms
+    timeout_ms: i64
+    summary: text
+    result: text          # JSON result when completed
+    error: text           # error message when failed
+    resource_uri: text    # t32://jobs/<id>
+    _command: text        # internal: the command/script being run
+    _area_name: text      # internal: AREA buffer for output capture
+
+# --- Module-level state ---
+
+var T32_JOBS: [T32Job] = []
+var T32_NEXT_JOB_ID: i64 = 1
+val T32_MAX_JOBS: i64 = 16
+val T32_JOB_RETENTION_MS: i64 = 300000  # 5 minutes
+
+# --- Terminal status check ---
+
+fn t32_is_terminal_status(status: text) -> bool:
+    if status == "completed":
+        return true
+    if status == "failed":
+        return true
+    if status == "timed_out":
+        return true
+    if status == "cancelled":
+        return true
+    false
+
+# --- State machine validator ---
+
+fn t32_is_valid_transition(from: text, to: text) -> bool:
+    if from == "queued":
+        if to == "running":
+            return true
+        if to == "cancelled":
+            return true
+        return false
+    if from == "running":
+        if to == "waiting_target":
+            return true
+        if to == "waiting_practice":
+            return true
+        if to == "completed":
+            return true
+        if to == "failed":
+            return true
+        if to == "timed_out":
+            return true
+        if to == "cancelled":
+            return true
+        return false
+    if from == "waiting_target":
+        if to == "running":
+            return true
+        if to == "completed":
+            return true
+        if to == "failed":
+            return true
+        if to == "timed_out":
+            return true
+        if to == "cancelled":
+            return true
+        return false
+    if from == "waiting_practice":
+        if to == "running":
+            return true
+        if to == "completed":
+            return true
+        if to == "failed":
+            return true
+        if to == "timed_out":
+            return true
+        if to == "cancelled":
+            return true
+        return false
+    # Terminal states: no outbound transitions
+    false
+
+# --- Count active (non-terminal) jobs ---
+
+fn t32_job_count_active() -> i64:
+    var count: i64 = 0
+    for job in T32_JOBS:
+        if not t32_is_terminal_status(job.status):
+            count = count + 1
+    count
+
+# --- Resource URI ---
+
+fn t32_job_resource_uri(job_id: text) -> text:
+    "t32://jobs/" + job_id
+
+# --- Create job ---
+
+fn t32_job_create(tool_name: text, session_id: text, core_id: text, command: text, timeout_ms: i64) -> T32Job:
+    # Enforce max concurrent limit
+    if t32_job_count_active() >= T32_MAX_JOBS:
+        t32_stderr("job_manager: max concurrent jobs reached (" + str(T32_MAX_JOBS) + "), running cleanup")
+        t32_job_cleanup()
+        # If still at limit after cleanup, return a sentinel failed job
+        if t32_job_count_active() >= T32_MAX_JOBS:
+            val now = rt_time_ms()
+            return T32Job(
+                job_id: "job_0",
+                tool_name: tool_name,
+                session_id: session_id,
+                core_id: core_id,
+                status: "failed",
+                started_at: now,
+                updated_at: now,
+                timeout_ms: timeout_ms,
+                summary: "Max concurrent jobs limit reached (" + str(T32_MAX_JOBS) + ")",
+                result: "",
+                error: "max_concurrent_jobs_exceeded",
+                resource_uri: "",
+                _command: command,
+                _area_name: ""
+            )
+    val now = rt_time_ms()
+    val jid = "job_" + str(T32_NEXT_JOB_ID)
+    T32_NEXT_JOB_ID = T32_NEXT_JOB_ID + 1
+    val job = T32Job(
+        job_id: jid,
+        tool_name: tool_name,
+        session_id: session_id,
+        core_id: core_id,
+        status: "queued",
+        started_at: now,
+        updated_at: now,
+        timeout_ms: timeout_ms,
+        summary: "Job created for " + tool_name,
+        result: "",
+        error: "",
+        resource_uri: t32_job_resource_uri(jid),
+        _command: command,
+        _area_name: ""
+    )
+    T32_JOBS = T32_JOBS + [job]
+    t32_stderr("job_manager: created " + jid + " for " + tool_name + " (session=" + session_id + ")")
+    job
+
+# --- Get job by id ---
+
+fn t32_job_get(job_id: text) -> T32Job:
+    for job in T32_JOBS:
+        if job.job_id == job_id:
+            return job
+    # Return sentinel with status "not_found"
+    T32Job(
+        job_id: job_id,
+        tool_name: "",
+        session_id: "",
+        core_id: "",
+        status: "not_found",
+        started_at: 0,
+        updated_at: 0,
+        timeout_ms: 0,
+        summary: "Job not found: " + job_id,
+        result: "",
+        error: "",
+        resource_uri: "",
+        _command: "",
+        _area_name: ""
+    )
+
+# --- List jobs, optionally filtered by session_id ---
+
+fn t32_job_list(session_id: text) -> [T32Job]:
+    if session_id == "":
+        return T32_JOBS
+    var filtered: [T32Job] = []
+    for job in T32_JOBS:
+        if job.session_id == session_id:
+            filtered = filtered + [job]
+    filtered
+
+# --- Cancel job ---
+
+fn t32_job_cancel(job_id: text) -> bool:
+    var idx: i64 = 0
+    for job in T32_JOBS:
+        if job.job_id == job_id:
+            # Check if in cancellable state
+            if t32_is_terminal_status(job.status):
+                return false
+            val now = rt_time_ms()
+            val updated = T32Job(
+                job_id: job.job_id,
+                tool_name: job.tool_name,
+                session_id: job.session_id,
+                core_id: job.core_id,
+                status: "cancelled",
+                started_at: job.started_at,
+                updated_at: now,
+                timeout_ms: job.timeout_ms,
+                summary: "Cancelled by user",
+                result: job.result,
+                error: "",
+                resource_uri: job.resource_uri,
+                _command: job._command,
+                _area_name: job._area_name
+            )
+            T32_JOBS[idx] = updated
+            t32_stderr("job_manager: cancelled " + job_id)
+            return true
+        idx = idx + 1
+    false
+
+# --- Update job status ---
+
+fn t32_job_update_status(job_id: text, new_status: text, summary: text) -> bool:
+    var idx: i64 = 0
+    for job in T32_JOBS:
+        if job.job_id == job_id:
+            if not t32_is_valid_transition(job.status, new_status):
+                t32_stderr("job_manager: invalid transition " + job.status + " -> " + new_status + " for " + job_id)
+                return false
+            val now = rt_time_ms()
+            val updated = T32Job(
+                job_id: job.job_id,
+                tool_name: job.tool_name,
+                session_id: job.session_id,
+                core_id: job.core_id,
+                status: new_status,
+                started_at: job.started_at,
+                updated_at: now,
+                timeout_ms: job.timeout_ms,
+                summary: summary,
+                result: job.result,
+                error: job.error,
+                resource_uri: job.resource_uri,
+                _command: job._command,
+                _area_name: job._area_name
+            )
+            T32_JOBS[idx] = updated
+            return true
+        idx = idx + 1
+    false
+
+# --- Set result (marks completed) ---
+
+fn t32_job_set_result(job_id: text, result: text):
+    var idx: i64 = 0
+    for job in T32_JOBS:
+        if job.job_id == job_id:
+            val now = rt_time_ms()
+            val updated = T32Job(
+                job_id: job.job_id,
+                tool_name: job.tool_name,
+                session_id: job.session_id,
+                core_id: job.core_id,
+                status: "completed",
+                started_at: job.started_at,
+                updated_at: now,
+                timeout_ms: job.timeout_ms,
+                summary: "Completed",
+                result: result,
+                error: "",
+                resource_uri: job.resource_uri,
+                _command: job._command,
+                _area_name: job._area_name
+            )
+            T32_JOBS[idx] = updated
+            t32_stderr("job_manager: completed " + job_id)
+            return
+        idx = idx + 1
+
+# --- Set error (marks failed) ---
+
+fn t32_job_set_error(job_id: text, error: text):
+    var idx: i64 = 0
+    for job in T32_JOBS:
+        if job.job_id == job_id:
+            val now = rt_time_ms()
+            val updated = T32Job(
+                job_id: job.job_id,
+                tool_name: job.tool_name,
+                session_id: job.session_id,
+                core_id: job.core_id,
+                status: "failed",
+                started_at: job.started_at,
+                updated_at: now,
+                timeout_ms: job.timeout_ms,
+                summary: "Failed: " + error,
+                result: "",
+                error: error,
+                resource_uri: job.resource_uri,
+                _command: job._command,
+                _area_name: job._area_name
+            )
+            T32_JOBS[idx] = updated
+            t32_stderr("job_manager: failed " + job_id + ": " + error)
+            return
+        idx = idx + 1
+
+# --- Cleanup: remove terminal jobs older than retention period ---
+
+fn t32_job_cleanup():
+    val now = rt_time_ms()
+    var kept: [T32Job] = []
+    var removed: i64 = 0
+    for job in T32_JOBS:
+        if t32_is_terminal_status(job.status):
+            val age = now - job.updated_at
+            if age > T32_JOB_RETENTION_MS:
+                removed = removed + 1
+                continue
+        kept = kept + [job]
+    T32_JOBS = kept
+    if removed > 0:
+        t32_stderr("job_manager: cleanup removed " + str(removed) + " expired jobs")
+
+# --- Serialize job to JSON ---
+
+fn t32_job_to_json(job: T32Job) -> text:
+    var r = t32_LB()
+    r = r + t32_jp("job_id", t32_js(job.job_id))
+    r = r + "," + t32_jp("tool_name", t32_js(job.tool_name))
+    r = r + "," + t32_jp("session_id", t32_js(job.session_id))
+    r = r + "," + t32_jp("core_id", t32_js(job.core_id))
+    r = r + "," + t32_jp("status", t32_js(job.status))
+    r = r + "," + t32_jp("started_at", str(job.started_at))
+    r = r + "," + t32_jp("updated_at", str(job.updated_at))
+    r = r + "," + t32_jp("timeout_ms", str(job.timeout_ms))
+    r = r + "," + t32_jp("summary", t32_js(job.summary))
+    if job.result != "":
+        r = r + "," + t32_jp("result", t32_js(job.result))
+    if job.error != "":
+        r = r + "," + t32_jp("error", t32_js(job.error))
+    r = r + "," + t32_jp("resource_uri", t32_js(job.resource_uri))
+    r = r + t32_RB()
+    r

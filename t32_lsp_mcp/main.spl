@@ -1,4 +1,4 @@
-#![allow(unnamed_duplicate_typed_args)]
+@allow(unnamed_duplicate_typed_args)
 # T32 LSP MCP Server — CMM language intelligence via MCP protocol
 #
 # Tools: 6 tools for parsing, diagnostics, completions, hover, symbols, CLI validation
@@ -13,7 +13,15 @@
 
 use t32_lsp_mcp.json_helpers
 use t32_lsp_mcp.protocol
-use t32_lsp_mcp.tools
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_dir_list(path: text) -> [text]
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_env_get(name: text) -> text
 
 val LSP_SERVER_NAME = "simple-mcp-t32-lsp"
 val LSP_SERVER_VERSION = "0.1.2"
@@ -25,6 +33,10 @@ var LSP_USE_JSON_LINES = false
 # Caches
 var LSP_TOOLS_CACHE = ""
 var LSP_INIT_CACHE = ""
+var LSP_TOOL_DAEMON_DIR = ""
+var LSP_TOOL_DAEMON_PID = -1
+var LSP_TOOL_DAEMON_SEQ = 0
+var LSP_TOOL_DAEMON_ERROR = ""
 
 # --- Entry point ---
 
@@ -32,12 +44,13 @@ fn main():
     lsp_start_server()
 
 fn lsp_start_server():
+    lsp_start_tool_daemon()
     while true:
         var msg = lsp_read_stdin_message()
         if msg == "":
             return
         else:
-            var method = lsp_extract_field(msg, "method")
+            var method = lsp_detect_method(msg)
             var id = lsp_extract_id(msg)
             var response = ""
             if method == "initialize":
@@ -63,22 +76,226 @@ fn lsp_start_server():
 # --- Tool dispatcher ---
 
 fn lsp_dispatch_tool(id: text, body: text) -> text:
-    val tool_name = lsp_extract_nested(body, "name")
-    val args_raw = lsp_extract_field_raw(body, "arguments")
+    val tool_name = lsp_detect_tool_name(body)
     if tool_name == "":
         return lsp_result_error(id, -32602, "Missing tool name in tools/call request")
+    val args_raw = lsp_extract_field_raw(body, "arguments")
+    val daemon_response = lsp_dispatch_tool_via_daemon(id, tool_name, body)
+    if daemon_response != "":
+        return daemon_response
+    return lsp_run_tool_direct(id, tool_name, args_raw)
 
-    if tool_name == "cmm_parse":
-        return handle_cmm_parse(id, args_raw)
-    elif tool_name == "cmm_diagnostics":
-        return handle_cmm_diagnostics(id, args_raw)
-    elif tool_name == "cmm_complete":
-        return handle_cmm_complete(id, args_raw)
-    elif tool_name == "cmm_hover":
-        return handle_cmm_hover(id, args_raw)
-    elif tool_name == "cmm_symbols":
-        return handle_cmm_symbols(id, args_raw)
-    elif tool_name == "cmm_validate_cli":
-        return handle_cmm_validate_cli(id, args_raw)
+fn lsp_run_tool_direct(id: text, tool_name: text, args_raw: text) -> text:
+    val args_path = "/tmp/t32_lsp_mcp_args_" + id + ".json"
+    if not rt_file_write_text(args_path, args_raw):
+        return lsp_result_error(id, -32002, "Failed to write tool arguments")
+    val runner_bin = lsp_tool_runner_bin_path()
+    val (stdout, stderr, code) =
+        if runner_bin != "":
+            rt_process_run("/usr/bin/timeout", [lsp_tool_timeout_secs(), runner_bin, id, tool_name, args_path])
+        else:
+            val runtime = lsp_tool_runtime_path()
+            val runner = lsp_tool_runner_path()
+            rt_process_run("/usr/bin/timeout", [lsp_tool_timeout_secs(), runtime, runner, id, tool_name, args_path])
+    rt_file_delete(args_path)
+    if code == 124:
+        return lsp_result_error(id, -32002, "Tool backend timed out" + lsp_tool_daemon_log_hint())
+    if code != 0:
+        val err_text = lsp_trim_error_text(stderr, stdout)
+        return lsp_result_error(id, -32002, "Tool backend failed: " + err_text)
+    val response = stdout.trim()
+    if response == "":
+        return lsp_result_error(id, -32002, "Tool backend returned no response")
+    response
 
-    lsp_result_error(id, -32602, "Unknown tool: " + tool_name)
+fn lsp_dispatch_tool_via_daemon(id: text, tool_name: text, body: text) -> text:
+    if not lsp_start_tool_daemon():
+        return ""
+    val ready_path = lsp_tool_daemon_dir() + "/ready"
+    if not rt_file_exists(ready_path):
+        return ""
+    val args_raw = lsp_extract_field_raw(body, "arguments")
+    val base = lsp_tool_daemon_dir() + "/" + lsp_next_tool_request_key(id)
+    val args_path = base + ".args.json"
+    val req_path = base + ".req"
+    val response_path = base + ".response.json"
+    if not rt_file_write_text(args_path, args_raw):
+        return lsp_result_error(id, -32002, "Failed to write tool arguments")
+    val request_body = id + LSP_NL + tool_name + LSP_NL + args_path + LSP_NL + response_path + LSP_NL
+    if not rt_file_write_text(req_path, request_body):
+        rt_file_delete(args_path)
+        return lsp_result_error(id, -32002, "Failed to enqueue tool request")
+    val response = lsp_wait_for_tool_response(response_path, 60000)
+    rt_file_delete(req_path)
+    rt_file_delete(args_path)
+    rt_file_delete(response_path)
+    if response == "":
+        LSP_TOOL_DAEMON_PID = -1
+        return ""
+    response
+
+fn lsp_start_tool_daemon() -> bool:
+    val daemon_dir = lsp_tool_daemon_dir()
+    LSP_TOOL_DAEMON_ERROR = ""
+    rt_process_run("/bin/sh", ["-c", "mkdir -p " + lsp_shell_quote(daemon_dir)])
+    if lsp_tool_daemon_is_alive(daemon_dir):
+        if lsp_wait_for_daemon_ready(daemon_dir, 1500):
+            LSP_TOOL_DAEMON_PID = 1
+            return true
+        LSP_TOOL_DAEMON_ERROR = "CMM tool daemon is running but never became ready" + lsp_tool_daemon_log_hint()
+        return false
+    if rt_file_exists(daemon_dir + "/ready") or LSP_TOOL_DAEMON_PID > 0:
+        lsp_reset_tool_daemon_state(daemon_dir)
+    val runtime = lsp_tool_runtime_path()
+    val daemon_entry = lsp_tool_daemon_path()
+    val daemon_log = daemon_dir + "/daemon.log"
+    val launch_cmd = "nohup " + lsp_shell_quote(runtime) + " " + lsp_shell_quote(daemon_entry) + " " + lsp_shell_quote(daemon_dir) + " >" + lsp_shell_quote(daemon_log) + " 2>&1 < /dev/null &"
+    val (stdout, stderr, code) = rt_process_run("/bin/sh", ["-c", launch_cmd])
+    if code != 0:
+        LSP_TOOL_DAEMON_ERROR = "Failed to launch CMM tool daemon: " + lsp_trim_error_text(stderr, stdout)
+        return false
+    LSP_TOOL_DAEMON_PID = 1
+    if lsp_wait_for_daemon_ready(daemon_dir, 3000):
+        return true
+    LSP_TOOL_DAEMON_ERROR = "CMM tool daemon failed to become ready" + lsp_tool_daemon_log_hint()
+    false
+
+fn lsp_shell_quote(value: text) -> text:
+    "'" + value.replace("'", "'\\''") + "'"
+
+fn lsp_tool_daemon_is_alive(daemon_dir: text) -> bool:
+    val match_text = lsp_tool_daemon_path() + " " + daemon_dir
+    val cmd = "ps -ef | grep -F -- " + lsp_shell_quote(match_text) + " | grep -Fv grep >/dev/null 2>&1"
+    val (_stdout, _stderr, code) = rt_process_run("/bin/sh", ["-c", cmd])
+    code == 0
+
+fn lsp_wait_for_daemon_ready(daemon_dir: text, timeout_ms: i64) -> bool:
+    val started = rt_time_now_unix_micros()
+    val ready_path = daemon_dir + "/ready"
+    while true:
+        if rt_file_exists(ready_path) and lsp_tool_daemon_is_alive(daemon_dir):
+            return true
+        val elapsed_ms = (rt_time_now_unix_micros() - started) / 1000
+        if elapsed_ms >= timeout_ms:
+            return false
+        rt_process_run("/bin/sh", ["-c", "sleep 0.05"])
+
+fn lsp_reset_tool_daemon_state(daemon_dir: text):
+    val entries = rt_dir_list(daemon_dir) ?? []
+    var i = 0
+    while i < entries.len():
+        val name = entries[i]
+        if name == "ready" or name.ends_with(".req") or name.ends_with(".args.json") or name.ends_with(".response.json"):
+            rt_file_delete(daemon_dir + "/" + name)
+        i = i + 1
+    LSP_TOOL_DAEMON_PID = -1
+
+fn lsp_tool_daemon_log_hint() -> text:
+    val daemon_log = lsp_tool_daemon_dir() + "/daemon.log"
+    val raw = (rt_file_read_text(daemon_log) ?? "").trim()
+    if raw == "":
+        return ""
+    var compact = raw.replace("\r", " ").replace("\n", " ")
+    if compact.len() > 200:
+        compact = compact[0:200]
+    " (daemon.log: " + compact + ")"
+
+fn lsp_tool_daemon_error_text() -> text:
+    if LSP_TOOL_DAEMON_ERROR != "":
+        return LSP_TOOL_DAEMON_ERROR
+    "CMM tool daemon is unavailable"
+
+fn lsp_tool_timeout_secs() -> text:
+    "8s"
+
+fn lsp_tool_daemon_dir() -> text:
+    if LSP_TOOL_DAEMON_DIR != "":
+        return LSP_TOOL_DAEMON_DIR
+    val env_dir = rt_env_get("T32_LSP_MCP_TOOL_DAEMON_DIR") ?? ""
+    if env_dir != "":
+        LSP_TOOL_DAEMON_DIR = env_dir
+        return LSP_TOOL_DAEMON_DIR
+    LSP_TOOL_DAEMON_DIR = "/tmp/t32_lsp_mcp_shared"
+    LSP_TOOL_DAEMON_DIR
+
+fn lsp_tool_daemon_path() -> text:
+    val env_daemon = rt_env_get("T32_LSP_MCP_TOOL_DAEMON") ?? ""
+    if env_daemon != "":
+        return env_daemon
+    "examples/10_tooling/trace32_tools/cmm_lsp/mcp_daemon.spl"
+
+fn lsp_next_tool_request_key(id: text) -> text:
+    LSP_TOOL_DAEMON_SEQ = LSP_TOOL_DAEMON_SEQ + 1
+    "req_" + str(LSP_TOOL_DAEMON_SEQ) + "_" + id
+
+fn lsp_wait_for_tool_response(path: text, timeout_ms: i64) -> text:
+    val started = rt_time_now_unix_micros()
+    while true:
+        if rt_file_exists(path):
+            return (rt_file_read_text(path) ?? "").trim()
+        val elapsed_ms = (rt_time_now_unix_micros() - started) / 1000
+        if elapsed_ms >= timeout_ms:
+            return ""
+        rt_process_run("/bin/sh", ["-c", "sleep 0.05"])
+
+fn lsp_has_method(msg: text, name: text) -> bool:
+    msg.contains("\"method\":\"" + name + "\"") or msg.contains("\"method\": \"" + name + "\"")
+
+fn lsp_detect_method(msg: text) -> text:
+    if lsp_has_method(msg, "initialize"):
+        return "initialize"
+    if lsp_has_method(msg, "initialized") or lsp_has_method(msg, "notifications/initialized"):
+        return "initialized"
+    if lsp_has_method(msg, "notifications/cancelled"):
+        return "notifications/cancelled"
+    if lsp_has_method(msg, "notifications/roots/list_changed"):
+        return "notifications/roots/list_changed"
+    if lsp_has_method(msg, "shutdown"):
+        return "shutdown"
+    if lsp_has_method(msg, "tools/list"):
+        return "tools/list"
+    if lsp_has_method(msg, "tools/call"):
+        return "tools/call"
+    if lsp_has_method(msg, "ping"):
+        return "ping"
+    lsp_extract_field(msg, "method")
+
+fn lsp_detect_tool_name(body: text) -> text:
+    if body.contains("\"name\":\"cmm_parse\"") or body.contains("\"name\": \"cmm_parse\""):
+        return "cmm_parse"
+    if body.contains("\"name\":\"cmm_diagnostics\"") or body.contains("\"name\": \"cmm_diagnostics\""):
+        return "cmm_diagnostics"
+    if body.contains("\"name\":\"cmm_complete\"") or body.contains("\"name\": \"cmm_complete\""):
+        return "cmm_complete"
+    if body.contains("\"name\":\"cmm_hover\"") or body.contains("\"name\": \"cmm_hover\""):
+        return "cmm_hover"
+    if body.contains("\"name\":\"cmm_symbols\"") or body.contains("\"name\": \"cmm_symbols\""):
+        return "cmm_symbols"
+    if body.contains("\"name\":\"cmm_validate_cli\"") or body.contains("\"name\": \"cmm_validate_cli\""):
+        return "cmm_validate_cli"
+    lsp_extract_nested(body, "name")
+
+fn lsp_tool_runtime_path() -> text:
+    val env_runtime = rt_env_get("SIMPLE_RUNTIME") ?? ""
+    if env_runtime != "":
+        return env_runtime
+    "bin/release/simple"
+
+fn lsp_tool_runner_path() -> text:
+    val env_runner = rt_env_get("T32_LSP_MCP_TOOL_RUNNER") ?? ""
+    if env_runner != "":
+        return env_runner
+    "examples/10_tooling/trace32_tools/t32_lsp_mcp/tool_runner.spl"
+
+fn lsp_tool_runner_bin_path() -> text:
+    rt_env_get("T32_LSP_MCP_TOOL_RUNNER_BIN") ?? ""
+
+fn lsp_trim_error_text(stderr: text, stdout: text) -> text:
+    var raw = stderr.trim()
+    if raw == "":
+        raw = stdout.trim()
+    if raw == "":
+        return "unknown error"
+    if raw.len() > 240:
+        return raw[0:240]
+    raw

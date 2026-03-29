@@ -96,7 +96,7 @@ fn hover_for_stmt(stmt: CmmStmt, symbols: CmmSymbolTable, line: i64, col: i64, c
         case CmmStmt.LabelDef(name, sp):
             if span_contains(sp, line, col):
                 return HoverResult(
-                    content: "**Label:** `" + name + "`\n\nDefined at line " + int_to_text(sp.start_line),
+                    content: "**Label:** `" + name + "`\n\nDefined at line " + "{sp.start_line}",
                     range_start_line: sp.start_line,
                     range_start_col: sp.start_col,
                     range_end_line: sp.end_line,
@@ -245,7 +245,7 @@ fn hover_for_expr(expr: CmmExpr, symbols: CmmSymbolTable, line: i64, col: i64, c
             if syms.len() > 0:
                 val sym = syms[0]
                 return HoverResult(
-                    content: "**PRACTICE macro:** `&" + name + "`\n\nScope: " + sym.scope + "\nDeclared at line " + int_to_text(sym.def_line),
+                    content: "**PRACTICE macro:** `&" + name + "`\n\nScope: " + sym.scope + "\nDeclared at line " + "{sym.def_line}",
                     range_start_line: line,
                     range_start_col: col,
                     range_end_line: line,
@@ -258,7 +258,7 @@ fn hover_for_expr(expr: CmmExpr, symbols: CmmSymbolTable, line: i64, col: i64, c
             if syms.len() > 0:
                 val sym = syms[0]
                 return HoverResult(
-                    content: "**PRACTICE macro (recursive):** `&&" + name + "`\n\nScope: " + sym.scope + "\nDeclared at line " + int_to_text(sym.def_line),
+                    content: "**PRACTICE macro (recursive):** `&&" + name + "`\n\nScope: " + sym.scope + "\nDeclared at line " + "{sym.def_line}",
                     range_start_line: line,
                     range_start_col: col,
                     range_end_line: line,
@@ -318,7 +318,7 @@ fn hover_for_macro(name: text, symbols: CmmSymbolTable, sp: CmmSpan) -> HoverRes
     if syms.len() > 0:
         val sym = syms[0]
         return HoverResult(
-            content: "**PRACTICE macro:** `&" + name + "`\n\nScope: " + sym.scope + "\nDeclared at line " + int_to_text(sym.def_line),
+            content: "**PRACTICE macro:** `&" + name + "`\n\nScope: " + sym.scope + "\nDeclared at line " + "{sym.def_line}",
             range_start_line: sp.start_line,
             range_start_col: sp.start_col,
             range_end_line: sp.end_line,
@@ -340,7 +340,7 @@ fn hover_for_label_ref(target: text, symbols: CmmSymbolTable, sp: CmmSpan, stmt_
     while li < syms.len():
         match syms[li].kind:
             case CmmSymbolKind.LabelSym:
-                def_info = "\nDefined at line " + int_to_text(syms[li].def_line)
+                def_info = "\nDefined at line " + "{syms[li].def_line}"
             case _: ()
         li = li + 1
 
@@ -411,5 +411,3 @@ fn placeholder_func() -> CmmFuncInfo:
 use cmm_commands.{CmmCommandInfo}
 use cmm_functions.{CmmFuncInfo}
 
-fn int_to_text(n: i64) -> text:
-    "{n}"

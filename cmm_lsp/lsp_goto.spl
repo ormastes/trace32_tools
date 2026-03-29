@@ -254,7 +254,7 @@ fn resolve_file_reference(file_name: text, current_uri: text) -> DefinitionResul
         target_uri = file_name
 
     # Add .cmm extension if not present
-    if not ends_with(target_uri, ".cmm") and not ends_with(target_uri, ".CMM"):
+    if not target_uri.ends_with(".cmm") and not target_uri.ends_with(".CMM"):
         target_uri = target_uri + ".cmm"
 
     DefinitionResult(
@@ -300,8 +300,3 @@ fn extract_directory(uri: text) -> text:
         return uri[0:last_slash]
     ""
 
-# Check if text ends with a given suffix.
-fn ends_with(s: text, suffix: text) -> bool:
-    if suffix.len() > s.len():
-        return false
-    s[s.len() - suffix.len():s.len()] == suffix

@@ -1,16 +1,12 @@
 # T32 CLI — command-line interface for TRACE32 sessions
-# Subcommands: sessions, cores, windows, window, field, action, screenshot, cmm, shell
+# All commands route through bridge.spl (shared execution) + render.spl (formatting).
 
-use app.t32_cli.types.{T32Catalogs}
-use app.t32_cli.session.{cli_sessions_list, cli_session_open, cli_session_close, cli_session_use, cli_session_info}
-use app.t32_cli.core_context.{cli_cores_list, cli_core_select, cli_current_core}
-use app.t32_cli.window_model.{cli_windows_list, cli_window_open, cli_window_show, cli_window_describe}
-use app.t32_cli.catalog_loader.{load_catalogs}
+use app.t32_cli.types.{T32BridgeResult}
+use app.t32_cli.bridge.{bridge_sessions_list, bridge_session_open, bridge_session_resume, bridge_session_close, bridge_session_info, bridge_core_list, bridge_core_select, bridge_cmd_run, bridge_cmm_run, bridge_eval, bridge_window_list, bridge_window_open, bridge_window_capture, bridge_window_describe, bridge_screenshot, bridge_action_invoke, bridge_action_list, bridge_field_get, bridge_field_set, bridge_history_tail, bridge_resources_list, bridge_resource_read, bridge_setup_headless, bridge_area_read, bridge_cmm_commands, bridge_cmm_validate, bridge_status_snapshot, bridge_error_check, bridge_job_list, bridge_job_get, bridge_job_cancel, bridge_job_result, bridge_dialog_parse, bridge_dialog_get, bridge_dialog_set, bridge_dialog_click}
+use app.t32_cli.render.{render_result, render_error}
+use app.t32_cli.commands.{all_top_level_names, subcmds_for}
 use app.t32_cli.cli_shell.{start_t32_shell}
-use app.t32_cli.error_codes.{T4030, T4040, T4050, t32_err_unknown_cmd, t32_err_unknown_subcmd, t32_err_missing_args, t32_err_not_found, t32_err_field_not_found, t32_err_action_not_found, t32_err_window_not_found, cli_sessions_subcmds, cli_cores_subcmds, cli_window_subcmds, cli_field_subcmds, cli_action_subcmds}
-
-# Default catalog path relative to project root
-var CATALOG_BASE_PATH = "config/t32/catalogs"
+use app.t32_cli.error_codes.{t32_err_unknown_cmd, t32_err_unknown_subcmd, t32_err_missing_args}
 
 extern fn sys_get_args() -> [text]
 
@@ -35,6 +31,19 @@ fn t32_cli_main(args: [text]):
         "action": cmd_action(rest)
         "screenshot": cmd_screenshot(rest)
         "cmm": cmd_cmm(rest)
+        "cmd": cmd_cmd(rest)
+        "eval": cmd_eval(rest)
+        "status": cmd_status(rest)
+        "history": cmd_history(rest)
+        "resources": cmd_resources(rest)
+        "resource": cmd_resource(rest)
+        "headless": cmd_headless(rest)
+        "area": cmd_area(rest)
+        "cmm-commands": cmd_cmm_commands(rest)
+        "cmm-validate": cmd_cmm_validate(rest)
+        "jobs": cmd_jobs(rest)
+        "dialog": cmd_dialog(rest)
+        "error-check": cmd_error_check(rest)
         "shell": cmd_shell(rest)
         "help": print_usage()
         "--help": print_usage()
@@ -49,34 +58,79 @@ fn main():
         args = args[1:args.len()]
     t32_cli_main(args)
 
+# --- Helper: print bridge result or error ---
+
+fn print_bridge(result: Result<T32BridgeResult, text>):
+    match result:
+        Ok(r): print render_result(r)
+        Err(e): print render_error(e)
+
+# --- Help ---
+
 fn print_usage():
     print "Usage: simple t32 <command> [args...]"
     print ""
-    print "Commands:"
+    print "Session Commands:"
     print "  sessions                    List all sessions"
     print "  sessions open <host> <port> <name> <arch>"
-    print "  sessions close <id>"
-    print "  sessions use <id>"
-    print "  sessions info <id>"
+    print "  sessions close <id>         Close a session"
+    print "  sessions use <id>           Switch active session"
+    print "  sessions info <id>          Show session details"
     print "  cores                       List cores in current session"
-    print "  cores select <core_id>"
-    print "  windows                     List all windows from catalogs"
-    print "  window show <key>           Show window content"
-    print "  window open <key>           Open a window"
+    print "  cores select <core_id>      Select active core"
+    print ""
+    print "Execution Commands:"
+    print "  cmd run <command> [--force]  Run raw PRACTICE command"
+    print "  cmm <script> [--wait] [--timeout=<ms>] [--capture-area] [--force]"
+    print "  eval <expression>           Evaluate TRACE32 expression"
+    print ""
+    print "Window Commands:"
+    print "  windows                     List available windows"
+    print "  window show <key>           Capture window content"
+    print "  window open <key>           Open a TRACE32 window"
     print "  window describe <key>       Describe window actions/fields"
+    print "  screenshot <key> [path]     Save window screenshot"
+    print ""
+    print "Field/Action Commands:"
     print "  field get <key>             Get field value"
     print "  field set <key> <value>     Set field value"
-    print "  action do <key>             Execute an action"
-    print "  action list                 List all actions"
-    print "  screenshot <window> [path]  Save window screenshot"
-    print "  cmm <script_path>           Run CMM script"
+    print "  action do <key> [args]      Execute an action"
+    print "  action list [window_key]    List actions"
+    print ""
+    print "Observability Commands:"
+    print "  status                      Show CPU run state"
+    print "  history [count]             Show command history"
+    print "  resources list              List MCP resources"
+    print "  resource read <uri>         Read resource by URI"
+    print "  error-check                 Check TRACE32 error state"
+    print ""
+    print "Headless/CMM Commands:"
+    print "  headless setup [options]    One-shot headless setup"
+    print "  area read [name] [--clear]  Read AREA buffer"
+    print "  cmm-commands [--group=G] [--search=S]  Query command database"
+    print "  cmm-validate <source>       Validate CMM for headless safety"
+    print ""
+    print "Job Commands:"
+    print "  jobs list [--session=<id>]  List async jobs"
+    print "  jobs get <job_id>           Get job status"
+    print "  jobs cancel <job_id>        Cancel a job"
+    print "  jobs result <job_id>        Get job result"
+    print ""
+    print "Dialog Commands:"
+    print "  dialog parse <source>       Parse CMM for dialog elements"
+    print "  dialog get <label>          Read dialog element state"
+    print "  dialog set <label> [value]  Set dialog element"
+    print "  dialog click <label>        Click dialog button"
+    print ""
+    print "Other:"
     print "  shell                       Start interactive shell"
     print "  help                        Show this help"
 
+# --- Session Commands ---
+
 fn cmd_sessions(args: [text]):
     if args.len() == 0:
-        val table = cli_sessions_list()
-        print table
+        print_bridge(bridge_sessions_list())
         return
 
     val sub = args[0]
@@ -86,67 +140,84 @@ fn cmd_sessions(args: [text]):
                 print t32_err_missing_args("sessions open", "sessions open <host> <port> <name> <arch>", "sessions open localhost 20000 T32_ARM ARM")
                 return
             val host = args[1]
-            val port_text = args[2]
+            val port = parse_int(args[2])
             val name = args[3]
             val arch = args[4]
-            # Parse port as integer
-            var port = 0
-            var pi = 0
-            while pi < port_text.len():
-                val ch = port_text[pi]
-                var digit = ch.to_int() - 48
-                port = port * 10 + digit
-                pi = pi + 1
-            val result = cli_session_open(host, port, name, arch)
-            match result:
-                Ok(msg): print msg
-                Err(e): print "Error: {e}"
+            print_bridge(bridge_session_open(host, port, name, arch))
         "close":
             if args.len() < 2:
-                print "Usage: sessions close <id>"
+                print t32_err_missing_args("sessions close", "sessions close <id>", "sessions close s1")
                 return
-            val result = cli_session_close(args[1])
-            match result:
-                Ok(msg): print msg
-                Err(e): print "Error: {e}"
+            print_bridge(bridge_session_close(args[1]))
         "use":
             if args.len() < 2:
-                print "Usage: sessions use <id>"
+                print t32_err_missing_args("sessions use", "sessions use <id>", "sessions use s1")
                 return
-            val result = cli_session_use(args[1])
-            match result:
-                Ok(msg): print msg
-                Err(e): print "Error: {e}"
+            print_bridge(bridge_session_resume(args[1]))
         "info":
             if args.len() < 2:
-                print "Usage: sessions info <id>"
+                print t32_err_missing_args("sessions info", "sessions info <id>", "sessions info s1")
                 return
-            val info = cli_session_info(args[1])
-            print info
-        _: print t32_err_unknown_subcmd("sessions", sub, cli_sessions_subcmds())
+            print_bridge(bridge_session_info(args[1]))
+        _: print t32_err_unknown_subcmd("sessions", sub, subcmds_for("sessions"))
 
 fn cmd_cores(args: [text]):
     if args.len() == 0:
-        val table = cli_cores_list("")
-        print table
+        print_bridge(bridge_core_list(""))
         return
 
     val sub = args[0]
     match sub:
         "select":
             if args.len() < 2:
-                print "Usage: cores select <core_id>"
+                print t32_err_missing_args("cores select", "cores select <core_id>", "cores select c0")
                 return
-            val result = cli_core_select(args[1])
-            match result:
-                Ok(msg): print msg
-                Err(e): print "Error: {e}"
-        _: print t32_err_unknown_subcmd("cores", sub, cli_cores_subcmds())
+            print_bridge(bridge_core_select(args[1]))
+        _: print t32_err_unknown_subcmd("cores", sub, subcmds_for("cores"))
+
+# --- Execution Commands ---
+
+fn cmd_cmd(args: [text]):
+    if args.len() == 0:
+        print t32_err_missing_args("cmd", "cmd run <command> [--force]", "cmd run \"Break.Set main\"")
+        return
+
+    val sub = args[0]
+    match sub:
+        "run":
+            if args.len() < 2:
+                print t32_err_missing_args("cmd run", "cmd run <command> [--force]", "cmd run \"Break.Set main\"")
+                return
+            val command = args[1]
+            val force = has_flag(args, "--force")
+            print_bridge(bridge_cmd_run(command, force))
+        _: print t32_err_unknown_subcmd("cmd", sub, subcmds_for("cmd"))
+
+fn cmd_cmm(args: [text]):
+    if args.len() == 0:
+        print t32_err_missing_args("cmm", "cmm <script_path> [--wait] [--timeout=<ms>] [--capture-area] [--force]", "cmm startup.cmm --wait")
+        return
+
+    val script = args[0]
+    val wait = has_flag(args, "--wait")
+    val capture_area = has_flag(args, "--capture-area")
+    val force = has_flag(args, "--force")
+    val timeout_ms = get_flag_value(args, "--timeout", "0")
+    val timeout = parse_int(timeout_ms)
+    print_bridge(bridge_cmm_run(script, wait, timeout, capture_area, force))
+
+fn cmd_eval(args: [text]):
+    if args.len() == 0:
+        print t32_err_missing_args("eval", "eval <expression>", "eval Register.PP(PC)")
+        return
+    # Join all args as the expression (allows unquoted multi-word)
+    val expr = join_args(args)
+    print_bridge(bridge_eval(expr))
+
+# --- Window Commands ---
 
 fn cmd_windows(args: [text]):
-    val catalogs = load_catalogs(CATALOG_BASE_PATH)
-    val table = cli_windows_list(catalogs)
-    print table
+    print_bridge(bridge_window_list())
 
 fn cmd_window(args: [text]):
     if args.len() < 2:
@@ -155,105 +226,228 @@ fn cmd_window(args: [text]):
 
     val sub = args[0]
     val key = args[1]
-    val catalogs = load_catalogs(CATALOG_BASE_PATH)
 
     match sub:
-        "show":
-            val result = cli_window_show(key, catalogs)
-            match result:
-                Ok(output): print output
-                Err(e): print "Error: {e}"
-        "open":
-            val result = cli_window_open(key, catalogs)
-            match result:
-                Ok(output): print output
-                Err(e): print "Error: {e}"
-        "describe":
-            val desc = cli_window_describe(key, catalogs)
-            print desc
-        _: print t32_err_unknown_subcmd("window", sub, cli_window_subcmds())
-
-fn cmd_field(args: [text]):
-    if args.len() < 2:
-        print t32_err_missing_args("field", "field <get|set> <key> [value]", "field get symbol")
-        return
-
-    val sub = args[0]
-    val key = args[1]
-    val catalogs = load_catalogs(CATALOG_BASE_PATH)
-
-    match sub:
-        "get":
-            val found = catalogs.find_field(key)
-            match found:
-                Some(f): print "{f.field_key} = {f.current_value}"
-                nil: print t32_err_field_not_found(key, catalogs.field_keys())
-        "set":
-            if args.len() < 3:
-                print t32_err_missing_args("field set", "field set <key> <value>", "field set symbol main")
-                return
-            val value = args[2]
-            val found = catalogs.find_field(key)
-            match found:
-                Some(f):
-                    print "Set {key} = {value}"
-                nil: print t32_err_field_not_found(key, catalogs.field_keys())
-        _: print t32_err_unknown_subcmd("field", sub, cli_field_subcmds())
-
-fn cmd_action(args: [text]):
-    if args.len() == 0:
-        print "Usage: action <do|list> [key]"
-        return
-
-    val sub = args[0]
-    val catalogs = load_catalogs(CATALOG_BASE_PATH)
-
-    match sub:
-        "do":
-            if args.len() < 2:
-                print "Usage: action do <key>"
-                return
-            val key = args[1]
-            val found = catalogs.find_action(key)
-            match found:
-                Some(a):
-                    print "Execute: {a.command_template}"
-                    print "Action '{a.label}' dispatched."
-                nil: print t32_err_action_not_found(key, catalogs.action_keys())
-        "list":
-            print "Actions:"
-            for a in catalogs.actions:
-                print "  {a.action_key} — {a.label} ({a.action_type})"
-        _: print t32_err_unknown_subcmd("action", sub, cli_action_subcmds())
+        "show": print_bridge(bridge_window_capture(key))
+        "open": print_bridge(bridge_window_open(key))
+        "describe": print_bridge(bridge_window_describe(key))
+        _: print t32_err_unknown_subcmd("window", sub, subcmds_for("window"))
 
 fn cmd_screenshot(args: [text]):
     if args.len() == 0:
-        print "Usage: screenshot <window_key> [output_path]"
+        print t32_err_missing_args("screenshot", "screenshot <window_key> [output_path]", "screenshot register reg.png")
         return
 
     val window_key = args[0]
     var output_path = "{window_key}.png"
     if args.len() > 1:
         output_path = args[1]
+    print_bridge(bridge_screenshot(window_key, output_path))
 
-    val catalogs = load_catalogs(CATALOG_BASE_PATH)
-    val found = catalogs.find_window(window_key)
-    match found:
-        Some(w):
-            # Screenshot would use WinPOS/SCREEN.DUMP in real TRACE32
-            print "Screenshot of '{w.title}' -> {output_path}"
-            print "Command: WinPOS 0. 0. 80. 40. ,, {w.window_key}"
-            print "Command: SCREEN.DUMP {output_path}"
-        nil: print t32_err_window_not_found(window_key, catalogs.window_keys())
+# --- Field/Action Commands ---
 
-fn cmd_cmm(args: [text]):
-    if args.len() == 0:
-        print "Usage: cmm <script_path>"
+fn cmd_field(args: [text]):
+    if args.len() < 2:
+        print t32_err_missing_args("field", "field <get|set> <key> [value]", "field get pc")
         return
 
-    val script_path = args[0]
-    print "Running CMM script: {script_path}"
-    print "Command: DO {script_path}"
+    val sub = args[0]
+    val key = args[1]
+
+    match sub:
+        "get": print_bridge(bridge_field_get(key))
+        "set":
+            if args.len() < 3:
+                print t32_err_missing_args("field set", "field set <key> <value>", "field set symbol main")
+                return
+            print_bridge(bridge_field_set(key, args[2]))
+        _: print t32_err_unknown_subcmd("field", sub, subcmds_for("field"))
+
+fn cmd_action(args: [text]):
+    if args.len() == 0:
+        print t32_err_missing_args("action", "action <do|list> [key]", "action do step_into")
+        return
+
+    val sub = args[0]
+    match sub:
+        "do":
+            if args.len() < 2:
+                print t32_err_missing_args("action do", "action do <key> [args]", "action do step_into")
+                return
+            val extra_args = if args.len() > 2: args[2] else: ""
+            print_bridge(bridge_action_invoke(args[1], extra_args))
+        "list":
+            val window_filter = if args.len() > 1: args[1] else: ""
+            print_bridge(bridge_action_list(window_filter))
+        _: print t32_err_unknown_subcmd("action", sub, subcmds_for("action"))
+
+# --- Observability Commands ---
+
+fn cmd_status(args: [text]):
+    print_bridge(bridge_status_snapshot())
+
+fn cmd_history(args: [text]):
+    val count = if args.len() > 0: parse_int(args[0]) else: 20
+    print_bridge(bridge_history_tail(count))
+
+fn cmd_resources(args: [text]):
+    if args.len() == 0 or args[0] == "list":
+        print_bridge(bridge_resources_list())
+        return
+    print t32_err_unknown_subcmd("resources", args[0], subcmds_for("resources"))
+
+fn cmd_resource(args: [text]):
+    if args.len() < 2:
+        print t32_err_missing_args("resource", "resource read <uri>", "resource read t32:///sessions")
+        return
+    val sub = args[0]
+    match sub:
+        "read": print_bridge(bridge_resource_read(args[1]))
+        _: print t32_err_unknown_subcmd("resource", sub, subcmds_for("resource"))
+
+fn cmd_error_check(args: [text]):
+    print_bridge(bridge_error_check())
+
+# --- Headless/CMM Commands ---
+
+fn cmd_headless(args: [text]):
+    if args.len() == 0:
+        print t32_err_missing_args("headless", "headless setup [options]", "headless setup")
+        return
+    val sub = args[0]
+    match sub:
+        "setup":
+            val area_name = get_flag_value(args, "--area", "A000")
+            val semihost = not has_flag(args, "--no-semihost")
+            val error_handler = not has_flag(args, "--no-error-handler")
+            print_bridge(bridge_setup_headless(area_name, semihost, error_handler))
+        _: print t32_err_unknown_subcmd("headless", sub, subcmds_for("headless"))
+
+fn cmd_area(args: [text]):
+    if args.len() == 0:
+        print t32_err_missing_args("area", "area read [name] [--clear]", "area read A000")
+        return
+    val sub = args[0]
+    match sub:
+        "read":
+            val name = if args.len() > 1 and not args[1].starts_with("--"): args[1] else: "A000"
+            val clear = has_flag(args, "--clear")
+            print_bridge(bridge_area_read(name, clear))
+        _: print t32_err_unknown_subcmd("area", sub, subcmds_for("area"))
+
+fn cmd_cmm_commands(args: [text]):
+    val group = get_flag_value(args, "--group", "")
+    val search = get_flag_value(args, "--search", "")
+    print_bridge(bridge_cmm_commands(group, search))
+
+fn cmd_cmm_validate(args: [text]):
+    if args.len() == 0:
+        print t32_err_missing_args("cmm-validate", "cmm-validate <source> [--mode=<headless|interactive>]", "cmm-validate script.cmm")
+        return
+    val source = args[0]
+    val mode = get_flag_value(args, "--mode", "headless")
+    print_bridge(bridge_cmm_validate(source, mode))
+
+# --- Job Commands ---
+
+fn cmd_jobs(args: [text]):
+    if args.len() == 0 or args[0] == "list":
+        val session_filter = get_flag_value(args, "--session", "")
+        print_bridge(bridge_job_list(session_filter))
+        return
+
+    val sub = args[0]
+    match sub:
+        "get":
+            if args.len() < 2:
+                print t32_err_missing_args("jobs get", "jobs get <job_id>", "jobs get j1")
+                return
+            print_bridge(bridge_job_get(args[1]))
+        "cancel":
+            if args.len() < 2:
+                print t32_err_missing_args("jobs cancel", "jobs cancel <job_id>", "jobs cancel j1")
+                return
+            print_bridge(bridge_job_cancel(args[1]))
+        "result":
+            if args.len() < 2:
+                print t32_err_missing_args("jobs result", "jobs result <job_id>", "jobs result j1")
+                return
+            print_bridge(bridge_job_result(args[1]))
+        _: print t32_err_unknown_subcmd("jobs", sub, subcmds_for("jobs"))
+
+# --- Dialog Commands ---
+
+fn cmd_dialog(args: [text]):
+    if args.len() == 0:
+        print t32_err_missing_args("dialog", "dialog <parse|get|set|click> <args>", "dialog parse my_dialog.cmm")
+        return
+
+    val sub = args[0]
+    match sub:
+        "parse":
+            if args.len() < 2:
+                print t32_err_missing_args("dialog parse", "dialog parse <source>", "dialog parse my_dialog.cmm")
+                return
+            print_bridge(bridge_dialog_parse(args[1]))
+        "get":
+            if args.len() < 2:
+                print t32_err_missing_args("dialog get", "dialog get <label> [--type=<bool|string|value>]", "dialog get MyCheckbox")
+                return
+            val query_type = get_flag_value(args, "--type", "string")
+            print_bridge(bridge_dialog_get(args[1], query_type))
+        "set":
+            if args.len() < 2:
+                print t32_err_missing_args("dialog set", "dialog set <label> [value] [--action=<set|select|deselect|disable|enable>]", "dialog set MyEdit \"hello\"")
+                return
+            val value = if args.len() > 2 and not args[2].starts_with("--"): args[2] else: ""
+            val action = get_flag_value(args, "--action", "set")
+            print_bridge(bridge_dialog_set(args[1], action, value))
+        "click":
+            if args.len() < 2:
+                print t32_err_missing_args("dialog click", "dialog click <label>", "dialog click MyButton")
+                return
+            val capture_area = has_flag(args, "--capture-area")
+            val timeout = parse_int(get_flag_value(args, "--timeout", "0"))
+            print_bridge(bridge_dialog_click(args[1], capture_area, timeout))
+        _: print t32_err_unknown_subcmd("dialog", sub, subcmds_for("dialog"))
+
+# --- Shell ---
 
 fn cmd_shell(args: [text]):
     start_t32_shell()
+
+# --- Argument Parsing Helpers ---
+
+fn parse_int(s: text) -> i64:
+    var result: i64 = 0
+    var i = 0
+    while i < s.len():
+        val ch = s[i]
+        var digit = ch.to_int() - 48
+        if digit >= 0 and digit <= 9:
+            result = result * 10 + digit
+        i = i + 1
+    result
+
+fn has_flag(args: [text], flag: text) -> bool:
+    for a in args:
+        if a == flag:
+            return true
+    false
+
+fn get_flag_value(args: [text], prefix: text, default_val: text) -> text:
+    val eq_prefix = prefix + "="
+    for a in args:
+        if a.starts_with(eq_prefix):
+            return a.slice(eq_prefix.len(), a.len())
+    default_val
+
+fn join_args(args: [text]) -> text:
+    if args.len() == 0:
+        return ""
+    var result = args[0]
+    var i = 1
+    while i < args.len():
+        result = result + " " + args[i]
+        i = i + 1
+    result

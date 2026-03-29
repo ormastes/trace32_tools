@@ -17,7 +17,8 @@
 #
 # Reference: doc/research/cmm_grammar_research_2026-03-10.md
 
-use cmm_ast.{CmmProgram, CmmStmt, CmmExpr, CmmLiteral, CmmSpan}
+use cmm_ast.{CmmProgram, CmmStmt, CmmExpr, CmmLiteral, CmmDialogItem, CmmSpan}
+use cmm_dialog_model.{cmm_dialog_declared_label}
 use cmm_diagnostics.{CmmDiagnostic, CmmDiagnosticKind, DiagnosticCollector, make_diagnostic}
 use cmm_version.{CmmParserConfig, default_config}
 
@@ -169,6 +170,9 @@ fn analyze_program_with_config(program: CmmProgram, config: CmmParserConfig) -> 
 
     # Pass 5: DO target validation stub
     check_do_targets(program.statements)
+
+    # Pass 6: dialog label reference checking
+    check_dialog_label_refs(program.statements)
 
     # Build result from module-level state
     var sym_table = CmmSymbolTable(symbols: [])
@@ -581,6 +585,152 @@ fn check_do_targets_stmt(stmt: CmmStmt):
         case _: ()
 
 # ---------------------------------------------------------------------------
+# Pass 6: Dialog label reference checking
+# Collects labels declared in DIALOG blocks, then scans for
+# DIALOG.BOOLEAN(label), DIALOG.STRING(label), DIALOG.SET label, etc.
+# Emits a warning if a referenced label is not found in any dialog block.
+# ---------------------------------------------------------------------------
+
+fn check_dialog_label_refs(stmts: [CmmStmt]):
+    # Step 1: Collect all dialog labels
+    var dialog_labels: [text] = []
+    var duplicate_labels: [text] = []
+    _collect_dialog_labels(stmts, dialog_labels)
+    var seen_labels: [text] = []
+    _collect_duplicate_dialog_labels(stmts, seen_labels, duplicate_labels)
+    var di = 0
+    while di < duplicate_labels.len():
+        _add_warning("Duplicate dialog label '" + duplicate_labels[di] + "' found in DIALOG blocks", 0, 0)
+        di = di + 1
+    # If no dialog blocks found, skip reference checking
+    if dialog_labels.len() == 0:
+        return
+    # Step 2: Check dialog references
+    _check_dialog_refs(stmts, dialog_labels)
+
+fn _collect_dialog_labels(stmts: [CmmStmt], labels: [text]):
+    var i = 0
+    while i < stmts.len():
+        _collect_dialog_labels_stmt(stmts[i], labels)
+        i = i + 1
+
+fn _collect_dialog_labels_stmt(stmt: CmmStmt, labels: [text]):
+    match stmt:
+        case CmmStmt.DialogBlock(_, items, _):
+            var j = 0
+            while j < items.len():
+                val label = cmm_dialog_declared_label(items[j])
+                if label != "" and not list_contains(labels, label):
+                    labels.push(label)
+                j = j + 1
+        case CmmStmt.Block(stmts, _):
+            _collect_dialog_labels(stmts, labels)
+        case CmmStmt.IfElse(_, then_body, else_body, _):
+            _collect_dialog_labels_stmt(then_body, labels)
+            if else_body.?:
+                val eb = else_body ?? CmmStmt.EmptyLine(_default_sp)
+                _collect_dialog_labels_stmt(eb, labels)
+        case CmmStmt.WhileLoop(_, body, _):
+            _collect_dialog_labels_stmt(body, labels)
+        case CmmStmt.RepeatLoop(_, body, _):
+            _collect_dialog_labels_stmt(body, labels)
+        case _: ()
+
+fn _collect_duplicate_dialog_labels(stmts: [CmmStmt], seen_labels: [text], duplicate_labels: [text]):
+    var i = 0
+    while i < stmts.len():
+        _collect_duplicate_dialog_labels_stmt(stmts[i], seen_labels, duplicate_labels)
+        i = i + 1
+
+fn _collect_duplicate_dialog_labels_stmt(stmt: CmmStmt, seen_labels: [text], duplicate_labels: [text]):
+    match stmt:
+        case CmmStmt.DialogBlock(_, items, _):
+            var j = 0
+            while j < items.len():
+                val label = cmm_dialog_declared_label(items[j])
+                if label != "" and list_contains(seen_labels, label) and not list_contains(duplicate_labels, label):
+                    duplicate_labels.push(label)
+                elif label != "":
+                    seen_labels.push(label)
+                j = j + 1
+        case CmmStmt.Block(stmts, _):
+            _collect_duplicate_dialog_labels(stmts, seen_labels, duplicate_labels)
+        case CmmStmt.IfElse(_, then_body, else_body, _):
+            _collect_duplicate_dialog_labels_stmt(then_body, seen_labels, duplicate_labels)
+            if else_body.?:
+                val eb = else_body ?? CmmStmt.EmptyLine(_default_sp)
+                _collect_duplicate_dialog_labels_stmt(eb, seen_labels, duplicate_labels)
+        case CmmStmt.WhileLoop(_, body, _):
+            _collect_duplicate_dialog_labels_stmt(body, seen_labels, duplicate_labels)
+        case CmmStmt.RepeatLoop(_, body, _):
+            _collect_duplicate_dialog_labels_stmt(body, seen_labels, duplicate_labels)
+        case _: ()
+
+fn _check_dialog_refs(stmts: [CmmStmt], dialog_labels: [text]):
+    var i = 0
+    while i < stmts.len():
+        _check_dialog_refs_stmt(stmts[i], dialog_labels)
+        i = i + 1
+
+fn _check_dialog_refs_stmt(stmt: CmmStmt, dialog_labels: [text]):
+    match stmt:
+        case CmmStmt.Command(name, args, sp):
+            val upper = name.to_upper()
+            # Check DIALOG.Set/Disable/Enable/EXECUTE <label>
+            if (upper == "DIALOG.SET" or upper == "DIALOG.DISABLE" or
+                upper == "DIALOG.ENABLE" or upper == "DIALOG.EXECUTE"):
+                if args.len() > 0:
+                    val ref_label = _extract_ident_from_expr(args[0])
+                    if ref_label != "" and not ref_label.starts_with("&"):
+                        if not list_contains(dialog_labels, ref_label):
+                            _add_warning("Dialog label '" + ref_label + "' not found in any DIALOG block", sp.start_line, sp.start_col)
+            # Check EVAL DIALOG.BOOLEAN(x), etc. — EVAL with DIALOG function arg
+            if upper == "EVAL" and args.len() > 0:
+                val arg_name = _extract_func_call_name(args[0])
+                val arg_upper = arg_name.to_upper()
+                if (arg_upper == "DIALOG.BOOLEAN" or arg_upper == "DIALOG.STRING" or
+                    arg_upper == "DIALOG.VALUE" or arg_upper == "DIALOG.EXIST"):
+                    val ref_label = _extract_func_call_arg(args[0])
+                    if ref_label != "" and not ref_label.starts_with("&"):
+                        if not list_contains(dialog_labels, ref_label):
+                            _add_warning("Dialog label '" + ref_label + "' not found in any DIALOG block", sp.start_line, sp.start_col)
+        case CmmStmt.Block(stmts, _):
+            _check_dialog_refs(stmts, dialog_labels)
+        case CmmStmt.IfElse(_, then_body, else_body, _):
+            _check_dialog_refs_stmt(then_body, dialog_labels)
+            if else_body.?:
+                val eb = else_body ?? CmmStmt.EmptyLine(_default_sp)
+                _check_dialog_refs_stmt(eb, dialog_labels)
+        case CmmStmt.WhileLoop(_, body, _):
+            _check_dialog_refs_stmt(body, dialog_labels)
+        case CmmStmt.RepeatLoop(_, body, _):
+            _check_dialog_refs_stmt(body, dialog_labels)
+        case _: ()
+
+# Extract identifier name from a CmmExpr (for DIALOG.Set label arg)
+fn _extract_ident_from_expr(expr: CmmExpr) -> text:
+    match expr:
+        case CmmExpr.Ident(name): name
+        case CmmExpr.MacroRef(name): "&" + name
+        case _: ""
+
+# Extract function name from a CmmExpr.FunctionCall
+fn _extract_func_call_name(expr: CmmExpr) -> text:
+    match expr:
+        case CmmExpr.FunctionCall(name, _): name
+        case CmmExpr.DotPath(name): name
+        case _: ""
+
+# Extract first argument from a CmmExpr.FunctionCall as text
+fn _extract_func_call_arg(expr: CmmExpr) -> text:
+    match expr:
+        case CmmExpr.FunctionCall(_, args):
+            if args.len() > 0:
+                return _extract_ident_from_expr(args[0])
+            ""
+        case _: ""
+
+# ---------------------------------------------------------------------------
 # Utility helpers
 # ---------------------------------------------------------------------------
 
@@ -612,7 +762,7 @@ fn stmt_span(stmt: CmmStmt) -> CmmSpan:
         case CmmStmt.CloseFile(_, sp): return sp
         case CmmStmt.PrintStmt(_, sp): return sp
         case CmmStmt.WaitStmt(_, sp): return sp
-        case CmmStmt.DialogBlock(_, sp): return sp
+        case CmmStmt.DialogBlock(_, _, sp): return sp
         case CmmStmt.Block(_, sp): return sp
         case CmmStmt.ErrorNode(_, sp): return sp
         case CmmStmt.Command(_, _, sp): return sp

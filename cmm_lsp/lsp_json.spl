@@ -15,27 +15,57 @@ extern fn to_int(s: text) -> i64
 # ---------------------------------------------------------------------------
 
 # Escape a string for JSON output.
+# Uses segment-based approach: collect slices between special chars, join at end.
 fn escape_json(s: text) -> text:
-    var result = ""
+    val len = s.len()
+    # Fast path: scan for any special char. If none, return as-is.
+    var has_special = false
+    var scan = 0
+    while scan < len:
+        val ch = s[scan:scan + 1]
+        if ch == "\\" or ch == "\"" or ch == "\n" or ch == "\r" or ch == "\t":
+            has_special = true
+            break
+        scan = scan + 1
+    if not has_special:
+        return s
+
+    # Collect segments between special characters
+    var parts: [text] = []
+    var seg_start = 0
     var i = 0
-    while i < s.len():
+    while i < len:
         val ch = s[i:i + 1]
         if ch == "\\":
-            result = result + "\\\\"
+            if i > seg_start: parts.push(s[seg_start:i])
+            parts.push("\\\\")
+            i = i + 1
+            seg_start = i
+        else if ch == "\"":
+            if i > seg_start: parts.push(s[seg_start:i])
+            parts.push("\\\"")
+            i = i + 1
+            seg_start = i
         else if ch == "\n":
-            result = result + "\\n"
+            if i > seg_start: parts.push(s[seg_start:i])
+            parts.push("\\n")
+            i = i + 1
+            seg_start = i
         else if ch == "\r":
-            result = result + "\\r"
+            if i > seg_start: parts.push(s[seg_start:i])
+            parts.push("\\r")
+            i = i + 1
+            seg_start = i
         else if ch == "\t":
-            result = result + "\\t"
+            if i > seg_start: parts.push(s[seg_start:i])
+            parts.push("\\t")
+            i = i + 1
+            seg_start = i
         else:
-            # Handle double-quote: produce \"
-            if ch == "\"":
-                result = result + "\\\""
-            else:
-                result = result + ch
-        i = i + 1
-    result
+            i = i + 1
+    if seg_start < len:
+        parts.push(s[seg_start:len])
+    parts.join("")
 
 # Wrap a value as a JSON string: "value"
 fn json_string(s: text) -> text:
@@ -58,16 +88,22 @@ fn json_bool(b: bool) -> text:
 fn json_null() -> text:
     "null"
 
-# Build a JSON array from pre-formatted items
+# Build a JSON array from pre-formatted items.
+# Uses segment collection to avoid O(n²) concatenation.
 fn json_array(items: [text]) -> text:
-    var result = "["
+    val n = items.len()
+    if n == 0: return "[]"
+    if n == 1: return "[" + items[0] + "]"
+    var parts: [text] = []
+    parts.push("[")
     var i = 0
-    while i < items.len():
+    while i < n:
         if i > 0:
-            result = result + ","
-        result = result + items[i]
+            parts.push(",")
+        parts.push(items[i])
         i = i + 1
-    result + "]"
+    parts.push("]")
+    parts.join("")
 
 # Key-value pair for building JSON objects.
 # Keys are plain text (will be quoted); values are pre-formatted JSON strings.
@@ -76,15 +112,22 @@ struct JsonPair:
     value: text
 
 # Build a JSON object from key-value pairs.
+# Uses segment collection to avoid O(n²) concatenation.
 fn json_object(pairs: [JsonPair]) -> text:
-    var result = "{"
+    val n = pairs.len()
+    if n == 0: return "{}"
+    var parts: [text] = []
+    parts.push("{")
     var i = 0
-    while i < pairs.len():
+    while i < n:
         if i > 0:
-            result = result + ","
-        result = result + json_string(pairs[i].key) + ":" + pairs[i].value
+            parts.push(",")
+        parts.push(json_string(pairs[i].key))
+        parts.push(":")
+        parts.push(pairs[i].value)
         i = i + 1
-    result + "}"
+    parts.push("}")
+    parts.join("")
 
 # ---------------------------------------------------------------------------
 # JSON field extractors — read values from JSON text
@@ -138,29 +181,49 @@ fn json_get_string(json: text, key: text) -> text?:
     val q_ch = json[pos:pos + 1]
     if q_ch != "\"":
         return nil
-    # Read until closing quote, handling escapes
-    var result = ""
+    # Read until closing quote, handling escapes.
+    # Use segment-based collection to avoid O(n²) concat.
     var i = pos + 1
+    # Fast path: scan for escape or closing quote
+    var has_escape = false
+    var scan = i
+    while scan < json.len():
+        val ch = json[scan:scan + 1]
+        if ch == "\"":
+            break
+        if ch == "\\":
+            has_escape = true
+            break
+        scan = scan + 1
+    if not has_escape:
+        if scan < json.len():
+            return json[i:scan]
+        return nil
+    # Slow path: collect segments
+    var parts: [text] = []
+    var seg_start = i
     while i < json.len():
         val ch = json[i:i + 1]
         if ch == "\"":
-            # Closing quote
-            return result
+            if i > seg_start: parts.push(json[seg_start:i])
+            return parts.join("")
         if ch == "\\":
+            if i > seg_start: parts.push(json[seg_start:i])
             i = i + 1
             if i < json.len():
                 val esc = json[i:i + 1]
                 if esc == "n":
-                    result = result + "\n"
+                    parts.push("\n")
                 else if esc == "r":
-                    result = result + "\r"
+                    parts.push("\r")
                 else if esc == "t":
-                    result = result + "\t"
+                    parts.push("\t")
                 else:
-                    result = result + esc
+                    parts.push(esc)
+            i = i + 1
+            seg_start = i
         else:
-            result = result + ch
-        i = i + 1
+            i = i + 1
     nil
 
 # Extract a JSON integer value for a given key.
@@ -171,22 +234,23 @@ fn json_get_int(json: text, key: text) -> i64?:
     val pos = skip_ws(json, after_colon)
     if pos >= json.len():
         return nil
-    # Read digits (and optional leading minus)
-    var num_str = ""
+    # Read digits (and optional leading minus) — use slice instead of char-by-char concat
     var i = pos
     val first = json[i:i + 1]
     if first == "-":
-        num_str = "-"
         i = i + 1
+    val digit_start = i
     while i < json.len():
         val ch = json[i:i + 1]
         if ch >= "0" and ch <= "9":
-            num_str = num_str + ch
             i = i + 1
         else:
             break
-    if num_str == "" or num_str == "-":
+    if i == digit_start and first != "-":
         return nil
+    if i == digit_start and first == "-":
+        return nil
+    val num_str = json[pos:i]
     to_int(num_str)
 
 # Extract a JSON object value for a given key (returns the raw JSON substring).
@@ -322,3 +386,4 @@ fn json_get_raw(json: text, key: text) -> text?:
     if end <= pos:
         return nil
     json[pos:end]
+

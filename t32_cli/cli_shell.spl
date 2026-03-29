@@ -1,18 +1,17 @@
 # T32 CLI — Interactive shell mode
-# REPL loop for TRACE32 session interaction
+# REPL loop for TRACE32 session interaction.
+# All verbs route through bridge.spl (shared execution) + render.spl (formatting).
 
 extern fn rt_stdin_read_line() -> text
 
-use app.t32_cli.session.{CLI_CURRENT_SESSION, CLI_CURRENT_CORE, cli_sessions_list, cli_session_use, cli_session_info, cli_current_session_info, cli_run_t32rem}
-use app.t32_cli.core_context.{cli_cores_list, cli_core_select}
-use app.t32_cli.window_model.{cli_windows_list, cli_window_open, cli_window_show, cli_window_describe}
-use app.t32_cli.catalog_loader.{load_catalogs}
-use app.t32_cli.types.{T32Catalogs, T32HistoryEntry}
-use app.t32_cli.error_codes.{t32_err_unknown_shell_cmd, t32_err_field_not_found, t32_err_action_not_found, t32_err_window_not_found}
+use app.t32_cli.types.{T32BridgeResult, T32HistoryEntry}
+use app.t32_cli.bridge.{bridge_sessions_list, bridge_session_resume, bridge_session_info, bridge_core_list, bridge_core_select, bridge_cmd_run, bridge_cmm_run, bridge_eval, bridge_window_list, bridge_window_open, bridge_window_capture, bridge_window_describe, bridge_screenshot, bridge_action_invoke, bridge_action_list, bridge_field_get, bridge_field_set, bridge_history_tail, bridge_resources_list, bridge_resource_read, bridge_setup_headless, bridge_area_read, bridge_cmm_commands, bridge_cmm_validate, bridge_status_snapshot, bridge_error_check, bridge_job_list, bridge_job_get, bridge_job_cancel, bridge_job_result, bridge_dialog_parse, bridge_dialog_get, bridge_dialog_set, bridge_dialog_click}
+use app.t32_cli.render.{render_result, render_error}
+use app.t32_cli.session.{CLI_CURRENT_SESSION, CLI_CURRENT_CORE}
+use app.t32_cli.error_codes.{t32_err_unknown_shell_cmd}
 
 # Shell history
 var SHELL_HISTORY: [T32HistoryEntry] = []
-var SHELL_CATALOG_PATH = "config/t32/catalogs"
 
 # Start the interactive T32 shell
 fn start_t32_shell():
@@ -30,12 +29,7 @@ fn start_t32_shell():
         if line == "":
             continue
 
-        if line == "quit":
-            print "Goodbye."
-            running = false
-            continue
-
-        if line == "exit":
+        if line == "quit" or line == "exit":
             print "Goodbye."
             running = false
             continue
@@ -60,7 +54,15 @@ fn shell_prompt() -> text:
 
     "{session_part}{core_part}> "
 
-# Parse and dispatch a shell command line
+# --- Bridge result helper ---
+
+fn bridge_to_text(result: Result<T32BridgeResult, text>) -> text:
+    match result:
+        Ok(r): render_result(r)
+        Err(e): render_error(e)
+
+# --- Dispatch ---
+
 fn shell_dispatch(line: text) -> text:
     val parts = split_shell(line)
     if parts.len() == 0:
@@ -75,11 +77,12 @@ fn shell_dispatch(line: text) -> text:
 
     match cmd:
         "help": shell_help()
-        "sessions": cli_sessions_list()
+        "sessions": bridge_to_text(bridge_sessions_list())
         "use": shell_use(args)
-        "cores": cli_cores_list("")
+        "info": shell_info(args)
+        "cores": bridge_to_text(bridge_core_list(""))
         "core": shell_core(args)
-        "windows": shell_windows()
+        "windows": bridge_to_text(bridge_window_list())
         "show": shell_show(args)
         "open": shell_open(args)
         "describe": shell_describe(args)
@@ -87,141 +90,95 @@ fn shell_dispatch(line: text) -> text:
         "do": shell_do(args)
         "cmm": shell_cmm(args)
         "screenshot": shell_screenshot(args)
-        "history": shell_history()
+        "history": shell_history_cmd(args)
+        "cmd": shell_cmd(args)
+        "eval": shell_eval(args)
+        "status": bridge_to_text(bridge_status_snapshot())
+        "resources": bridge_to_text(bridge_resources_list())
+        "resource": shell_resource(args)
+        "headless": shell_headless(args)
+        "area": shell_area(args)
+        "cmm-commands": shell_cmm_commands(args)
+        "cmm-validate": shell_cmm_validate(args)
+        "jobs": shell_jobs(args)
+        "dialog": shell_dialog(args)
+        "error-check": bridge_to_text(bridge_error_check())
         _: t32_err_unknown_shell_cmd(cmd)
+
+# --- Help ---
 
 fn shell_help() -> text:
     var out = "Available commands:\n"
+    out = out + "\n  Session:\n"
     out = out + "  sessions              List all sessions\n"
     out = out + "  use <id>              Switch active session\n"
+    out = out + "  info <id>             Show session details\n"
     out = out + "  cores                 List cores in current session\n"
     out = out + "  core <id>             Switch active core\n"
+    out = out + "\n  Execution:\n"
+    out = out + "  cmd <command> [--force]  Run PRACTICE command\n"
+    out = out + "  cmm <script> [opts]   Run CMM script\n"
+    out = out + "  eval <expression>     Evaluate TRACE32 expression\n"
+    out = out + "\n  Window:\n"
     out = out + "  windows               List all windows\n"
-    out = out + "  show <name>           Show window content\n"
+    out = out + "  show <name>           Capture window content\n"
     out = out + "  open <name>           Open a window\n"
     out = out + "  describe <name>       Describe window (actions, fields)\n"
-    out = out + "  set <field> <value>   Set a field value\n"
-    out = out + "  do <action>           Execute an action\n"
-    out = out + "  cmm <script>          Run a CMM script\n"
     out = out + "  screenshot <win> [path]  Save window screenshot\n"
-    out = out + "  history               Show command history\n"
-    out = out + "  quit                  Exit shell"
+    out = out + "\n  Field/Action:\n"
+    out = out + "  set <field> <value>   Set a field value\n"
+    out = out + "  do <action> [args]    Execute an action\n"
+    out = out + "\n  Observability:\n"
+    out = out + "  status                Show CPU run state\n"
+    out = out + "  history [count]       Show command history\n"
+    out = out + "  resources             List MCP resources\n"
+    out = out + "  resource <uri>        Read resource by URI\n"
+    out = out + "  error-check           Check TRACE32 error state\n"
+    out = out + "\n  Headless/CMM:\n"
+    out = out + "  headless [options]    One-shot headless setup\n"
+    out = out + "  area [name] [--clear] Read AREA buffer\n"
+    out = out + "  cmm-commands [opts]   Query command database\n"
+    out = out + "  cmm-validate <src>    Validate CMM headless safety\n"
+    out = out + "\n  Jobs:\n"
+    out = out + "  jobs [list|get|cancel|result] [args]\n"
+    out = out + "\n  Dialog:\n"
+    out = out + "  dialog [parse|get|set|click] [args]\n"
+    out = out + "\n  quit                  Exit shell"
     out
+
+# --- Session/Core ---
 
 fn shell_use(args: [text]) -> text:
     if args.len() == 0:
         return "Usage: use <session_id>"
-    val result = cli_session_use(args[0])
-    match result:
-        Ok(msg): msg
-        Err(e): "Error: {e}"
+    bridge_to_text(bridge_session_resume(args[0]))
+
+fn shell_info(args: [text]) -> text:
+    if args.len() == 0:
+        return "Usage: info <session_id>"
+    bridge_to_text(bridge_session_info(args[0]))
 
 fn shell_core(args: [text]) -> text:
     if args.len() == 0:
         return "Usage: core <core_id>"
-    val result = cli_core_select(args[0])
-    match result:
-        Ok(msg): msg
-        Err(e): "Error: {e}"
+    bridge_to_text(bridge_core_select(args[0]))
 
-fn shell_windows() -> text:
-    val catalogs = load_catalogs(SHELL_CATALOG_PATH)
-    cli_windows_list(catalogs)
+# --- Window ---
 
 fn shell_show(args: [text]) -> text:
     if args.len() == 0:
         return "Usage: show <window_key>"
-    val catalogs = load_catalogs(SHELL_CATALOG_PATH)
-    val result = cli_window_show(args[0], catalogs)
-    match result:
-        Ok(output): output
-        Err(e): "Error: {e}"
+    bridge_to_text(bridge_window_capture(args[0]))
 
 fn shell_open(args: [text]) -> text:
     if args.len() == 0:
         return "Usage: open <window_key>"
-    val catalogs = load_catalogs(SHELL_CATALOG_PATH)
-    val result = cli_window_open(args[0], catalogs)
-    match result:
-        Ok(output): output
-        Err(e): "Error: {e}"
+    bridge_to_text(bridge_window_open(args[0]))
 
 fn shell_describe(args: [text]) -> text:
     if args.len() == 0:
         return "Usage: describe <window_key>"
-    val catalogs = load_catalogs(SHELL_CATALOG_PATH)
-    cli_window_describe(args[0], catalogs)
-
-fn shell_set(args: [text]) -> text:
-    if args.len() < 2:
-        return "Usage: set <field_key> <value>"
-    val field_key = args[0]
-    val value = args[1]
-    val catalogs = load_catalogs(SHELL_CATALOG_PATH)
-    val found = catalogs.find_field(field_key)
-    match found:
-        Some(f):
-            val session_opt = cli_current_session_info()
-            match session_opt:
-                nil: return "Error: no active session. Use 'use <id>' first."
-                Some(session):
-                    # Build set command based on field type
-                    var set_cmd = ""
-                    if field_key.starts_with("register."):
-                        val reg_name = field_key[9..]
-                        set_cmd = "Register.Set {reg_name} {value}"
-                    elif field_key.starts_with("var."):
-                        val var_name = field_key[4..]
-                        set_cmd = "Var.Set {var_name} = {value}"
-                    elif field_key.starts_with("memory."):
-                        val addr = field_key[7..]
-                        set_cmd = "Data.Set {addr} %Long {value}"
-                    else:
-                        return "Set {field_key} = {value} (type: {f.value_type}, no T32 mapping)"
-                    val result = cli_run_t32rem(session, set_cmd)
-                    match result:
-                        Ok(output): "Set {field_key} = {value}\n{output}"
-                        Err(e): "Error: {e}"
-        nil:
-            t32_err_field_not_found(field_key, catalogs.field_keys())
-
-fn shell_do(args: [text]) -> text:
-    if args.len() == 0:
-        return "Usage: do <action_key> [args...]"
-    val action_key = args[0]
-    val catalogs = load_catalogs(SHELL_CATALOG_PATH)
-    val found = catalogs.find_action(action_key)
-    match found:
-        Some(a):
-            val session_opt = cli_current_session_info()
-            match session_opt:
-                nil: return "Error: no active session. Use 'use <id>' first."
-                Some(session):
-                    var cmd = a.command_template
-                    # Substitute %0 with first arg if provided
-                    if args.len() > 1:
-                        cmd = cmd.replace("%0", args[1])
-                    if args.len() > 2:
-                        cmd = cmd.replace("%1", args[2])
-                    val result = cli_run_t32rem(session, cmd)
-                    match result:
-                        Ok(output): "Action '{a.label}': {cmd}\n{output}"
-                        Err(e): "Error: {e}"
-        nil:
-            t32_err_action_not_found(action_key, catalogs.action_keys())
-
-fn shell_cmm(args: [text]) -> text:
-    if args.len() == 0:
-        return "Usage: cmm <script_path>"
-    val script_path = args[0]
-    val session_opt = cli_current_session_info()
-    match session_opt:
-        nil: return "Error: no active session. Use 'use <id>' first."
-        Some(session):
-            val result = cli_run_t32rem(session, "DO " + script_path)
-            match result:
-                Ok(output): "CMM script: {script_path}\n{output}"
-                Err(e): "Error: {e}"
+    bridge_to_text(bridge_window_describe(args[0]))
 
 fn shell_screenshot(args: [text]) -> text:
     if args.len() == 0:
@@ -230,47 +187,245 @@ fn shell_screenshot(args: [text]) -> text:
     var output_path = "{window_key}.png"
     if args.len() > 1:
         output_path = args[1]
-    val catalogs = load_catalogs(SHELL_CATALOG_PATH)
-    val found = catalogs.find_window(window_key)
-    match found:
-        Some(w):
-            var out = "Screenshot of '{w.title}' -> {output_path}\n"
-            out = out + "Command: WinPOS 0. 0. 80. 40. ,, {w.window_key}\n"
-            out = out + "Command: SCREEN.DUMP {output_path}"
-            out
-        nil:
-            t32_err_window_not_found(window_key, catalogs.window_keys())
+    bridge_to_text(bridge_screenshot(window_key, output_path))
 
-fn shell_history() -> text:
-    if SHELL_HISTORY.len() == 0:
-        return "No command history."
-    var out = "Command history:\n"
-    var idx = 1
-    for entry in SHELL_HISTORY:
-        out = out + "  {idx}. [{entry.session_id}] {entry.command}\n"
-        idx = idx + 1
-    out
+# --- Field/Action ---
 
-# Helper: split command line on spaces (simple tokenizer)
+fn shell_set(args: [text]) -> text:
+    if args.len() < 2:
+        return "Usage: set <field_key> <value>"
+    bridge_to_text(bridge_field_set(args[0], args[1]))
+
+fn shell_do(args: [text]) -> text:
+    if args.len() == 0:
+        return "Usage: do <action_key> [args]"
+    val extra = if args.len() > 1: args[1] else: ""
+    bridge_to_text(bridge_action_invoke(args[0], extra))
+
+# --- Execution ---
+
+fn shell_cmd(args: [text]) -> text:
+    if args.len() == 0:
+        return "Usage: cmd <command> [--force]"
+    val command = args[0]
+    var force = false
+    for a in args:
+        if a == "--force":
+            force = true
+    bridge_to_text(bridge_cmd_run(command, force))
+
+fn shell_cmm(args: [text]) -> text:
+    if args.len() == 0:
+        return "Usage: cmm <script_path> [--wait] [--timeout=<ms>] [--capture-area] [--force]"
+    val script = args[0]
+    var wait = false
+    var capture_area = false
+    var force = false
+    var timeout: i64 = 0
+    for a in args:
+        if a == "--wait":
+            wait = true
+        elif a == "--capture-area":
+            capture_area = true
+        elif a == "--force":
+            force = true
+        elif a.starts_with("--timeout="):
+            timeout = shell_parse_int(a.slice(10, a.len()))
+    bridge_to_text(bridge_cmm_run(script, wait, timeout, capture_area, force))
+
+fn shell_eval(args: [text]) -> text:
+    if args.len() == 0:
+        return "Usage: eval <expression>"
+    val expr = shell_join(args)
+    bridge_to_text(bridge_eval(expr))
+
+# --- Observability ---
+
+fn shell_history_cmd(args: [text]) -> text:
+    val count = if args.len() > 0: shell_parse_int(args[0]) else: 20
+    bridge_to_text(bridge_history_tail(count))
+
+fn shell_resource(args: [text]) -> text:
+    if args.len() == 0:
+        return "Usage: resource <uri>"
+    bridge_to_text(bridge_resource_read(args[0]))
+
+# --- Headless ---
+
+fn shell_headless(args: [text]) -> text:
+    var area_name = "A000"
+    var semihost = true
+    var error_handler = true
+    for a in args:
+        if a.starts_with("--area="):
+            area_name = a.slice(7, a.len())
+        elif a == "--no-semihost":
+            semihost = false
+        elif a == "--no-error-handler":
+            error_handler = false
+    bridge_to_text(bridge_setup_headless(area_name, semihost, error_handler))
+
+fn shell_area(args: [text]) -> text:
+    var name = "A000"
+    var clear = false
+    for a in args:
+        if a == "--clear":
+            clear = true
+        elif not a.starts_with("--"):
+            name = a
+    bridge_to_text(bridge_area_read(name, clear))
+
+fn shell_cmm_commands(args: [text]) -> text:
+    var group = ""
+    var search = ""
+    for a in args:
+        if a.starts_with("--group="):
+            group = a.slice(8, a.len())
+        elif a.starts_with("--search="):
+            search = a.slice(9, a.len())
+    bridge_to_text(bridge_cmm_commands(group, search))
+
+fn shell_cmm_validate(args: [text]) -> text:
+    if args.len() == 0:
+        return "Usage: cmm-validate <source> [--mode=<headless|interactive>]"
+    val source = args[0]
+    var mode = "headless"
+    for a in args:
+        if a.starts_with("--mode="):
+            mode = a.slice(7, a.len())
+    bridge_to_text(bridge_cmm_validate(source, mode))
+
+# --- Jobs ---
+
+fn shell_jobs(args: [text]) -> text:
+    if args.len() == 0 or args[0] == "list":
+        var session_filter = ""
+        for a in args:
+            if a.starts_with("--session="):
+                session_filter = a.slice(10, a.len())
+        return bridge_to_text(bridge_job_list(session_filter))
+
+    val sub = args[0]
+    match sub:
+        "get":
+            if args.len() < 2:
+                return "Usage: jobs get <job_id>"
+            bridge_to_text(bridge_job_get(args[1]))
+        "cancel":
+            if args.len() < 2:
+                return "Usage: jobs cancel <job_id>"
+            bridge_to_text(bridge_job_cancel(args[1]))
+        "result":
+            if args.len() < 2:
+                return "Usage: jobs result <job_id>"
+            bridge_to_text(bridge_job_result(args[1]))
+        _: "Unknown jobs subcommand: {sub}. Use: list, get, cancel, result"
+
+# --- Dialog ---
+
+fn shell_dialog(args: [text]) -> text:
+    if args.len() == 0:
+        return "Usage: dialog <parse|get|set|click> <args>"
+
+    val sub = args[0]
+    match sub:
+        "parse":
+            if args.len() < 2:
+                return "Usage: dialog parse <source>"
+            bridge_to_text(bridge_dialog_parse(args[1]))
+        "get":
+            if args.len() < 2:
+                return "Usage: dialog get <label>"
+            var query_type = "string"
+            for a in args:
+                if a.starts_with("--type="):
+                    query_type = a.slice(7, a.len())
+            bridge_to_text(bridge_dialog_get(args[1], query_type))
+        "set":
+            if args.len() < 2:
+                return "Usage: dialog set <label> [value] [--action=<set|select|deselect|disable|enable>]"
+            var value = ""
+            if args.len() > 2 and not args[2].starts_with("--"):
+                value = args[2]
+            var action = "set"
+            for a in args:
+                if a.starts_with("--action="):
+                    action = a.slice(9, a.len())
+            bridge_to_text(bridge_dialog_set(args[1], action, value))
+        "click":
+            if args.len() < 2:
+                return "Usage: dialog click <label>"
+            var capture_area = false
+            var timeout: i64 = 0
+            for a in args:
+                if a == "--capture-area":
+                    capture_area = true
+                elif a.starts_with("--timeout="):
+                    timeout = shell_parse_int(a.slice(10, a.len()))
+            bridge_to_text(bridge_dialog_click(args[1], capture_area, timeout))
+        _: "Unknown dialog subcommand: {sub}. Use: parse, get, set, click"
+
+# --- Helpers ---
+
 fn split_shell(line: text) -> [text]:
     var parts: [text] = []
-    var buf = ""
-    for ch in line:
-        if (ch == " " or ch == "\t"):
-            if buf != "":
-                parts.push(buf)
-                buf = ""
+    var start = -1
+    var i = 0
+    while i < line.len():
+        val ch = line[i]
+        if (ch == ' ' or ch == '\t'):
+            if start >= 0:
+                val part = line.slice(start, i)
+                parts.push(part)
+                start = -1
         else:
-            buf = buf + ch
-    if buf != "":
-        parts.push(buf)
+            if start < 0:
+                start = i
+        i = i + 1
+    if start >= 0:
+        val part = line.slice(start, line.len())
+        parts.push(part)
     parts
 
-# Helper: trim newlines and whitespace from input
 fn trim_line(s: text) -> text:
-    s.trim()
+    var start = 0
+    while start < s.len():
+        val ch = s[start]
+        if (ch != ' ' and ch != '\t' and ch != '\r' and ch != '\n'):
+            break
+        start = start + 1
 
-# Helper: print without trailing newline
+    var end_idx = s.len()
+    while end_idx > start:
+        val ch = s[end_idx - 1]
+        if (ch != ' ' and ch != '\t' and ch != '\r' and ch != '\n'):
+            break
+        end_idx = end_idx - 1
+
+    if start >= end_idx:
+        return ""
+    s.slice(start, end_idx)
+
 fn print_no_newline(s: text):
-    # Use print for now — proper no-newline output needs rt_stdout_write
     print s
+
+fn shell_parse_int(s: text) -> i64:
+    var result: i64 = 0
+    var i = 0
+    while i < s.len():
+        val ch = s[i]
+        var digit = ch.to_int() - 48
+        if digit >= 0 and digit <= 9:
+            result = result * 10 + digit
+        i = i + 1
+    result
+
+fn shell_join(args: [text]) -> text:
+    if args.len() == 0:
+        return ""
+    var result = args[0]
+    var i = 1
+    while i < args.len():
+        result = result + " " + args[i]
+        i = i + 1
+    result

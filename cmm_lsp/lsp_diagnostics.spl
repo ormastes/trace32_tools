@@ -11,6 +11,7 @@
 export build_publish_diagnostics, diagnostic_to_json, severity_to_lsp
 
 use cmm_diagnostics.{CmmDiagnostic, CmmDiagnosticKind}
+use cmm_text_helpers.{escape_json}
 
 # ---------------------------------------------------------------------------
 # Main entry point
@@ -22,14 +23,12 @@ fn build_publish_diagnostics(uri: text, diagnostics: [CmmDiagnostic]) -> text:
     val q = "\""
 
     # Build the diagnostics array
-    var diag_array = "["
+    var diag_items: [text] = []
     var i = 0
     while i < diagnostics.len():
-        if i > 0:
-            diag_array = diag_array + ", "
-        diag_array = diag_array + diagnostic_to_json(diagnostics[i])
+        diag_items.push(diagnostic_to_json(diagnostics[i]))
         i = i + 1
-    diag_array = diag_array + "]"
+    val diag_array = "[" + diag_items.join(", ") + "]"
 
     # Build the full JSON-RPC notification
     # Using string concatenation to avoid }} escape issues
@@ -80,16 +79,16 @@ fn diagnostic_to_json(d: CmmDiagnostic) -> text:
     # Range
     s = s + q + "range" + q + ": {"
     s = s + q + "start" + q + ": {"
-    s = s + q + "line" + q + ": " + int_to_text(sl) + ", "
-    s = s + q + "character" + q + ": " + int_to_text(sc)
+    s = s + q + "line" + q + ": " + "{sl}" + ", "
+    s = s + q + "character" + q + ": " + "{sc}"
     s = s + "}, "
     s = s + q + "end" + q + ": {"
-    s = s + q + "line" + q + ": " + int_to_text(el) + ", "
-    s = s + q + "character" + q + ": " + int_to_text(ec)
+    s = s + q + "line" + q + ": " + "{el}" + ", "
+    s = s + q + "character" + q + ": " + "{ec}"
     s = s + "}"
     s = s + "}, "
     # Severity
-    s = s + q + "severity" + q + ": " + int_to_text(severity) + ", "
+    s = s + q + "severity" + q + ": " + "{severity}" + ", "
     # Source
     s = s + q + "source" + q + ": " + q + "cmm-lsp" + q + ", "
     # Message
@@ -113,27 +112,3 @@ fn severity_to_lsp(kind: CmmDiagnosticKind) -> i64:
 # Utility helpers
 # ---------------------------------------------------------------------------
 
-# Escape special characters for JSON string values.
-fn escape_json(s: text) -> text:
-    var result = ""
-    var i = 0
-    while i < s.len():
-        val ch = s[i:i + 1]
-        if ch == "\\":
-            result = result + "\\\\"
-        else if ch == "\"":
-            result = result + "\\\""
-        else if ch == "\n":
-            result = result + "\\n"
-        else if ch == "\r":
-            result = result + "\\r"
-        else if ch == "\t":
-            result = result + "\\t"
-        else:
-            result = result + ch
-        i = i + 1
-    result
-
-# Convert integer to text representation.
-fn int_to_text(n: i64) -> text:
-    "{n}"

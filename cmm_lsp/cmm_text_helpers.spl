@@ -1,0 +1,125 @@
+# CMM Text Helpers — Shared utility functions for CMM LSP
+#
+# Centralizes commonly-needed text helpers that don't have
+# exact built-in equivalents. Eliminates duplication across
+# cmm_lsp/ files.
+
+export escape_json, is_cmm_file, has_extension, has_dot
+export is_word_char, dir_of, check_gui_keywords, check_has_command
+
+# ---------------------------------------------------------------------------
+# JSON escaping
+# ---------------------------------------------------------------------------
+
+# Escape special characters in a string for JSON output.
+fn escape_json(s: text) -> text:
+    s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
+
+# ---------------------------------------------------------------------------
+# CMM file detection
+# ---------------------------------------------------------------------------
+
+# Check if a filename has a .cmm extension (case-insensitive).
+fn is_cmm_file(name: text) -> bool:
+    name.to_lower().ends_with(".cmm")
+
+# Check if a filename has any extension (contains a dot after the first char).
+fn has_extension(name: text) -> bool:
+    var i = 1
+    while i < name.len():
+        if name[i:i + 1] == ".":
+            return true
+        i = i + 1
+    false
+
+# Check if a filename contains a dot (after the first char).
+fn has_dot(name: text) -> bool:
+    has_extension(name)
+
+# ---------------------------------------------------------------------------
+# Word character check
+# ---------------------------------------------------------------------------
+
+# Check if a character is part of a word (letters, digits, dot, underscore, ampersand).
+fn is_word_char(ch: text) -> bool:
+    if ch.len() != 1:
+        return false
+    if ch >= "A" and ch <= "Z":
+        return true
+    if ch >= "a" and ch <= "z":
+        return true
+    if ch >= "0" and ch <= "9":
+        return true
+    if ch == "." or ch == "_" or ch == "&":
+        return true
+    false
+
+# ---------------------------------------------------------------------------
+# Path helpers
+# ---------------------------------------------------------------------------
+
+# Extract directory from a file path.
+fn dir_of(path: text) -> text:
+    var last_slash = -1
+    var i = 0
+    while i < path.len():
+        if path[i:i + 1] == "/":
+            last_slash = i
+        i = i + 1
+    if last_slash >= 0:
+        return path[0:last_slash]
+    ""
+
+# ---------------------------------------------------------------------------
+# CMM content checks
+# ---------------------------------------------------------------------------
+
+# Check for banned GUI keywords in CMM content.
+# Returns a list of found violations.
+fn check_gui_keywords(content: text) -> [text]:
+    val banned: [text] = ["dialog", "winpos", "winclear", "winpage", "wintabs", "framepos", "toolbar", "statusbar", "screen.always", "screen.alw", "menu.reprogram", "area.view", "autostore", "menu.rp", "toolitem", "winresume", "winfocus"]
+    var violations: [text] = []
+    val lines = content.split("\n")
+    var li = 0
+    while li < lines.len():
+        val trimmed = lines[li].trim_start()
+        if trimmed.len() == 0:
+            li = li + 1
+            continue
+        val lowered = trimmed.to_lower()
+        # Skip comments
+        if lowered.starts_with(";"):
+            li = li + 1
+            continue
+        # Skip labels (e.g. dialog_closed:) — ends with : and no spaces
+        if trimmed.ends_with(":") and not trimmed.contains(" "):
+            li = li + 1
+            continue
+        # Check each banned keyword
+        var bi = 0
+        while bi < banned.len():
+            val kw = banned[bi]
+            if lowered.starts_with(kw):
+                # Must be followed by space, dot, tab, ( or be exact match
+                if lowered.len() == kw.len():
+                    violations.push(kw)
+                else:
+                    val next_ch = lowered[kw.len():kw.len() + 1]
+                    if next_ch == " " or next_ch == "." or next_ch == "\t" or next_ch == "(":
+                        violations.push(kw)
+            bi = bi + 1
+        li = li + 1
+    violations
+
+# Check if CMM source contains a given command (case-insensitive, skipping comments).
+fn check_has_command(content: text, cmd: text) -> bool:
+    val lines = content.split("\n")
+    var li = 0
+    while li < lines.len():
+        val trimmed = lines[li].trim_start()
+        if trimmed.len() > 0 and not trimmed.starts_with(";"):
+            val lowered = trimmed.to_lower()
+            if lowered.starts_with(cmd):
+                return true
+        li = li + 1
+    false
