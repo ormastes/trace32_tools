@@ -194,7 +194,7 @@ fn t32_ctypes_get_message() -> (text, i64):
     val msg_type = rt_ptr_read_i32(type_buf, 0)
     rt_free(msg_buf)
     rt_free(type_buf)
-    (message, i64(msg_type))
+    (message, msg_type.to_i64())
 
 fn t32_ctypes_get_practice_state() -> i64:
     val state_buf = rt_alloc(8)
@@ -205,7 +205,7 @@ fn t32_ctypes_get_practice_state() -> i64:
         return -1
     val state = rt_ptr_read_i32(state_buf, 0)
     rt_free(state_buf)
-    i64(state)
+    state.to_i64()
 
 # --- Unified adapter (matches t32_run_remote signature) ---
 
